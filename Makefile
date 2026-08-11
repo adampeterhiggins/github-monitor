@@ -348,10 +348,13 @@ release-local: ## Build, publish and update the manifest from this machine (bypa
 	$(MAKE) --no-print-directory verify-release-$$V
 
 .PHONY: publish-manifest
-publish-manifest:
+publish-manifest: ## Publish ./latest.json to the releases branch
 	@set -e; \
+	if [ ! -f latest.json ]; then echo "No latest.json — generate it first (see manifest-%)."; exit 1; fi; \
 	cp latest.json /tmp/gm-latest.json; \
 	BRANCH="$$(git rev-parse --abbrev-ref HEAD)"; \
+	VER="$${VERSION_ARG:-$$(node -p 'require("/tmp/gm-latest.json").version')}"; \
+	rm -f latest.json; \
 	STASH=""; \
 	if [ -n "$$(git status --porcelain)" ]; then git stash push -u -m "make publish-manifest" >/dev/null; STASH=1; fi; \
 	if git ls-remote --exit-code --heads origin releases >/dev/null 2>&1; then \
@@ -363,11 +366,20 @@ publish-manifest:
 	fi; \
 	cp /tmp/gm-latest.json latest.json; \
 	git add latest.json; \
-	git commit -m "chore(release): manifest for v$(VERSION_ARG)" >/dev/null; \
-	git push origin releases; \
+	if git diff --cached --quiet; then \
+		echo "Manifest unchanged; nothing to publish."; \
+	else \
+		git commit -m "chore(release): manifest for v$$VER" >/dev/null; \
+		git push origin releases; \
+		echo "Published latest.json ($$VER) to the releases branch"; \
+	fi; \
 	git checkout "$$BRANCH" >/dev/null 2>&1; \
-	if [ -n "$$STASH" ]; then git stash pop >/dev/null; fi; \
-	echo "Published latest.json to the releases branch"
+	if [ -n "$$STASH" ]; then git stash pop >/dev/null 2>&1 || true; fi
+
+manifest-%: ## Generate and publish the manifest for an existing release
+	@GH_TOKEN="$$(gh auth token)" node scripts/build-update-manifest.mjs --tag "v$*" --out latest.json
+	@$(MAKE) --no-print-directory publish-manifest VERSION_ARG="$*"
+	@$(MAKE) --no-print-directory verify-release-$*
 
 ##@ CI and signing
 

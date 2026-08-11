@@ -221,12 +221,19 @@ jobs:
           # private repositories to an authenticated request. It therefore needs a
           # stable branch path, not a per-release asset URL.
           cp latest.json /tmp/latest.json
+          # Remove the untracked copy before switching branches. The releases
+          # branch tracks a latest.json of its own, and git refuses to overwrite an
+          # untracked file with a tracked one — which failed the second release,
+          # the first having taken the orphan path below where nothing existed yet.
+          rm -f latest.json
+
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           if git ls-remote --exit-code --heads origin releases >/dev/null 2>&1; then
             git fetch origin releases
-            git checkout releases
+            # -B so this works whether or not a local branch already exists.
+            git checkout -B releases origin/releases
           else
             # Orphan branch: the manifest has no relationship to the source history.
             git checkout --orphan releases
@@ -235,8 +242,35 @@ jobs:
 
           cp /tmp/latest.json latest.json
           git add latest.json
-          git commit -m "chore(release): manifest for ${{ needs.preflight.outputs.tag }}"
-          git push origin releases
+          # Re-running a release with an identical manifest would otherwise fail on
+          # an empty commit.
+          if git diff --cached --quiet; then
+            echo "Manifest unchanged; nothing to publish."
+          else
+            git commit -m "chore(release): manifest for ${{ needs.preflight.outputs.tag }}"
+            git push origin releases
+          fi
+
+      - name: Verify the manifest is live and installable
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A published release with a stale manifest is invisible to the app, so
+          # the run must not go green until the thing users read is correct.
+          URL="https://raw.githubusercontent.com/${{ github.repository }}/releases/latest.json"
+          for attempt in 1 2 3 4 5; do
+            BODY="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" "$URL" || true)"
+            VERSION="$(printf '%s' "$BODY" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{process.stdout.write(String(JSON.parse(d).version))}catch{process.stdout.write("")}})')"
+            if [[ "$VERSION" == "${{ needs.preflight.outputs.version }}" ]]; then
+              echo "Manifest serves ${VERSION}."
+              exit 0
+            fi
+            echo "Attempt ${attempt}: manifest serves '${VERSION:-<none>}', waiting for the CDN…"
+            sleep 10
+          done
+          echo "::error::The manifest never reported ${{ needs.preflight.outputs.version }}. The app will not offer this release."
+          exit 1
 
       - name: Summary
         run: |
