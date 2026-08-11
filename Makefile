@@ -261,13 +261,21 @@ release-%: ## Release an exact version end to end
 	@npm run check
 	@echo "--> Committing and tagging"
 	@$(MAKE) --no-print-directory prepare-release-$* FORCE=$(FORCE) YES=$(YES)
-	@if [ "$(PUSH)" != "1" ]; then \
+	@# Each recipe line gets its own shell, so `exit 0` here would only end this
+	@# line and make would carry on to the push. The guard therefore has to
+	@# *dispatch* rather than bail — this bug pushed a tag once already.
+	@if [ "$(PUSH)" = "1" ]; then \
+		$(MAKE) --no-print-directory push-release-$* WATCH=$(WATCH); \
+	else \
 		echo ""; \
-		echo "PUSH=0: stopping before pushing. Tag v$* exists locally."; \
-		echo "Push when ready:  git push origin HEAD --tags"; \
-		echo "Undo the tag:     git tag -d v$*"; \
-		exit 0; \
+		echo "PUSH=0: stopped before pushing. Tag v$* exists locally only."; \
+		echo "  push when ready:  git push origin HEAD && git push origin v$*"; \
+		echo "  undo the tag:     git tag -d v$*"; \
+		echo "  undo the commit:  git reset --mixed HEAD~1"; \
 	fi
+
+.PHONY: push-release
+push-release-%:
 	@echo "--> Pushing branch and tag"
 	@git push origin HEAD
 	@git push origin "v$*" --force
