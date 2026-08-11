@@ -1126,14 +1126,24 @@ export async function outstandingWork(
   };
 }
 
-export async function syncProblems(
-  db: Database,
-): Promise<Array<{ full_name: string; endpoint: string; status: string; error: string | null }>> {
-  return db.select(
-    `SELECT r.full_name, s.endpoint, s.status, s.error
+export interface SyncProblem {
+  /** Needed to retry this exact pair rather than the whole organisation. */
+  repo_id: number;
+  full_name: string;
+  endpoint: string;
+  status: string;
+  error: string | null;
+  attempts: number;
+  last_attempt_at: string | null;
+}
+
+export async function syncProblems(db: Database): Promise<SyncProblem[]> {
+  return db.select<SyncProblem[]>(
+    `SELECT s.repo_id, r.full_name, s.endpoint, s.status, s.error,
+            s.attempts, s.last_attempt_at
      FROM sync_state s
      JOIN repos r ON r.id = s.repo_id
      WHERE s.status IN ('pending', 'error')
-     ORDER BY s.endpoint, r.full_name`,
+     ORDER BY s.status, s.endpoint, r.full_name`,
   );
 }

@@ -46,6 +46,14 @@ export interface RepoSyncController {
   /** True while any sync is running, including the whole-org one. */
   busy: boolean;
   syncRepo: (repoId: number, mode: SyncMode) => Promise<void>;
+  /**
+   * Retry one (repository, endpoint) pair — the narrowest unit of work there is.
+   * Used by the Incomplete data list, where the whole point is that only that one
+   * thing failed.
+   */
+  retryPair: (repoId: number, endpoint: EndpointId) => Promise<void>;
+  /** The pair currently being retried, as `repoId:endpoint`. */
+  activePair: string | null;
   refresh: () => void;
 }
 
@@ -61,6 +69,7 @@ export function useRepoSync(
   const { db, token, org, syncing, setSyncing, setSync, reloadSyncTime } = useApp();
   const queryClient = useQueryClient();
   const [activeRepoId, setActiveRepoId] = useState<number | null>(null);
+  const [activePair, setActivePair] = useState<string | null>(null);
 
   const idsKey = repoIds.join(",");
   const statuses = useQuery({
@@ -157,11 +166,44 @@ export function useRepoSync(
     [db, token, org, syncing, endpoints, setSyncing, setSync, reloadSyncTime, queryClient],
   );
 
+  const retryPair = useCallback(
+    async (repoId: number, endpoint: EndpointId) => {
+      if (!db || !token || !org || syncing) return;
+      setActivePair(`${repoId}:${endpoint}`);
+      setSyncing(true);
+      try {
+        await runSync({
+          db,
+          token,
+          org,
+          // `full` rather than `resume`: the user is pointing at this exact item
+          // and asking for it to be done now. Resume would reach the same result
+          // for a pending or errored pair, but only by coincidence of it not being
+          // terminal — being explicit means the button does what it says even if
+          // the status changed underneath.
+          mode: "full",
+          endpoints: [endpoint],
+          repoIds: [repoId],
+          includeArchived: true,
+          onProgress: setSync,
+        });
+        await reloadSyncTime();
+        await queryClient.invalidateQueries();
+      } finally {
+        setSyncing(false);
+        setActivePair(null);
+      }
+    },
+    [db, token, org, syncing, setSyncing, setSync, reloadSyncTime, queryClient],
+  );
+
   return {
     summaries,
     activeRepoId,
+    activePair,
     busy: syncing,
     syncRepo,
+    retryPair,
     refresh: () => void statuses.refetch(),
   };
 }

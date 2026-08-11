@@ -2,10 +2,11 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useApp, type ThemeMode } from "../lib/state/app";
 import { clearAnalytics } from "../lib/db";
-import { syncProblems } from "../lib/db/queries";
+import { syncProblems, type SyncProblem } from "../lib/db/queries";
+import { useRepoSync } from "../lib/state/repoSync";
 import { clearToken } from "../lib/auth";
 import { ENDPOINT_LABELS, type EndpointId } from "../lib/ingest/sync";
-import { Button, Callout, Card, CardHeader, DataTable, Segmented } from "../components/ui";
+import { Button, Callout, Card, CardHeader, DataTable, Segmented, Spinner, full } from "../components/ui";
 import { SyncPanel } from "../components/SyncPanel";
 import { RepoSelectionPanel } from "../components/RepoSelectionPanel";
 import { UpdatePanel } from "../components/UpdatePanel";
@@ -17,11 +18,25 @@ export function Settings() {
   const [orgInput, setOrgInput] = useState(org ?? "");
   const [notice, setNotice] = useState<string | null>(null);
 
+  const syncing = useApp((s) => s.syncing);
   const problems = useQuery({
-    queryKey: ["sync-problems"],
+    // Re-reads when a sync finishes, so a fixed item leaves the list by itself.
+    queryKey: ["sync-problems", syncing],
     enabled: db != null,
     queryFn: () => syncProblems(db!),
   });
+
+  // No repo ids needed here: this list only uses the pair-level retry.
+  const repoSync = useRepoSync([]);
+
+  const retryAll = async () => {
+    // Sequential on purpose. Each retry is itself a small sync, and running them
+    // concurrently would fight over the same rate limit and write lock.
+    for (const p of problems.data ?? []) {
+      await repoSync.retryPair(p.repo_id, p.endpoint as EndpointId);
+    }
+    await problems.refetch();
+  };
 
   return (
     <PageShell
@@ -78,7 +93,21 @@ export function Settings() {
             title="Incomplete data"
             subtitle="Repositories where a sync did not complete"
             actions={
-              <Button onClick={() => void problems.refetch()}>Refresh</Button>
+              <>
+                {(problems.data?.length ?? 0) > 0 ? (
+                  <Button
+                    variant="primary"
+                    disabled={repoSync.busy}
+                    onClick={() => void retryAll()}
+                    title="Retry every item below, one at a time"
+                  >
+                    Retry all ({full(problems.data?.length ?? 0)})
+                  </Button>
+                ) : null}
+                <Button disabled={repoSync.busy} onClick={() => void problems.refetch()}>
+                  Refresh
+                </Button>
+              </>
             }
           />
           <DataTable
@@ -96,8 +125,44 @@ export function Settings() {
               {
                 key: "status",
                 header: "Status",
-                render: (r) =>
-                  r.status === "pending" ? "Still computing on GitHub" : (r.error ?? r.status),
+                render: (r: SyncProblem) => (
+                  <span
+                    title={
+                      r.last_attempt_at
+                        ? `${full(r.attempts)} attempt${r.attempts === 1 ? "" : "s"}, last ${new Date(r.last_attempt_at).toLocaleString("en-GB")}`
+                        : undefined
+                    }
+                  >
+                    {r.status === "pending" ? "Still computing on GitHub" : (r.error ?? r.status)}
+                  </span>
+                ),
+              },
+              {
+                key: "retry",
+                header: "",
+                align: "right",
+                width: "90px",
+                render: (r: SyncProblem) => {
+                  const active = repoSync.activePair === `${r.repo_id}:${r.endpoint}`;
+                  return active ? (
+                    <span className="flex items-center justify-end gap-1.5 text-[11px] text-ink">
+                      <Spinner /> retrying
+                    </span>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      disabled={repoSync.busy}
+                      onClick={() => void repoSync.retryPair(r.repo_id, r.endpoint as EndpointId)}
+                      title={
+                        r.status === "pending"
+                          ? "Ask GitHub again — it may have finished computing by now"
+                          : "Retry just this item"
+                      }
+                    >
+                      Retry
+                    </Button>
+                  );
+                },
               },
             ]}
           />

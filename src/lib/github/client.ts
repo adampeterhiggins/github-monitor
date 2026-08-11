@@ -76,6 +76,18 @@ export interface ClientEvents {
   onStatsPending?: (info: { path: string; attempt: number; waitMs: number }) => void;
 }
 
+/**
+ * Read a body that is only used for diagnostics. A failure here must not replace
+ * the status code we are actually reporting on.
+ */
+async function safeText(res: Response): Promise<string> {
+  try {
+    return await res.text();
+  } catch {
+    return "";
+  }
+}
+
 const sleep = (ms: number, signal?: AbortSignal) =>
   new Promise<void>((resolve, reject) => {
     if (signal?.aborted) return reject(new DOMException("Aborted", "AbortError"));
@@ -264,7 +276,7 @@ export class GitHubClient {
           const retryAfter = res.headers.get("retry-after");
           const remaining = res.headers.get("x-ratelimit-remaining");
           const isPrimary = remaining === "0";
-          const bodyText = await res.text();
+          const bodyText = await safeText(res);
 
           // A 403 that is not a limit is a genuine permission problem.
           if (!retryAfter && !isPrimary) {
@@ -316,13 +328,38 @@ export class GitHubClient {
         }
 
         if (!res.ok && res.status !== 202) {
-          const bodyText = await res.text();
+          const bodyText = await safeText(res);
           throw new GitHubError(`GitHub ${res.status} on ${path}`, res.status, path, bodyText);
         }
 
         // 202 carries an empty or `{}` body; hand the status back for `stats` to poll on.
-        const text = await res.text();
-        const data = text ? (JSON.parse(text) as T) : null;
+        let text: string;
+        try {
+          text = await res.text();
+        } catch (err) {
+          // The request succeeded and only the body stream failed — reqwest reports
+          // this as "error decoding response body". It is transient, and was being
+          // surfaced as a permanent sync failure because the retry loop above only
+          // covered the fetch itself. Larger payloads (workflow runs, branches) hit
+          // it most often.
+          if ((err as Error)?.name === "AbortError") throw err;
+          lastError = err;
+          if (attempt === maxAttempts) break;
+          await sleep(2 ** attempt * 500, options.signal);
+          continue;
+        }
+
+        let data: T | null;
+        try {
+          data = text ? (JSON.parse(text) as T) : null;
+        } catch (err) {
+          // Truncated JSON is the same transient failure wearing a different hat.
+          lastError = err;
+          if (attempt === maxAttempts) break;
+          await sleep(2 ** attempt * 500, options.signal);
+          continue;
+        }
+
         return { status: res.status, data, etag, notModified: false, nextUrl, lastPage };
       } finally {
         release();
