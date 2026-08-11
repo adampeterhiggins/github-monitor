@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { useApp } from "../lib/state/app";
+import { activeRepoIds, myRepoIds, useRepoSelectionData } from "../lib/repoSelection";
 import { Button, Checkbox, Dropdown, full } from "./ui";
 import type { RepoRow } from "../lib/db/queries";
 
@@ -11,6 +12,7 @@ export function RepoFilter() {
   const repos = useApp((s) => s.repos);
   const selected = useApp((s) => s.selectedRepoIds);
   const setSelectedRepos = useApp((s) => s.setSelectedRepos);
+  const { mine, login } = useRepoSelectionData();
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
 
@@ -67,17 +69,20 @@ export function RepoFilter() {
             <Button
               variant="ghost"
               title="Repositories pushed to in the last 12 months"
-              onClick={() => {
-                const cutoff = new Date(Date.now() - 365 * 86_400_000).toISOString();
-                apply(
-                  repos
-                    .filter((r) => r.archived === 0 && (r.pushed_at ?? "") >= cutoff)
-                    .map((r) => r.id),
-                );
-              }}
+              onClick={() => apply(activeRepoIds(repos, 12))}
             >
               Active only
             </Button>
+            {login ? (
+              <Button
+                variant="ghost"
+                title={`Repositories with a cached commit by ${login}`}
+                disabled={mine.size === 0}
+                onClick={() => apply(myRepoIds(repos, mine))}
+              >
+                Mine
+              </Button>
+            ) : null}
           </div>
         </div>
 

@@ -1,5 +1,5 @@
 import type Database from "@tauri-apps/plugin-sql";
-import { bulkInsert } from "../db";
+import { bulkInsert, replaceRepoRows, withWriteLock } from "../db";
 import { currentWeekStart, dayKey, weeksEndingAt } from "../agg/weeks";
 import type {
   GhBranch,
@@ -19,58 +19,72 @@ import type {
   GhWorkflowRun,
 } from "../github/types";
 
-export async function writeRepos(db: Database, owner: string, repos: GhRepo[]): Promise<void> {
-  await bulkInsert(db, {
-    table: "repos",
-    columns: [
-      "id",
-      "owner",
-      "name",
-      "full_name",
-      "private",
-      "fork",
-      "archived",
-      "default_branch",
-      "language",
-      "size_kb",
-      "stars",
-      "forks",
-      "open_issues",
-      "can_push",
-      "created_at",
-      "pushed_at",
-      "html_url",
-      "description",
-    ],
-    conflictColumns: ["id"],
-    rows: repos.map((r) => [
-      r.id,
-      owner,
-      r.name,
-      r.full_name,
-      r.private ? 1 : 0,
-      r.fork ? 1 : 0,
-      r.archived ? 1 : 0,
-      r.default_branch ?? null,
-      r.language ?? null,
-      r.size ?? 0,
-      r.stargazers_count ?? 0,
-      r.forks_count ?? 0,
-      r.open_issues_count ?? 0,
-      r.permissions?.push ? 1 : 0,
-      r.created_at ?? null,
-      r.pushed_at ?? null,
-      r.html_url ?? null,
-      r.description ?? null,
-    ]),
-  });
+/**
+ * Payload -> rows.
+ *
+ * Every multi-statement write goes through `withWriteLock` (or
+ * `replaceRepoRows`, which uses it). That is not cosmetic: the sync writes
+ * several repositories concurrently, and this plugin's connection pool makes
+ * real transactions unavailable — see the long note in ../db/index.ts.
+ *
+ * Weekly rows where every measure is zero are dropped on write; GitHub pads its
+ * series with empty weeks and keeping them would multiply row counts for nothing.
+ */
 
-  // Default new repos to selected, without disturbing existing choices.
-  await bulkInsert(db, {
-    table: "repo_selection",
-    columns: ["repo_id", "included"],
-    rows: repos.map((r) => [r.id, 1]),
-    onConflict: "ignore",
+export async function writeRepos(db: Database, owner: string, repos: GhRepo[]): Promise<void> {
+  await withWriteLock(async () => {
+    await bulkInsert(db, {
+      table: "repos",
+      columns: [
+        "id",
+        "owner",
+        "name",
+        "full_name",
+        "private",
+        "fork",
+        "archived",
+        "default_branch",
+        "language",
+        "size_kb",
+        "stars",
+        "forks",
+        "open_issues",
+        "can_push",
+        "created_at",
+        "pushed_at",
+        "html_url",
+        "description",
+      ],
+      conflictColumns: ["id"],
+      rows: repos.map((r) => [
+        r.id,
+        owner,
+        r.name,
+        r.full_name,
+        r.private ? 1 : 0,
+        r.fork ? 1 : 0,
+        r.archived ? 1 : 0,
+        r.default_branch ?? null,
+        r.language ?? null,
+        r.size ?? 0,
+        r.stargazers_count ?? 0,
+        r.forks_count ?? 0,
+        r.open_issues_count ?? 0,
+        r.permissions?.push ? 1 : 0,
+        r.created_at ?? null,
+        r.pushed_at ?? null,
+        r.html_url ?? null,
+        r.description ?? null,
+      ]),
+    });
+
+    // Default new repos to selected, without disturbing existing choices.
+    await bulkInsert(db, {
+      table: "repo_selection",
+      columns: ["repo_id", "included"],
+      rows: repos.map((r) => [r.id, 1]),
+      onConflict: "ignore",
+    });
   });
 }
 
@@ -79,7 +93,7 @@ export async function writeContributorStats(
   repoId: number,
   stats: GhContributorStats[],
 ): Promise<void> {
-  const authors = new Map<string, GhContributorStats["author"]>();
+  const authors = new Map<string, NonNullable<GhContributorStats["author"]>>();
   const rows: unknown[][] = [];
 
   for (const entry of stats) {
@@ -95,28 +109,30 @@ export async function writeContributorStats(
     }
   }
 
-  if (authors.size) {
-    await bulkInsert(db, {
-      table: "contributors",
-      columns: ["login", "gh_id", "avatar_url", "html_url", "type"],
-      conflictColumns: ["login"],
-      rows: [...authors.values()].map((a) => [
-        a!.login,
-        a!.id ?? null,
-        a!.avatar_url ?? null,
-        a!.html_url ?? null,
-        a!.type ?? null,
-      ]),
-    });
-  }
+  await withWriteLock(async () => {
+    if (authors.size) {
+      await bulkInsert(db, {
+        table: "contributors",
+        columns: ["login", "gh_id", "avatar_url", "html_url", "type"],
+        conflictColumns: ["login"],
+        rows: [...authors.values()].map((a) => [
+          a.login,
+          a.id ?? null,
+          a.avatar_url ?? null,
+          a.html_url ?? null,
+          a.type ?? null,
+        ]),
+      });
+    }
 
-  // Replace rather than merge: GitHub may restate history (rebases, force pushes).
-  await db.execute("DELETE FROM contributor_weeks WHERE repo_id = $1", [repoId]);
-  await bulkInsert(db, {
-    table: "contributor_weeks",
-    columns: ["repo_id", "login", "week", "commits", "additions", "deletions"],
-    conflictColumns: ["repo_id", "login", "week"],
-    rows,
+    // Replace rather than merge: GitHub may restate history (rebases, force pushes).
+    await db.execute("DELETE FROM contributor_weeks WHERE repo_id = $1", [repoId]);
+    await bulkInsert(db, {
+      table: "contributor_weeks",
+      columns: ["repo_id", "login", "week", "commits", "additions", "deletions"],
+      conflictColumns: ["repo_id", "login", "week"],
+      rows,
+    });
   });
 }
 
@@ -131,9 +147,7 @@ export async function writeCommitActivity(
       if (commits > 0) rows.push([repoId, week.week, dow, commits]);
     });
   }
-  await db.execute("DELETE FROM commit_activity WHERE repo_id = $1", [repoId]);
-  await bulkInsert(db, {
-    table: "commit_activity",
+  await replaceRepoRows(db, "commit_activity", repoId, {
     columns: ["repo_id", "week", "dow", "commits"],
     conflictColumns: ["repo_id", "week", "dow"],
     rows,
@@ -160,9 +174,7 @@ export async function writeParticipation(
     if (all === 0 && owner === 0) continue;
     rows.push([repoId, weeks[i], all, owner]);
   }
-  await db.execute("DELETE FROM participation WHERE repo_id = $1", [repoId]);
-  await bulkInsert(db, {
-    table: "participation",
+  await replaceRepoRows(db, "participation", repoId, {
     columns: ["repo_id", "week", "all_commits", "owner_commits"],
     conflictColumns: ["repo_id", "week"],
     rows,
@@ -178,9 +190,7 @@ export async function writeCodeFrequency(
     .filter(([, a, d]) => a !== 0 || d !== 0)
     // GitHub returns deletions negative; stored positive and signed at render time.
     .map(([week, a, d]) => [repoId, week, a, Math.abs(d)]);
-  await db.execute("DELETE FROM code_frequency WHERE repo_id = $1", [repoId]);
-  await bulkInsert(db, {
-    table: "code_frequency",
+  await replaceRepoRows(db, "code_frequency", repoId, {
     columns: ["repo_id", "week", "additions", "deletions"],
     conflictColumns: ["repo_id", "week"],
     rows,
@@ -192,10 +202,10 @@ export async function writePunchCard(
   repoId: number,
   data: GhPunchCard[],
 ): Promise<void> {
-  const rows = data.filter(([, , c]) => c > 0).map(([dow, hour, commits]) => [repoId, dow, hour, commits]);
-  await db.execute("DELETE FROM punchcard WHERE repo_id = $1", [repoId]);
-  await bulkInsert(db, {
-    table: "punchcard",
+  const rows = data
+    .filter(([, , c]) => c > 0)
+    .map(([dow, hour, commits]) => [repoId, dow, hour, commits]);
+  await replaceRepoRows(db, "punchcard", repoId, {
     columns: ["repo_id", "dow", "hour", "commits"],
     conflictColumns: ["repo_id", "dow", "hour"],
     rows,
@@ -219,12 +229,14 @@ export async function writeTraffic(
   for (const c of clones?.clones ?? []) {
     rows.push([repoId, "clone", dayKey(new Date(c.timestamp)), c.count, c.uniques]);
   }
-  await bulkInsert(db, {
-    table: "traffic_daily",
-    columns: ["repo_id", "kind", "day", "count", "uniques"],
-    conflictColumns: ["repo_id", "kind", "day"],
-    rows,
-  });
+  await withWriteLock(() =>
+    bulkInsert(db, {
+      table: "traffic_daily",
+      columns: ["repo_id", "kind", "day", "count", "uniques"],
+      conflictColumns: ["repo_id", "kind", "day"],
+      rows,
+    }),
+  );
 }
 
 export async function writeTrafficBreakdown(
@@ -234,22 +246,24 @@ export async function writeTrafficBreakdown(
   referrers: GhTrafficReferrer[] | null,
 ): Promise<void> {
   const today = dayKey(new Date());
-  if (paths?.length) {
-    await bulkInsert(db, {
-      table: "traffic_paths",
-      columns: ["repo_id", "snapshot_day", "path", "title", "count", "uniques"],
-      conflictColumns: ["repo_id", "snapshot_day", "path"],
-      rows: paths.map((p) => [repoId, today, p.path, p.title ?? null, p.count, p.uniques]),
-    });
-  }
-  if (referrers?.length) {
-    await bulkInsert(db, {
-      table: "traffic_referrers",
-      columns: ["repo_id", "snapshot_day", "referrer", "count", "uniques"],
-      conflictColumns: ["repo_id", "snapshot_day", "referrer"],
-      rows: referrers.map((r) => [repoId, today, r.referrer, r.count, r.uniques]),
-    });
-  }
+  await withWriteLock(async () => {
+    if (paths?.length) {
+      await bulkInsert(db, {
+        table: "traffic_paths",
+        columns: ["repo_id", "snapshot_day", "path", "title", "count", "uniques"],
+        conflictColumns: ["repo_id", "snapshot_day", "path"],
+        rows: paths.map((p) => [repoId, today, p.path, p.title ?? null, p.count, p.uniques]),
+      });
+    }
+    if (referrers?.length) {
+      await bulkInsert(db, {
+        table: "traffic_referrers",
+        columns: ["repo_id", "snapshot_day", "referrer", "count", "uniques"],
+        conflictColumns: ["repo_id", "snapshot_day", "referrer"],
+        rows: referrers.map((r) => [repoId, today, r.referrer, r.count, r.uniques]),
+      });
+    }
+  });
 }
 
 export async function writeCommunity(
@@ -259,6 +273,7 @@ export async function writeCommunity(
 ): Promise<void> {
   const f = profile.files ?? {};
   const has = (k: string) => (f[k] ? 1 : 0);
+  // Single statement: no lock needed.
   await db.execute(
     `INSERT INTO community (repo_id, health, has_readme, has_license, has_coc, has_contrib,
                             has_issue_tpl, has_pr_tpl, has_security, has_desc, updated_at)
@@ -286,10 +301,17 @@ export async function writeCommunity(
 }
 
 export async function writeForks(db: Database, repoId: number, forks: GhFork[]): Promise<void> {
-  await db.execute("DELETE FROM forks WHERE repo_id = $1", [repoId]);
-  await bulkInsert(db, {
-    table: "forks",
-    columns: ["repo_id", "fork_id", "full_name", "owner_login", "html_url", "created_at", "pushed_at", "stars"],
+  await replaceRepoRows(db, "forks", repoId, {
+    columns: [
+      "repo_id",
+      "fork_id",
+      "full_name",
+      "owner_login",
+      "html_url",
+      "created_at",
+      "pushed_at",
+      "stars",
+    ],
     conflictColumns: ["repo_id", "fork_id"],
     rows: forks.map((f) => [
       repoId,
@@ -309,9 +331,7 @@ export async function writeBranches(
   repoId: number,
   branches: GhBranch[],
 ): Promise<void> {
-  await db.execute("DELETE FROM branches WHERE repo_id = $1", [repoId]);
-  await bulkInsert(db, {
-    table: "branches",
+  await replaceRepoRows(db, "branches", repoId, {
     columns: ["repo_id", "name", "protected"],
     conflictColumns: ["repo_id", "name"],
     rows: branches.map((b) => [repoId, b.name, b.protected ? 1 : 0]),
@@ -342,14 +362,12 @@ export async function writeDependencies(
       ecosystem = name.slice(0, colon);
       name = name.slice(colon + 1);
     }
-    const key = `${ecosystem} ${name}`;
+    const key = `${ecosystem} ${name}`;
     if (seen.has(key)) continue;
     seen.add(key);
     rows.push([repoId, ecosystem, name, pkg.versionInfo ?? null]);
   }
-  await db.execute("DELETE FROM dependencies WHERE repo_id = $1", [repoId]);
-  await bulkInsert(db, {
-    table: "dependencies",
+  await replaceRepoRows(db, "dependencies", repoId, {
     columns: ["repo_id", "ecosystem", "package", "version"],
     conflictColumns: ["repo_id", "ecosystem", "package"],
     rows,
@@ -364,7 +382,9 @@ export async function writeWorkflowRuns(
   const rows = runs.map((r) => {
     const started = r.run_started_at ?? r.created_at;
     const duration =
-      started && r.updated_at ? new Date(r.updated_at).getTime() - new Date(started).getTime() : null;
+      started && r.updated_at
+        ? new Date(r.updated_at).getTime() - new Date(started).getTime()
+        : null;
     return [
       repoId,
       r.id,
@@ -380,22 +400,24 @@ export async function writeWorkflowRuns(
       duration != null && duration >= 0 ? duration : null,
     ];
   });
-  await bulkInsert(db, {
-    table: "workflow_runs",
-    columns: [
-      "repo_id",
-      "run_id",
-      "workflow_id",
-      "name",
-      "event",
-      "status",
-      "conclusion",
-      "created_at",
-      "started_at",
-      "updated_at",
-      "duration_ms",
-    ],
-    conflictColumns: ["repo_id", "run_id"],
-    rows,
-  });
+  await withWriteLock(() =>
+    bulkInsert(db, {
+      table: "workflow_runs",
+      columns: [
+        "repo_id",
+        "run_id",
+        "workflow_id",
+        "name",
+        "event",
+        "status",
+        "conclusion",
+        "created_at",
+        "started_at",
+        "updated_at",
+        "duration_ms",
+      ],
+      conflictColumns: ["repo_id", "run_id"],
+      rows,
+    }),
+  );
 }

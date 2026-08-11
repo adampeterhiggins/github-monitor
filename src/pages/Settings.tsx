@@ -7,6 +7,7 @@ import { clearToken } from "../lib/auth";
 import { ENDPOINT_LABELS, type EndpointId } from "../lib/ingest/sync";
 import { Button, Callout, Card, CardHeader, DataTable, Segmented } from "../components/ui";
 import { SyncPanel } from "../components/SyncPanel";
+import { RepoSelectionPanel } from "../components/RepoSelectionPanel";
 import { PageShell } from "../components/PageShell";
 
 export function Settings() {
@@ -29,6 +30,8 @@ export function Settings() {
       requiresData={false}
     >
       <div className="mx-auto flex max-w-3xl flex-col gap-4">
+        <RepoSelectionPanel />
+
         <SyncPanel />
 
         <Card>

@@ -26,6 +26,7 @@ export function Network() {
       subtitle={`Branch and fork topology across ${full(scope.repoIds.length)} ${
         scope.repoIds.length === 1 ? "repository" : "repositories"
       }`}
+      userFilter="none"
     >
       <div className="flex flex-col gap-4">
         <Callout>

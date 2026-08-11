@@ -47,11 +47,17 @@ export function Contributors() {
   const [limit, setLimit] = useState(24);
 
   const totals = useScopedQuery("contrib-totals", scope, (db) =>
-    contributorWeeklyTotals(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek),
+    contributorWeeklyTotals(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek, scope.logins),
   );
 
   const perLogin = useScopedQuery("contrib-by-login", scope, (db) =>
-    contributorWeeklyByLogin(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek),
+    contributorWeeklyByLogin(
+      db,
+      scope.repoIds,
+      scope.range.fromWeek,
+      scope.range.toWeek,
+      scope.logins,
+    ),
   );
 
   const meta = useScopedQuery("contrib-meta", scope, (db) => listContributorMeta(db), {
@@ -127,11 +133,15 @@ export function Contributors() {
   return (
     <PageShell
       title="Contributors"
+      userFilter="full"
       subtitle={
         <>
           Contributions per week across{" "}
           <strong className="font-medium text-ink">{full(selectedRepoCount)}</strong>{" "}
           {selectedRepoCount === 1 ? "repository" : "repositories"}, excluding merge commits
+          {scope.filteredByUser ? (
+            <> — filtered to {full(scope.logins?.length ?? 0)} selected contributors</>
+          ) : null}
         </>
       }
       filterExtra={

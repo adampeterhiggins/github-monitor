@@ -8,7 +8,10 @@ import { Card, CardHeader, ChartCard, DataTable, StatTile, full } from "../compo
 
 export function Forks() {
   const scope = useScope();
-  const forks = useScopedQuery("forks", scope, (db) => forkRows(db, scope.repoIds));
+  // Here a selected login means the *fork owner*, not a contributor; the page says so.
+  const forks = useScopedQuery("forks", scope, (db) =>
+    forkRows(db, scope.repoIds, scope.logins),
+  );
 
   const rows = forks.data ?? [];
 
@@ -30,6 +33,14 @@ export function Forks() {
       subtitle={`Forks of ${full(scope.repoIds.length)} ${
         scope.repoIds.length === 1 ? "repository" : "repositories"
       }`}
+      userFilter="partial"
+      partialUserNote={
+        <>
+          On this page the selected logins are matched against the <strong>fork owner</strong>,
+          which is a different thing from a contributor — someone can own a fork without having
+          committed, and vice versa.
+        </>
+      }
     >
       <div className="flex flex-col gap-4">
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">

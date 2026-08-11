@@ -9,7 +9,9 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
-    "verify:aggregation": "node scripts/verify-aggregation.mjs"
+    "verify:aggregation": "node scripts/verify-aggregation.mjs",
+    "test:queries": "node scripts/test-queries.mjs",
+    "check": "npm run typecheck && npm run test:queries"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",

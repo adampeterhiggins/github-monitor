@@ -7,10 +7,16 @@ export async function getDb(): Promise<Database> {
   if (!dbPromise) {
     dbPromise = (async () => {
       const db = await Database.load("sqlite:github-monitor.db");
-      // WAL keeps reads from blocking behind a long ingestion write.
+      // WAL is a property of the database file, so it holds no matter which pooled
+      // connection sets it — and it is what lets the UI keep reading during a sync.
       await db.execute("PRAGMA journal_mode = WAL");
+      // Per-connection PRAGMAs only affect whichever pooled connection served this
+      // call, so neither of the next two can be relied on globally. `busy_timeout`
+      // is best-effort; write contention is actually handled by serialising writes
+      // through `withWriteLock` below. Nothing here depends on foreign-key
+      // enforcement for correctness.
+      await db.execute("PRAGMA busy_timeout = 5000");
       await db.execute("PRAGMA foreign_keys = ON");
-      await db.execute("PRAGMA synchronous = NORMAL");
       for (const stmt of splitStatements(SCHEMA_SQL)) {
         await db.execute(stmt);
       }
@@ -102,10 +108,59 @@ export function splitStatements(sql: string): string[] {
   return statements;
 }
 
+/* ────────────────────────────────────────────────────────────────────────────
+   Why there are no BEGIN/COMMIT statements in this file
+   ────────────────────────────────────────────────────────────────────────────
+   tauri-plugin-sql connects with sqlx's `Pool::connect`, whose default is
+   max_connections = 10. Each `db.execute()` therefore borrows an arbitrary
+   connection from that pool, and a transaction opened by one `execute("BEGIN")`
+   is invisible to the next call if it lands elsewhere.
+
+   Issuing BEGIN / COMMIT as separate execute() calls produced two failures in
+   practice, both seen while syncing concurrently:
+     - "cannot start a transaction within a transaction" (two BEGINs on one
+        connection, from two repositories being written at once)
+     - "cannot commit - no transaction is active"        (COMMIT on a connection
+        that never saw the BEGIN)
+
+   So multi-statement atomicity is not available here. Instead:
+     - each write is a single statement, which SQLite makes atomic on its own;
+       `bulkInsert` batches many rows into one multi-row INSERT for this reason;
+     - a delete-then-repopulate pair runs under `withWriteLock` so the two
+       statements stay adjacent and concurrent writers do not interleave.
+
+   The residual risk is a reader observing a repository mid-replacement and
+   briefly seeing fewer rows. That is a transient during sync, not corruption,
+   and a failed write is recorded in `sync_state` and retried next sync.
+   ──────────────────────────────────────────────────────────────────────────── */
+
+let writeChain: Promise<void> = Promise.resolve();
+
+/**
+ * Serialise a sequence of writes against every other sequence.
+ *
+ * Callers must not nest this: the lock is not re-entrant, because a global
+ * "already held" flag cannot distinguish a nested call from a concurrent one in
+ * a single-threaded event loop. `bulkInsert` deliberately does no locking of its
+ * own so that callers own the boundary.
+ */
+export function withWriteLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = writeChain.then(fn);
+  // Keep the chain usable even when a link rejects.
+  writeChain = run.then(
+    () => {},
+    () => {},
+  );
+  return run;
+}
+
 /**
  * SQLite's default bound-parameter ceiling is 999. Multi-row INSERTs are batched
  * to stay under it — one IPC round trip per batch instead of per row, which is the
  * difference between a usable sync and an unusable one at ~300k weekly rows.
+ *
+ * Does not open a transaction, and does not take the write lock; wrap calls in
+ * `withWriteLock` when ordering against other statements matters.
  */
 const MAX_PARAMS = 900;
 
@@ -113,9 +168,9 @@ export interface BulkInsertSpec {
   table: string;
   columns: string[];
   rows: unknown[][];
-  /** Conflict target; defaults to the table's primary key via DO UPDATE on all non-key columns. */
+  /** Conflict target; on conflict, all non-key columns are updated. */
   conflictColumns?: string[];
-  /** `replace` overwrites on conflict, `ignore` keeps the existing row, `sum` adds numeric columns. */
+  /** `replace` overwrites on conflict, `ignore` keeps the existing row. */
   onConflict?: "replace" | "ignore";
 }
 
@@ -141,31 +196,43 @@ export async function bulkInsert(db: Database, spec: BulkInsertSpec): Promise<nu
   }
 
   let written = 0;
-  await db.execute("BEGIN");
-  try {
-    for (let i = 0; i < rows.length; i += rowsPerBatch) {
-      const batch = rows.slice(i, i + rowsPerBatch);
-      const params: unknown[] = [];
-      const tupleSql: string[] = batch.map((row) => {
-        const placeholders = row.map((value) => {
-          params.push(value);
-          return `$${params.length}`;
-        });
-        return `(${placeholders.join(", ")})`;
+  for (let i = 0; i < rows.length; i += rowsPerBatch) {
+    const batch = rows.slice(i, i + rowsPerBatch);
+    const params: unknown[] = [];
+    const tupleSql: string[] = batch.map((row) => {
+      const placeholders = row.map((value) => {
+        params.push(value);
+        return `$${params.length}`;
       });
+      return `(${placeholders.join(", ")})`;
+    });
 
-      const verb =
-        mode === "replace" && !spec.conflictColumns ? "INSERT OR REPLACE INTO" : "INSERT INTO";
-      const sql = `${verb} ${table} (${columns.join(", ")}) VALUES ${tupleSql.join(", ")}${conflictClause}`;
-      await db.execute(sql, params);
-      written += batch.length;
-    }
-    await db.execute("COMMIT");
-  } catch (err) {
-    await db.execute("ROLLBACK");
-    throw err;
+    const verb =
+      mode === "replace" && !spec.conflictColumns ? "INSERT OR REPLACE INTO" : "INSERT INTO";
+    const sql = `${verb} ${table} (${columns.join(", ")}) VALUES ${tupleSql.join(", ")}${conflictClause}`;
+    await db.execute(sql, params);
+    written += batch.length;
   }
   return written;
+}
+
+/**
+ * Replace one repository's rows in a table.
+ *
+ * GitHub restates history (rebases, force pushes), so a repository's rows are
+ * replaced wholesale rather than merged. The delete and the insert are held
+ * adjacent by the write lock; see the note above on why this is not a transaction.
+ */
+export async function replaceRepoRows(
+  db: Database,
+  table: string,
+  repoId: number,
+  spec: Omit<BulkInsertSpec, "table">,
+): Promise<void> {
+  await withWriteLock(async () => {
+    await db.execute(`DELETE FROM ${table} WHERE repo_id = $1`, [repoId]);
+    await bulkInsert(db, { table, ...spec });
+  });
 }
 
 export async function setMeta(db: Database, key: string, value: string): Promise<void> {
@@ -246,13 +313,8 @@ export async function clearAnalytics(db: Database): Promise<void> {
     "issues",
     "sync_state",
   ];
-  await db.execute("BEGIN");
-  try {
+  await withWriteLock(async () => {
     for (const t of tables) await db.execute(`DELETE FROM ${t}`);
-    await db.execute("COMMIT");
-  } catch (err) {
-    await db.execute("ROLLBACK");
-    throw err;
-  }
+  });
   // traffic_daily is deliberately preserved: it holds history GitHub has dropped.
 }

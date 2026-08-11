@@ -12,15 +12,16 @@ export function Commits() {
   const scope = useScope();
 
   const weekly = useScopedQuery("commits-weekly", scope, (db) =>
-    contributorWeeklyTotals(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek),
+    contributorWeeklyTotals(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek, scope.logins),
   );
 
+  // `commit_activity` has no contributor dimension, so this one stays unfiltered.
   const daily = useScopedQuery("commits-daily", scope, (db) =>
     commitActivityDaily(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek),
   );
 
   const byRepo = useScopedQuery("commits-by-repo", scope, (db) =>
-    commitsByRepo(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek),
+    commitsByRepo(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek, scope.logins),
   );
 
   const axisWeeks = useMemo(
@@ -62,6 +63,16 @@ export function Commits() {
       subtitle={`Commit volume across ${full(scope.repoIds.length)} ${
         scope.repoIds.length === 1 ? "repository" : "repositories"
       }`}
+      userFilter="partial"
+      partialUserNote={
+        <>
+          The contributor filter applies to <strong>Commits over time</strong>, the stat tiles and
+          the repository breakdowns. It does <strong>not</strong> apply to{" "}
+          <strong>Commits by day of week</strong>: that comes from GitHub's{" "}
+          <code>commit_activity</code> endpoint, which reports totals per day with no
+          per-contributor breakdown. That chart continues to show all contributors.
+        </>
+      }
     >
       <div className="flex flex-col gap-4">
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -116,9 +127,11 @@ export function Commits() {
           <ChartCard
             title="Commits by day of week"
             subtitle={
-              dayDataTruncated
-                ? "GitHub supplies day-level detail for the last 52 weeks only"
-                : "Summed across the selected period"
+              scope.filteredByUser
+                ? "All contributors — GitHub supplies no per-contributor day breakdown"
+                : dayDataTruncated
+                  ? "GitHub supplies day-level detail for the last 52 weeks only"
+                  : "Summed across the selected period"
             }
             loading={daily.isFetching}
             table={

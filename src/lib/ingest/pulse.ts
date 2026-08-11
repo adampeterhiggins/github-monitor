@@ -1,6 +1,6 @@
 import type Database from "@tauri-apps/plugin-sql";
 import type { GitHubClient } from "../github/client";
-import { bulkInsert } from "../db";
+import { bulkInsert, withWriteLock } from "../db";
 
 /**
  * Pulse has no dedicated REST endpoint, so it is derived from pull requests and
@@ -206,30 +206,42 @@ async function syncRepoPulse(
     cursor = conn.pageInfo.endCursor;
   }
 
-  await bulkInsert(db, {
-    table: "pull_requests",
-    columns: [
-      "repo_id",
-      "number",
-      "author",
-      "title",
-      "state",
-      "created_at",
-      "merged_at",
-      "closed_at",
-      "additions",
-      "deletions",
-      "comments",
-      "reviews",
-    ],
-    conflictColumns: ["repo_id", "number"],
-    rows: prRows,
-  });
+  // Serialised against the other concurrent repo writers; see ../db/index.ts.
+  await withWriteLock(async () => {
+    await bulkInsert(db, {
+      table: "pull_requests",
+      columns: [
+        "repo_id",
+        "number",
+        "author",
+        "title",
+        "state",
+        "created_at",
+        "merged_at",
+        "closed_at",
+        "additions",
+        "deletions",
+        "comments",
+        "reviews",
+      ],
+      conflictColumns: ["repo_id", "number"],
+      rows: prRows,
+    });
 
-  await bulkInsert(db, {
-    table: "issues",
-    columns: ["repo_id", "number", "author", "title", "state", "created_at", "closed_at", "comments"],
-    conflictColumns: ["repo_id", "number"],
-    rows: issueRows,
+    await bulkInsert(db, {
+      table: "issues",
+      columns: [
+        "repo_id",
+        "number",
+        "author",
+        "title",
+        "state",
+        "created_at",
+        "closed_at",
+        "comments",
+      ],
+      conflictColumns: ["repo_id", "number"],
+      rows: issueRows,
+    });
   });
 }

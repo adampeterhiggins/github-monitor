@@ -50,6 +50,7 @@ export function Traffic() {
       subtitle={`Views and clones across ${full(scope.repoIds.length)} ${
         scope.repoIds.length === 1 ? "repository" : "repositories"
       }`}
+      userFilter="none"
     >
       <div className="flex flex-col gap-4">
         <Callout tone={series.length === 0 ? "warning" : "info"}>

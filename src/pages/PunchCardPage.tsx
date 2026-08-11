@@ -42,6 +42,7 @@ export function PunchCardPage() {
       subtitle={`When commits land across ${full(scope.repoIds.length)} ${
         scope.repoIds.length === 1 ? "repository" : "repositories"
       }`}
+      userFilter="none"
     >
       <div className="flex flex-col gap-4">
         <Callout>

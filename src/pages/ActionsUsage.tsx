@@ -61,6 +61,7 @@ export function ActionsUsage() {
       subtitle={`Workflow run volume across ${full(scope.repoIds.length)} ${
         scope.repoIds.length === 1 ? "repository" : "repositories"
       }`}
+      userFilter="none"
     >
       <div className="flex flex-col gap-4">
         <Callout>

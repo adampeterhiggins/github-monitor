@@ -7,7 +7,7 @@ import { Button, Callout, Card, Spinner } from "../components/ui";
 
 /** First-run: get a token, then pick the organisation to analyse. */
 export function Setup() {
-  const { token, setToken, setOrg } = useApp();
+  const { token, setToken, setLogin, setOrg } = useApp();
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -24,6 +24,7 @@ export function Setup() {
       const { login, scopeHeader } = await client.verify();
       const scopes = summariseScopes(login, scopeHeader);
       await setToken(candidate);
+      await setLogin(login);
       const list = await listOrgs(client);
       setOrgs(list);
       setInfo(

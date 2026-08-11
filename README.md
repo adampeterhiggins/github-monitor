@@ -2,7 +2,8 @@
 
 A native macOS app that gives you GitHub's **Insights** analytics across a whole
 organisation instead of one repository at a time. Every page GitHub offers per repo
-is here, with **repository turned into a filter** you slice by.
+is here, with **repository turned into a filter** you slice by — plus a
+**contributor filter**, which GitHub has no equivalent of.
 
 Tauri v2 shell (real `.app`, WKWebView, ~10 MB) with all logic in TypeScript.
 
@@ -46,6 +47,42 @@ and the app says so rather than rendering blank charts.
 | Forks | `forks` | |
 | Actions usage | `actions/runs` | Wall-clock elapsed, not billable minutes |
 | Actions performance | `actions/runs` | p50/p90/p99 duration, failure rates |
+
+## Filters
+
+**Repository.** Curate the set in **Settings → Repositories** (a checkbox list with
+per-repo commit counts), or change it quickly from the dropdown on any page. Both
+write the same persisted selection. Presets: select all, clear, active in the last
+12 months, has any activity, and **"Repositories I've committed in"** — which reads
+your own commits out of the local cache, so it is instant and costs no API quota.
+It needs a sync to have run first, and says so when it hasn't.
+
+**Contributor.** Narrows pages to specific people. Because the underlying data
+varies, each page declares what it can honour rather than pretending:
+
+| Support | Pages | Why |
+|---|---|---|
+| Full | Contributors, Code frequency, Pulse | Per-contributor data exists |
+| Partial | Commits, Forks | See below |
+| Not available | Punch card, Traffic, Community, Dependency graph, Network, Actions × 2 | GitHub supplies no per-contributor breakdown |
+
+On **Commits**, everything respects the filter except *Commits by day of week*,
+which comes from `stats/commit_activity` — day totals with no contributor
+dimension. On **Forks**, a login matches the *fork owner*, which is a different
+notion from a contributor. Where the filter cannot apply, the control is visibly
+disabled with the reason; a filter that silently changed nothing would be worse
+than none.
+
+Note the deliberate asymmetry: **no repositories selected means no data**, whereas
+**no contributors selected means everyone**. Repositories are an explicit opt-in
+list; the contributor filter is a narrowing applied on top, so its empty state has
+to mean unfiltered or every page would start blank.
+
+Code frequency switches source when filtered: unfiltered it uses GitHub's repo-wide
+`code_frequency` series, filtered it uses `contributor_weeks`, the only table with
+per-person line counts. Filtered totals can therefore sit slightly below unfiltered
+ones, since the former only counts work GitHub could attribute to an account. The
+page says which source is in use.
 
 ## How it works, and what to know about the numbers
 
@@ -104,7 +141,42 @@ GitHub after 14 days** — the local table is the only way to build longer histo
 - Punch card has **no date dimension** in GitHub's API, so that page ignores the
   period filter and says so.
 
-## Verifying the numbers
+## Why there are no database transactions
+
+`tauri-plugin-sql` connects with sqlx's `Pool::connect`, whose default is
+**`max_connections = 10`**. Every `db.execute()` borrows an arbitrary connection, so
+a transaction opened by `execute("BEGIN")` is invisible to the next call if it lands
+elsewhere. Issuing `BEGIN`/`COMMIT` as separate calls produced two failures under
+concurrent sync:
+
+- `cannot start a transaction within a transaction` — two `BEGIN`s on one connection
+- `cannot commit - no transaction is active` — `COMMIT` on a connection that never saw the `BEGIN`
+
+Multi-statement atomicity therefore isn't available. Instead each write is a single
+statement (`bulkInsert` batches many rows into one multi-row `INSERT` for exactly
+this reason), and delete-then-repopulate pairs run under `withWriteLock` so they
+stay adjacent and concurrent writers don't interleave. A failed write is recorded in
+`sync_state` and retried. `scripts/test-queries.mjs` asserts no query emits
+`BEGIN`/`COMMIT`/`ROLLBACK`, so the class of bug cannot come back unnoticed.
+
+## Testing
+
+```bash
+npm run check   # typecheck + query tests
+```
+
+`npm run test:queries` runs the real query functions against a real SQLite database
+built from the real schema, via Node's built-in `node:sqlite`. No GitHub access and
+no Tauri runtime: `queries.ts` only type-imports the SQL plugin, so it can be
+bundled and driven with a thin adapter.
+
+This exists because two classes of bug are invisible to `tsc`, and both have already
+been caught by it:
+
+- a schema statement severed by a semicolon **inside a comment**, which meant the
+  `code_frequency` table silently failed to be created;
+- `listContributors` splitting one person across two rows when login casing differed,
+  while the filter matched both case-insensitively.
 
 ```bash
 GH_TOKEN=$(gh auth token) npm run verify:aggregation -- focaldata/fd-core-respondent

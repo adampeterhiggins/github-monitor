@@ -5,6 +5,7 @@ const store = new LazyStore("settings.json");
 
 const TOKEN_KEY = "github_token";
 const ORG_KEY = "org";
+const LOGIN_KEY = "github_login";
 
 /**
  * Scope names declared in src-tauri/capabilities/default.json. GUI apps launched
@@ -28,6 +29,19 @@ export async function setToken(token: string): Promise<void> {
 
 export async function clearToken(): Promise<void> {
   await store.delete(TOKEN_KEY);
+  await store.save();
+}
+
+/**
+ * The authenticated user's own login. Persisted so "repositories I've committed in"
+ * works without a round trip, and so it survives restarts.
+ */
+export async function getLogin(): Promise<string | null> {
+  return (await store.get<string>(LOGIN_KEY)) ?? null;
+}
+
+export async function setLogin(login: string): Promise<void> {
+  await store.set(LOGIN_KEY, login.trim());
   await store.save();
 }
 

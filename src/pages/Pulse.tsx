@@ -34,23 +34,31 @@ export function Pulse() {
   const periodLabel = PERIODS.find((p) => p.id === period)?.label ?? "the selected period";
 
   const summary = useScopedQuery("pulse-summary", scope, (db) =>
-    pulseSummary(db, scope.repoIds, scope.fromIso, scope.toIso, scope.range.fromWeek, scope.range.toWeek),
+    pulseSummary(
+      db,
+      scope.repoIds,
+      scope.fromIso,
+      scope.toIso,
+      scope.range.fromWeek,
+      scope.range.toWeek,
+      scope.logins,
+    ),
   );
 
   const daily = useScopedQuery("pulse-daily", scope, (db) =>
-    pulseDaily(db, scope.repoIds, scope.fromIso, scope.toIso),
+    pulseDaily(db, scope.repoIds, scope.fromIso, scope.toIso, scope.logins),
   );
 
   const byRepo = useScopedQuery("pulse-by-repo", scope, (db) =>
-    pulseByRepo(db, scope.repoIds, scope.fromIso, scope.toIso),
+    pulseByRepo(db, scope.repoIds, scope.fromIso, scope.toIso, scope.logins),
   );
 
   const authors = useScopedQuery("pulse-authors", scope, (db) =>
-    pulseAuthors(db, scope.repoIds, scope.fromIso, scope.toIso),
+    pulseAuthors(db, scope.repoIds, scope.fromIso, scope.toIso, scope.logins),
   );
 
   const durations = useScopedQuery("pulse-durations", scope, (db) =>
-    mergedPrDurations(db, scope.repoIds, scope.fromIso, scope.toIso),
+    mergedPrDurations(db, scope.repoIds, scope.fromIso, scope.toIso, scope.logins),
   );
 
   const s = summary.data;
@@ -78,6 +86,7 @@ export function Pulse() {
       subtitle={`Activity across ${full(scope.repoIds.length)} ${
         scope.repoIds.length === 1 ? "repository" : "repositories"
       } — ${periodLabel.toLowerCase()}`}
+      userFilter="full"
     >
       <div className="flex flex-col gap-4">
         <Callout>

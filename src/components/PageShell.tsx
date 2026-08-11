@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
 import { FilterBar } from "./FilterBar";
-import { EmptyState } from "./ui";
+import { Callout, EmptyState } from "./ui";
 import { useApp } from "../lib/state/app";
-import { useScope } from "../lib/hooks";
+import { useScope, type UserFilterSupport } from "../lib/hooks";
 
 /**
  * Common page frame: heading, the single filter row, then scrollable content.
@@ -15,6 +15,9 @@ export function PageShell({
   filters = true,
   filterExtra,
   requiresData = true,
+  userFilter = "full",
+  /** Shown when a contributor filter is active but this page can only partly honour it. */
+  partialUserNote,
 }: {
   title: string;
   subtitle?: ReactNode;
@@ -22,12 +25,17 @@ export function PageShell({
   filters?: boolean;
   filterExtra?: ReactNode;
   requiresData?: boolean;
+  userFilter?: UserFilterSupport;
+  partialUserNote?: ReactNode;
 }) {
   const scope = useScope();
   const lastSyncAt = useApp((s) => s.lastSyncAt);
   const repos = useApp((s) => s.repos);
 
   const blocked = requiresData && (!lastSyncAt || repos.length === 0 || scope.repoIds.length === 0);
+
+  const showPartialNote =
+    scope.filteredByUser && userFilter === "partial" && partialUserNote != null;
 
   return (
     <>
@@ -36,15 +44,13 @@ export function PageShell({
         {subtitle ? <p className="mt-0.5 text-[12.5px] text-ink-secondary">{subtitle}</p> : null}
       </header>
 
-      {filters ? <FilterBar extra={filterExtra} /> : null}
+      {filters ? <FilterBar extra={filterExtra} userFilter={userFilter} /> : null}
 
       <div className="min-h-0 flex-1 overflow-y-auto p-5">
         {blocked ? (
           <EmptyState
             title={
-              !lastSyncAt || repos.length === 0
-                ? "No data cached yet"
-                : "No repositories selected"
+              !lastSyncAt || repos.length === 0 ? "No data cached yet" : "No repositories selected"
             }
             body={
               !lastSyncAt || repos.length === 0
@@ -53,7 +59,10 @@ export function PageShell({
             }
           />
         ) : (
-          children
+          <div className="flex flex-col gap-4">
+            {showPartialNote ? <Callout tone="warning">{partialUserNote}</Callout> : null}
+            {children}
+          </div>
         )}
       </div>
     </>

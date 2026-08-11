@@ -10,7 +10,7 @@ export function CodeFrequency() {
   const scope = useScope();
 
   const weekly = useScopedQuery("code-frequency", scope, (db) =>
-    codeFrequencyWeekly(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek),
+    codeFrequencyWeekly(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek, scope.logins),
   );
 
   const axisWeeks = useMemo(
@@ -47,6 +47,8 @@ export function CodeFrequency() {
       subtitle={`Lines added and removed each week across ${full(scope.repoIds.length)} ${
         scope.repoIds.length === 1 ? "repository" : "repositories"
       }`}
+      userFilter="full"
+      partialUserNote={null}
     >
       <div className="flex flex-col gap-4">
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
@@ -62,9 +64,13 @@ export function CodeFrequency() {
 
         <ChartCard
           title="Additions and deletions over time"
-          subtitle={`Weekly from ${formatDate(scope.range.fromWeek * 1000)} to ${formatDate(
-            scope.range.toWeek * 1000,
-          )}`}
+          subtitle={
+            scope.filteredByUser
+              ? `Weekly, attributed to the selected contributors — totals may sit slightly below the unfiltered view, which counts all default-branch changes including any GitHub could not attribute to an account`
+              : `Weekly from ${formatDate(scope.range.fromWeek * 1000)} to ${formatDate(
+                  scope.range.toWeek * 1000,
+                )}`
+          }
           loading={weekly.isFetching}
           actions={
             biggest.week ? (
