@@ -59,6 +59,14 @@ export interface GhResponse<T> {
   notModified: boolean;
   /** Present on paginated responses. */
   nextUrl: string | null;
+  /**
+   * `page` of the Link rel="last" URL, when present.
+   *
+   * With `per_page=1` this is the total item count, which turns an unbounded
+   * count into a single request — used to count a person's commits in a
+   * repository without downloading them.
+   */
+  lastPage: number | null;
 }
 
 export interface ClientEvents {
@@ -198,6 +206,19 @@ export class GitHubClient {
     return null;
   }
 
+  private static parseLastPage(linkHeader: string | null): number | null {
+    if (!linkHeader) return null;
+    for (const part of linkHeader.split(",")) {
+      const m = part.match(/<([^>]+)>;\s*rel="last"/);
+      if (m) {
+        const page = new URL(m[1]).searchParams.get("page");
+        const n = page ? Number(page) : NaN;
+        if (Number.isFinite(n)) return n;
+      }
+    }
+    return null;
+  }
+
   /**
    * One HTTP round trip with retries for transient failures, primary rate limits
    * and secondary (abuse) limits. Does NOT interpret 202 — see `stats`.
@@ -230,10 +251,12 @@ export class GitHubClient {
       try {
         this.recordRateLimit(res.headers);
         const etag = res.headers.get("etag");
-        const nextUrl = GitHubClient.parseNext(res.headers.get("link"));
+        const linkHeader = res.headers.get("link");
+        const nextUrl = GitHubClient.parseNext(linkHeader);
+        const lastPage = GitHubClient.parseLastPage(linkHeader);
 
         if (res.status === 304) {
-          return { status: 304, data: null, etag: options.etag ?? null, notModified: true, nextUrl };
+          return { status: 304, data: null, etag: options.etag ?? null, notModified: true, nextUrl, lastPage };
         }
 
         // Secondary/abuse limits and exhausted primary budget both surface as 403/429.
@@ -246,7 +269,7 @@ export class GitHubClient {
           // A 403 that is not a limit is a genuine permission problem.
           if (!retryAfter && !isPrimary) {
             if (options.allowForbidden) {
-              return { status: 403, data: null, etag: null, notModified: false, nextUrl: null };
+              return { status: 403, data: null, etag: null, notModified: false, nextUrl: null, lastPage: null };
             }
             throw new GitHubError(
               `403 Forbidden on ${path}. The token likely lacks the required access.`,
@@ -275,12 +298,12 @@ export class GitHubClient {
         }
 
         if (res.status === 404 && options.allowNotFound) {
-          return { status: 404, data: null, etag: null, notModified: false, nextUrl: null };
+          return { status: 404, data: null, etag: null, notModified: false, nextUrl: null, lastPage: null };
         }
 
         // 204 means "definitively nothing", distinct from 202 "not computed yet".
         if (res.status === 204) {
-          return { status: 204, data: null, etag, notModified: false, nextUrl: null };
+          return { status: 204, data: null, etag, notModified: false, nextUrl: null, lastPage };
         }
 
         if (res.status >= 500) {
@@ -300,7 +323,7 @@ export class GitHubClient {
         // 202 carries an empty or `{}` body; hand the status back for `stats` to poll on.
         const text = await res.text();
         const data = text ? (JSON.parse(text) as T) : null;
-        return { status: res.status, data, etag, notModified: false, nextUrl };
+        return { status: res.status, data, etag, notModified: false, nextUrl, lastPage };
       } finally {
         release();
       }

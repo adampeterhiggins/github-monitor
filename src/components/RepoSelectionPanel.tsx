@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useApp } from "../lib/state/app";
-import { activeRepoIds, myRepoIds, useRepoSelectionData } from "../lib/repoSelection";
+import { activeRepoIds, useRepoSelectionData } from "../lib/repoSelection";
+import { discoverAuthorRepos, type DiscoverProgress } from "../lib/ingest/discoverAuthorRepos";
 import { GitHubClient } from "../lib/github/client";
 import { formatDate } from "../lib/agg/weeks";
 import type { RepoRow } from "../lib/db/queries";
@@ -29,12 +30,17 @@ export function RepoSelectionPanel() {
   const login = useApp((s) => s.login);
   const setLogin = useApp((s) => s.setLogin);
 
-  const { activity, mine, hasCommitData, loading } = useRepoSelectionData();
+  const { activity, myCommits, probe, hasCommitData, loading, refetchProbe } =
+    useRepoSelectionData();
+  const db = useApp((s) => s.db);
+  const bumpProbeStamp = useApp((s) => s.bumpProbeStamp);
 
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [detecting, setDetecting] = useState(false);
+  const [discovery, setDiscovery] = useState<DiscoverProgress | null>(null);
+  const discoverAbort = useRef<AbortController | null>(null);
 
   const selectedSet = useMemo(() => new Set(selected), [selected]);
 
@@ -66,26 +72,68 @@ export function RepoSelectionPanel() {
     }
   };
 
-  const selectMine = () => {
-    if (!login) return;
-    const ids = myRepoIds(repos, mine);
-    if (ids.length === 0) {
-      setNotice(
-        hasCommitData
-          ? `No cached commits by ${login} in any synced repository. If you have only just added repositories, run a sync first.`
-          : "No commit data cached yet — run a sync before using this.",
+  /**
+   * Ask GitHub which repositories the signed-in user has committed to.
+   *
+   * Deliberately not read from the local cache: that would only ever return
+   * repositories already synced, which is circular — the reason to choose
+   * repositories is to avoid syncing all of them.
+   */
+  const discoverMine = async () => {
+    if (!login || !token || !db) return;
+    const controller = new AbortController();
+    discoverAbort.current = controller;
+    setNotice(null);
+
+    const candidates = repos.filter((r) => (showArchived ? true : r.archived === 0));
+
+    try {
+      const result = await discoverAuthorRepos({
+        db,
+        token,
+        login,
+        repos: candidates,
+        signal: controller.signal,
+        onProgress: setDiscovery,
+      });
+
+      bumpProbeStamp();
+      refetchProbe();
+
+      if (result.repoIds.length === 0) {
+        setNotice(
+          `Checked ${full(result.requestsMade)} repositories and found no commits by ${login}.` +
+            (result.unreadable.length
+              ? ` ${full(result.unreadable.length)} could not be read (empty, or no access).`
+              : ""),
+        );
+        return;
+      }
+
+      apply(
+        result.repoIds,
+        `Selected ${full(result.repoIds.length)} of ${full(result.requestsMade)} repositories with commits by ${login}` +
+          (result.cancelled ? " (stopped early, partial result)." : ".") +
+          (result.unreadable.length
+            ? ` ${full(result.unreadable.length)} could not be read.`
+            : ""),
       );
-      return;
+    } catch (err) {
+      setNotice(`Could not check repositories: ${(err as Error)?.message ?? String(err)}`);
+    } finally {
+      setDiscovery(null);
+      discoverAbort.current = null;
     }
-    apply(
-      ids,
-      `Selected ${full(ids.length)} ${ids.length === 1 ? "repository" : "repositories"} with commits by ${login}.`,
-    );
   };
 
+  const myWithCommits = useMemo(
+    () => [...myCommits.values()].filter((n) => n > 0).length,
+    [myCommits],
+  );
+
   const myTotal = useMemo(
-    () => [...mine.values()].reduce((a, r) => a + Number(r.commits), 0),
-    [mine],
+    () => [...myCommits.values()].reduce((a, n) => a + n, 0),
+    [myCommits],
   );
 
   const toggleVisible = (checked: boolean) => {
@@ -111,18 +159,48 @@ export function RepoSelectionPanel() {
         </div>
       ) : null}
 
+      {discovery ? (
+        <div className="mb-3">
+          <div className="mb-1.5 flex items-center justify-between gap-3 text-[12px]">
+            <span className="flex items-center gap-2 text-ink">
+              <Spinner /> Checking repositories for your commits
+              {discovery.found > 0 ? ` — ${full(discovery.found)} found` : ""}
+            </span>
+            <span className="flex items-center gap-2">
+              <span className="tabular text-ink-secondary">
+                {full(discovery.done)} / {full(discovery.total)}
+              </span>
+              <Button variant="ghost" onClick={() => discoverAbort.current?.abort()}>
+                Stop
+              </Button>
+            </span>
+          </div>
+          <div
+            className="h-1.5 w-full overflow-hidden rounded-full"
+            style={{ background: "var(--wash-strong)" }}
+          >
+            <div
+              className="h-full rounded-full transition-[width]"
+              style={{
+                width: `${discovery.total ? Math.round((discovery.done / discovery.total) * 100) : 0}%`,
+                background: "var(--accent)",
+              }}
+            />
+          </div>
+          {discovery.current ? (
+            <p className="mt-1.5 truncate text-[11px] text-ink-muted">{discovery.current}</p>
+          ) : null}
+        </div>
+      ) : null}
+
       {/* The requested auto-populate action, plus the other useful presets. */}
       <div className="mb-3 flex flex-wrap items-center gap-1.5">
         {login ? (
           <Button
             variant="primary"
-            onClick={selectMine}
-            disabled={!hasCommitData}
-            title={
-              hasCommitData
-                ? `Select every repository with a cached commit by ${login}`
-                : "Run a sync first so there is commit data to search"
-            }
+            onClick={discoverMine}
+            disabled={discovery != null || !token}
+            title={`Ask GitHub which repositories ${login} has commits in — one request per repository, works without syncing first`}
           >
             Repositories I've committed in
           </Button>
@@ -159,10 +237,10 @@ export function RepoSelectionPanel() {
       {login ? (
         <p className="mb-3 text-[11px] text-ink-secondary">
           Signed in as <strong className="text-ink">{login}</strong>
-          {hasCommitData ? (
+          {myWithCommits > 0 ? (
             <>
               {" "}
-              — {full(mine.size)} {mine.size === 1 ? "repository" : "repositories"} with your
+              — {full(myWithCommits)} {myWithCommits === 1 ? "repository" : "repositories"} with your
               commits, {compact(myTotal)} in total.
             </>
           ) : null}
@@ -239,14 +317,18 @@ export function RepoSelectionPanel() {
             header: "My commits",
             align: "right",
             render: (r: RepoRow) => {
-              const n = Number(mine.get(r.id)?.commits ?? 0);
-              return n > 0 ? (
-                <span className="text-ink">{compact(n)}</span>
-              ) : (
-                <span className="text-ink-muted">—</span>
-              );
+              const n = myCommits.get(r.id) ?? 0;
+              if (n === 0) {
+                // A probed zero is knowledge; an absent value is simply unchecked.
+                return probe.has(r.id) ? (
+                  <span className="text-ink-muted">0</span>
+                ) : (
+                  <span className="text-ink-muted">—</span>
+                );
+              }
+              return <span className="text-ink">{compact(n)}</span>;
             },
-            sortValue: (r: RepoRow) => Number(mine.get(r.id)?.commits ?? 0),
+            sortValue: (r: RepoRow) => myCommits.get(r.id) ?? -1,
           },
           {
             key: "total",
@@ -269,12 +351,13 @@ export function RepoSelectionPanel() {
         ]}
       />
 
-      {!hasCommitData ? (
-        <p className="mt-2 text-[11px] leading-relaxed text-ink-secondary">
-          Commit columns and the activity presets read from the local cache, so they stay empty
-          until a sync has run. They cost no API requests once populated.
-        </p>
-      ) : null}
+      <p className="mt-2 text-[11px] leading-relaxed text-ink-secondary">
+        <strong className="text-ink">My commits</strong> comes from GitHub directly when you use
+        “Repositories I've committed in”, so it works before any sync; a dash means not yet
+        checked, and 0 means checked with none found. <strong className="text-ink">All commits</strong>{" "}
+        needs a sync, since GitHub only exposes full contributor statistics through its lazily
+        computed endpoints.
+      </p>
     </Card>
   );
 }

@@ -48,6 +48,9 @@ interface AppState {
   theme: ThemeMode;
   sync: SyncProgress | null;
   syncing: boolean;
+  /** Bumped after a contributor probe so cached probe reads re-run. */
+  probeStamp: number;
+  bumpProbeStamp: () => void;
 
   boot: () => Promise<void>;
   setToken: (token: string) => Promise<void>;
@@ -115,6 +118,7 @@ export const useApp = create<AppState>((set, get) => ({
   theme: readStoredTheme(),
   sync: null,
   syncing: false,
+  probeStamp: 0,
 
   boot: async () => {
     try {
@@ -217,6 +221,7 @@ export const useApp = create<AppState>((set, get) => ({
 
   setSync: (sync) => set({ sync }),
   setSyncing: (syncing) => set({ syncing }),
+  bumpProbeStamp: () => set({ probeStamp: get().probeStamp + 1 }),
 
   reloadSyncTime: async () => {
     const db = get().db;

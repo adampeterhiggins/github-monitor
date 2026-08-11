@@ -60,7 +60,7 @@ const T = (name, ok, detail) => {
 
 T(
   "schema applies cleanly",
-  sqlite.prepare("SELECT count(*) n FROM sqlite_master WHERE type = 'table'").get().n === 21,
+  sqlite.prepare("SELECT count(*) n FROM sqlite_master WHERE type = 'table'").get().n === 22,
 );
 
 /* ── Fixtures ──────────────────────────────────────────────────────────────── */
@@ -185,6 +185,40 @@ T(
   sum(cfMine, "additions") === 170,
   `got ${sum(cfMine, "additions")}, expected 100+70`,
 );
+
+/* ── Author probe: the cold-cache path ────────────────────────────────────── */
+
+// This is the table that makes "repositories I've committed in" work before any
+// sync. Reading synced stats instead would be circular: the cache is only
+// populated by syncing, but the point of choosing repositories is to avoid
+// syncing all of them.
+await q.saveAuthorProbe(db, "adampeterhiggins", [
+  { repoId: 1, commits: 383, readable: true },
+  { repoId: 2, commits: 0, readable: true },
+  { repoId: 3, commits: 0, readable: false },
+]);
+
+const probe = await q.getAuthorProbe(db, "adampeterhiggins");
+T("author probe round-trips", probe.length === 3);
+T(
+  "probe distinguishes zero commits from unreadable",
+  Number(probe.find((r) => r.repo_id === 2).readable) === 1 &&
+    Number(probe.find((r) => r.repo_id === 3).readable) === 0,
+);
+T(
+  "probe is case-insensitive on login",
+  (await q.getAuthorProbe(db, "ADAMPETERHIGGINS")).length === 3,
+);
+
+// Re-probing must update in place, not accumulate duplicate rows.
+await q.saveAuthorProbe(db, "adampeterhiggins", [{ repoId: 1, commits: 400, readable: true }]);
+const reprobed = await q.getAuthorProbe(db, "adampeterhiggins");
+T(
+  "re-probing updates in place",
+  reprobed.length === 3 && Number(reprobed.find((r) => r.repo_id === 1).commits) === 400,
+);
+
+T("probe for another account is separate", (await q.getAuthorProbe(db, "someoneelse")).length === 0);
 
 /* ── Repo presets ─────────────────────────────────────────────────────────── */
 

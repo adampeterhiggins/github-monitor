@@ -102,6 +102,45 @@ export async function reposContributedTo(db: Database, login: string): Promise<R
   );
 }
 
+export interface AuthorProbeRow {
+  repo_id: number;
+  commits: number;
+  readable: number;
+  checked_at: string | null;
+}
+
+/**
+ * Cached results of probing `/commits?author=` per repository.
+ *
+ * Unlike `reposContributedTo`, this works from a cold cache — it is what makes
+ * "repositories I've committed in" usable before any sync has run.
+ */
+export async function getAuthorProbe(db: Database, login: string): Promise<AuthorProbeRow[]> {
+  return db.select<AuthorProbeRow[]>(
+    `SELECT repo_id, commits, readable, checked_at
+     FROM author_repo_probe
+     WHERE LOWER(login) = LOWER($1)`,
+    [login],
+  );
+}
+
+export async function saveAuthorProbe(
+  db: Database,
+  login: string,
+  results: Array<{ repoId: number; commits: number; readable: boolean }>,
+): Promise<void> {
+  if (!results.length) return;
+  const checkedAt = new Date().toISOString();
+  await withWriteLock(() =>
+    bulkInsert(db, {
+      table: "author_repo_probe",
+      columns: ["login", "repo_id", "commits", "readable", "checked_at"],
+      conflictColumns: ["login", "repo_id"],
+      rows: results.map((r) => [login, r.repoId, r.commits, r.readable ? 1 : 0, checkedAt]),
+    }),
+  );
+}
+
 /** Total commits and latest activity per repository, for the selection list. */
 export async function repoActivity(db: Database): Promise<RepoActivityRow[]> {
   return db.select<RepoActivityRow[]>(

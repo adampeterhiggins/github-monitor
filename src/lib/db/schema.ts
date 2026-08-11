@@ -13,7 +13,7 @@
  * series with empty weeks and keeping them would multiply row counts for nothing.
  */
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -66,6 +66,21 @@ CREATE TABLE IF NOT EXISTS sync_state (
   PRIMARY KEY (repo_id, endpoint)
 );
 CREATE INDEX IF NOT EXISTS idx_sync_status ON sync_state (endpoint, status);
+
+-- Answers "which repositories has this person committed to" without needing a
+-- sync. Populated by probing /commits?author=, one request per repository, so it
+-- works from a cold cache -- which the sync-derived tables below cannot do, and
+-- which is exactly when you need it to choose what to sync.
+CREATE TABLE IF NOT EXISTS author_repo_probe (
+  login      TEXT    NOT NULL,
+  repo_id    INTEGER NOT NULL,
+  commits    INTEGER NOT NULL DEFAULT 0,
+  -- NULL when the repository could not be read at all, distinct from zero commits.
+  readable   INTEGER NOT NULL DEFAULT 1,
+  checked_at TEXT,
+  PRIMARY KEY (login, repo_id)
+);
+CREATE INDEX IF NOT EXISTS idx_probe_login ON author_repo_probe (login);
 
 CREATE TABLE IF NOT EXISTS contributors (
   login      TEXT PRIMARY KEY,

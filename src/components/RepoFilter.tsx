@@ -12,7 +12,7 @@ export function RepoFilter() {
   const repos = useApp((s) => s.repos);
   const selected = useApp((s) => s.selectedRepoIds);
   const setSelectedRepos = useApp((s) => s.setSelectedRepos);
-  const { mine, login } = useRepoSelectionData();
+  const { myCommits, login } = useRepoSelectionData();
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
 
@@ -76,9 +76,9 @@ export function RepoFilter() {
             {login ? (
               <Button
                 variant="ghost"
-                title={`Repositories with a cached commit by ${login}`}
-                disabled={mine.size === 0}
-                onClick={() => apply(myRepoIds(repos, mine))}
+                title={`Repositories with a known commit by ${login} — use Settings to check every repository`}
+                disabled={[...myCommits.values()].every((n) => n === 0)}
+                onClick={() => apply(myRepoIds(repos, myCommits))}
               >
                 Mine
               </Button>
