@@ -1036,6 +1036,36 @@ export async function syncOverview(
   );
 }
 
+export interface RepoEndpointStatus {
+  repo_id: number;
+  endpoint: string;
+  status: string;
+  error: string | null;
+  last_ok_at: string | null;
+}
+
+/**
+ * Every recorded (repository, endpoint) outcome, for the per-repository sync
+ * controls. Returned unaggregated so the UI can say exactly which parts of a
+ * repository are outstanding, rather than only how many.
+ *
+ * At ~80 repositories × 12 endpoints this tops out under a thousand rows, so
+ * aggregating in SQL would cost more in round trips than it saves.
+ */
+export async function repoEndpointStatus(
+  db: Database,
+  repoIds: readonly number[],
+): Promise<RepoEndpointStatus[]> {
+  const p = new Params();
+  const ids = p.in(repoIds);
+  return db.select<RepoEndpointStatus[]>(
+    `SELECT repo_id, endpoint, status, error, last_ok_at
+     FROM sync_state
+     WHERE repo_id IN ${ids}`,
+    p.values,
+  );
+}
+
 export interface OutstandingWork {
   /** (repo, endpoint) pairs a previous run finished. */
   complete: number;

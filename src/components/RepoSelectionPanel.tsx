@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import { useApp } from "../lib/state/app";
 import { activeRepoIds, useRepoSelectionData } from "../lib/repoSelection";
+import { useRepoSync, type RepoSyncSummary } from "../lib/state/repoSync";
 import { discoverAuthorRepos, type DiscoverProgress } from "../lib/ingest/discoverAuthorRepos";
 import { GitHubClient } from "../lib/github/client";
 import { formatDate } from "../lib/agg/weeks";
@@ -41,6 +42,11 @@ export function RepoSelectionPanel() {
   const [detecting, setDetecting] = useState(false);
   const [discovery, setDiscovery] = useState<DiscoverProgress | null>(null);
   const discoverAbort = useRef<AbortController | null>(null);
+
+  // Per-repository sync, so one failed or still-computing repository can be
+  // fixed without re-running the whole organisation.
+  const repoSync = useRepoSync(useMemo(() => repos.map((r) => r.id), [repos]));
+  const syncProgress = useApp((s) => s.sync);
 
   const selectedSet = useMemo(() => new Set(selected), [selected]);
 
@@ -348,6 +354,23 @@ export function RepoSelectionPanel() {
               r.pushed_at ? formatDate(new Date(r.pushed_at)) : <span className="text-ink-muted">never</span>,
             sortValue: (r: RepoRow) => r.pushed_at ?? "",
           },
+          {
+            key: "sync",
+            header: "Sync",
+            width: "150px",
+            render: (r: RepoRow) => (
+              <RepoSyncCell
+                repoId={r.id}
+                summary={repoSync.summaries.get(r.id)}
+                active={repoSync.activeRepoId === r.id}
+                busy={repoSync.busy}
+                label={repoSync.activeRepoId === r.id ? (syncProgress?.label ?? null) : null}
+                onSync={repoSync.syncRepo}
+              />
+            ),
+            // Least-complete first, so the ones needing attention sort to the top.
+            sortValue: (r: RepoRow) => -(repoSync.summaries.get(r.id)?.outstanding ?? 0),
+          },
         ]}
       />
 
@@ -359,5 +382,72 @@ export function RepoSelectionPanel() {
         computed endpoints.
       </p>
     </Card>
+  );
+}
+
+/**
+ * Per-row sync status and action.
+ *
+ * "Resume" and "Re-sync" are distinguished deliberately: resuming a repository
+ * fetches only its outstanding endpoints, whereas re-syncing a complete one has
+ * to redo all of them, and the button should not hide which of those it is about
+ * to do.
+ */
+function RepoSyncCell({
+  repoId,
+  summary,
+  active,
+  busy,
+  label,
+  onSync,
+}: {
+  repoId: number;
+  summary: RepoSyncSummary | undefined;
+  active: boolean;
+  busy: boolean;
+  label: string | null;
+  onSync: (repoId: number, mode: "resume" | "full") => Promise<void>;
+}) {
+  if (active) {
+    return (
+      <span className="flex items-center gap-1.5 text-[11px] text-ink" title={label ?? undefined}>
+        <Spinner /> <span className="truncate">{label ?? "Syncing…"}</span>
+      </span>
+    );
+  }
+
+  if (!summary) {
+    return <span className="text-[11px] text-ink-muted">—</span>;
+  }
+
+  const { state, outstanding, pending, errored } = summary;
+
+  return (
+    <span className="flex items-center justify-between gap-2" title={summary.detail}>
+      <span className="text-[11px]">
+        {state === "complete" ? (
+          <span style={{ color: "var(--status-good)" }}>● synced</span>
+        ) : state === "never" ? (
+          <span className="text-ink-muted">not synced</span>
+        ) : (
+          <span style={{ color: errored > 0 ? "var(--status-critical)" : "var(--status-warning)" }}>
+            {errored > 0 ? "▲" : "◆"} {full(outstanding)} left
+            {pending > 0 ? ` (${full(pending)} computing)` : ""}
+          </span>
+        )}
+      </span>
+      <Button
+        variant="ghost"
+        disabled={busy}
+        onClick={() => void onSync(repoId, state === "complete" ? "full" : "resume")}
+        title={
+          state === "complete"
+            ? "Re-fetch everything for this repository"
+            : "Fetch only what is outstanding for this repository"
+        }
+      >
+        {state === "complete" ? "Re-sync" : state === "never" ? "Sync" : "Resume"}
+      </Button>
+    </span>
   );
 }
