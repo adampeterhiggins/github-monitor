@@ -17,6 +17,9 @@ dist-ssr
 *.db-wal
 *.db-shm
 
+# Scratch directory created by local tooling, not part of this project
+.context
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
