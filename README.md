@@ -75,6 +75,37 @@ installs can never be updated again; they would need replacing by hand.
 ### Cutting a release
 
 ```bash
+make release          # gate, bump if needed, check, commit, tag, push, watch CI, verify
+make release-0.3.0    # release exactly 0.3.0
+make release YES=1    # no prompts
+make release PUSH=0   # rehearse: stops after tagging, pushes nothing
+```
+
+`make` on its own lists everything. `make doctor` checks the prerequisites (tooling,
+the universal-build target, the signing key, the repo secret, git state) before you
+find out the hard way.
+
+The chain is: version gate → bump → `npm run check` → commit → tag → push → follow
+the CI run → **verify the published manifest is actually installable**. That last
+step reads the same URL with the same auth the app uses, so a green CI run with a
+broken manifest still fails.
+
+| Knob | Effect |
+|---|---|
+| `FORCE=1` | skip the version gate (rebuild the same version) |
+| `YES=1` | accept prompts; required in a non-interactive shell |
+| `PUSH=0` | stop after tagging |
+| `WATCH=0` | don't follow the CI run |
+
+Other useful targets: `make version` (reports drift across the three files),
+`make set-version-0.3.0`, `make app` (build and install into `/Applications`,
+verifying the installed version), `make runs`, `make watch`,
+`make verify-release`, and `make release-local` if CI is broken and you need to
+publish from your laptop.
+
+The equivalent long-hand, if you prefer:
+
+```bash
 npm run release:prepare -- 0.2.0    # bumps package.json, tauri.conf.json, Cargo.toml
 git commit -am "chore(release): 0.2.0"
 git tag v0.2.0
