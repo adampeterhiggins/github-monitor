@@ -83,6 +83,45 @@ export interface SyncProgress {
   rateLimit: RateLimitState | null;
   /** Set while parked on a rate limit, so the UI can explain the pause. */
   throttleMs: number | null;
+  /** Items skipped because a previous run already finished them. */
+  skipped: number;
+  mode: SyncMode;
+}
+
+/**
+ * `resume` skips work already recorded as finished, so an interrupted sync can be
+ * picked up without repeating it. `full` ignores that record and re-fetches
+ * everything, which is what you want when the data itself has gone stale.
+ */
+export type SyncMode = "resume" | "full";
+
+/**
+ * Statuses that count as finished for a (repository, endpoint) pair.
+ *
+ * `empty` and `forbidden` are included deliberately: a repository with no commits
+ * will still have none, and one the token cannot read will still be unreadable, so
+ * retrying them on every resume would burn requests to learn nothing. Both are
+ * revisited by a full sync — which is also what to run after changing the token.
+ */
+const TERMINAL_STATUSES: ReadonlySet<SyncStatus> = new Set<SyncStatus>([
+  "ok",
+  "empty",
+  "forbidden",
+]);
+
+/**
+ * Whether a (repository, endpoint) pair can be skipped this run.
+ *
+ * Exported so the decision is testable in isolation: skipping something that did
+ * not actually finish would leave a permanent hole that no later resume would fill,
+ * which is the one way this feature can quietly lose data.
+ *
+ * @param status the recorded outcome, or undefined if never attempted
+ */
+export function shouldSkip(status: SyncStatus | undefined, mode: SyncMode): boolean {
+  if (mode === "full") return false;
+  if (status === undefined) return false;
+  return TERMINAL_STATUSES.has(status);
 }
 
 export interface SyncOptions {
@@ -97,6 +136,8 @@ export interface SyncOptions {
   activeSince?: string | null;
   /** How far back to pull PR/issue/Actions data. */
   historyDays?: number;
+  /** Defaults to `full`; the UI passes `resume` to continue an interrupted sync. */
+  mode?: SyncMode;
   onProgress?: (p: SyncProgress) => void;
   signal?: AbortSignal;
 }
@@ -106,6 +147,11 @@ export interface SyncResult {
   errors: SyncError[];
   cancelled: boolean;
   durationMs: number;
+  /** Items skipped because a previous run already finished them. */
+  skipped: number;
+  /** Items actually fetched this run. */
+  attempted: number;
+  mode: SyncMode;
 }
 
 /** Run `fn` over `items` with bounded parallelism, preserving input order in the result. */
@@ -146,6 +192,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     includeArchived = false,
     activeSince = null,
     historyDays = 365,
+    mode = "full",
     signal,
   } = options;
 
@@ -157,9 +204,22 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   let done = 0;
   let total = 0;
   let current: string | null = null;
+  let skipped = 0;
+  let attempted = 0;
 
   const emit = () =>
-    options.onProgress?.({ phase, label, done, total, current, errors: [...errors], rateLimit, throttleMs });
+    options.onProgress?.({
+      phase,
+      label,
+      done,
+      total,
+      current,
+      errors: [...errors],
+      rateLimit,
+      throttleMs,
+      skipped,
+      mode,
+    });
 
   const client = new GitHubClient({
     token,
@@ -200,7 +260,17 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   try {
     repos = await api.listOrgRepos(client, org, signal);
   } catch (err) {
-    if (cancelled()) return { reposSynced: 0, errors, cancelled: true, durationMs: Date.now() - started };
+    if (cancelled()) {
+      return {
+        reposSynced: 0,
+        errors,
+        cancelled: true,
+        durationMs: Date.now() - started,
+        skipped,
+        attempted,
+        mode,
+      };
+    }
     throw err;
   }
   await write.writeRepos(db, org, repos);
@@ -223,8 +293,28 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   if (cancelled()) {
     phase = "cancelled";
     emit();
-    return { reposSynced: 0, errors, cancelled: true, durationMs: Date.now() - started };
+    return finish(true);
   }
+
+  /* ── 1b. What is already done ──────────────────────────────────────────
+     sync_state records the outcome of every (repository, endpoint) pair as it
+     completes, including on cancellation, so an interrupted run leaves an
+     accurate record of what it got through. In `resume` mode that record is
+     consulted and finished work is skipped; in `full` mode it is ignored. */
+
+  const doneAlready = new Set<string>();
+  if (mode === "resume") {
+    const rows = await db.select<Array<{ repo_id: number; endpoint: string; status: SyncStatus }>>(
+      "SELECT repo_id, endpoint, status FROM sync_state",
+    );
+    for (const row of rows) {
+      if (shouldSkip(row.status, mode)) doneAlready.add(`${row.repo_id}:${row.endpoint}`);
+    }
+  }
+
+  /** True when a previous run finished this pair and we are resuming. */
+  const isDone = (repoId: number, endpoint: EndpointId | string) =>
+    doneAlready.has(`${repoId}:${endpoint}`);
 
   const statsWanted = STATS_ENDPOINTS.filter((e) => endpoints.includes(e));
 
@@ -240,7 +330,15 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     endpoint: (typeof STATS_ENDPOINTS)[number];
   }
   const warmKeys: WarmKey[] = [];
-  for (const repo of targets) for (const endpoint of statsWanted) warmKeys.push({ repo, endpoint });
+  for (const repo of targets) {
+    for (const endpoint of statsWanted) {
+      if (isDone(repo.id, endpoint)) {
+        skipped++;
+        continue;
+      }
+      warmKeys.push({ repo, endpoint });
+    }
+  }
 
   const settled = new Set<string>();
   const keyOf = (r: RepoTarget, e: string) => `${r.id}:${e}`;
@@ -254,6 +352,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
 
     await pool(warmKeys, 8, async ({ repo, endpoint }) => {
       if (cancelled()) return;
+      attempted++;
       current = repo.fullName;
       try {
         const res = await client.request<unknown>(statsPath(repo, endpoint), {
@@ -346,6 +445,13 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     await pool(targets, 6, async (repo) => {
       for (const endpoint of extras) {
         if (cancelled()) return;
+        if (isDone(repo.id, endpoint)) {
+          skipped++;
+          done++;
+          emit();
+          continue;
+        }
+        attempted++;
         current = repo.fullName;
         try {
           await syncExtra(client, db, repo, endpoint, sinceIso, signal);
@@ -368,23 +474,48 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   if (endpoints.includes("pulse") && !cancelled()) {
     phase = "pulse";
     label = "Fetching pull requests and issues";
-    total = targets.length;
+
+    const pulseTargets = targets.filter((r) => {
+      if (!isDone(r.id, "pulse")) return true;
+      skipped++;
+      return false;
+    });
+
+    total = pulseTargets.length;
     done = 0;
     current = null;
     emit();
 
+    // Pulse previously recorded nothing in sync_state, so it re-fetched every
+    // repository on every run and could never resume. It is recorded per
+    // repository now, which is also the granularity at which it can be resumed.
+    const failedRepos = new Set<string>();
+    const idByFullName = new Map(pulseTargets.map((r) => [r.fullName, r.id]));
+
     await syncPulse({
       client,
       db,
-      repos: targets.map((r) => ({ id: r.id, owner: r.owner, name: r.name, fullName: r.fullName })),
+      repos: pulseTargets.map((r) => ({
+        id: r.id,
+        owner: r.owner,
+        name: r.name,
+        fullName: r.fullName,
+      })),
       sinceIso: new Date(Date.now() - historyDays * 86_400_000).toISOString(),
       signal,
       onRepoDone: (fullName) => {
         done++;
+        attempted++;
         current = fullName;
+        const repoId = idByFullName.get(fullName);
+        if (repoId != null && !cancelled()) {
+          // Fire and forget: a bookkeeping write must not stall the sweep.
+          void recordSync(db, repoId, "pulse", failedRepos.has(fullName) ? "error" : "ok");
+        }
         emit();
       },
       onError: (fullName, message) => {
+        failedRepos.add(fullName);
         errors.push({ repo: fullName, endpoint: "pulse", message, kind: "error" });
       },
     });
@@ -399,12 +530,19 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   throttleMs = null;
   emit();
 
-  return {
-    reposSynced: targets.length,
-    errors,
-    cancelled: cancelled(),
-    durationMs: Date.now() - started,
-  };
+  return finish(cancelled());
+
+  function finish(wasCancelled: boolean): SyncResult {
+    return {
+      reposSynced: targets?.length ?? 0,
+      errors,
+      cancelled: wasCancelled,
+      durationMs: Date.now() - started,
+      skipped,
+      attempted,
+      mode,
+    };
+  }
 }
 
 /* ── endpoint plumbing ──────────────────────────────────────────────────── */

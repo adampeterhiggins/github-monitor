@@ -1036,6 +1036,66 @@ export async function syncOverview(
   );
 }
 
+export interface OutstandingWork {
+  /** (repo, endpoint) pairs a previous run finished. */
+  complete: number;
+  /** GitHub was still computing these; retrying usually succeeds. */
+  pending: number;
+  /** Failed for some other reason. */
+  errored: number;
+  /** Never attempted — new repositories, or a run that stopped early. */
+  never: number;
+  /** pending + errored + never: what a resume would actually do. */
+  outstanding: number;
+  /** True when there is finished work worth preserving. */
+  resumable: boolean;
+}
+
+/**
+ * How much of a sync remains, for the selected repositories and endpoints.
+ *
+ * Lets the UI offer "resume" honestly — saying how much would be skipped and how
+ * much re-fetched — rather than making the user run a sync to find out.
+ */
+export async function outstandingWork(
+  db: Database,
+  repoIds: readonly number[],
+  endpoints: readonly string[],
+): Promise<OutstandingWork> {
+  const expected = repoIds.length * endpoints.length;
+  if (expected === 0) {
+    return { complete: 0, pending: 0, errored: 0, never: 0, outstanding: 0, resumable: false };
+  }
+
+  const p = new Params();
+  const ids = p.in(repoIds);
+  const eps = p.in(endpoints);
+  const rows = await db.select<Array<{ status: string; n: number }>>(
+    `SELECT status, COUNT(*) AS n
+     FROM sync_state
+     WHERE repo_id IN ${ids} AND endpoint IN ${eps}
+     GROUP BY status`,
+    p.values,
+  );
+
+  const by = new Map(rows.map((r) => [r.status, Number(r.n)]));
+  const complete =
+    (by.get("ok") ?? 0) + (by.get("empty") ?? 0) + (by.get("forbidden") ?? 0);
+  const pending = by.get("pending") ?? 0;
+  const errored = by.get("error") ?? 0;
+  const recorded = complete + pending + errored;
+  const never = Math.max(0, expected - recorded);
+
+  return {
+    complete,
+    pending,
+    errored,
+    never,
+    outstanding: pending + errored + never,
+    resumable: complete > 0 && pending + errored + never > 0,
+  };
+}
+
 export async function syncProblems(
   db: Database,
 ): Promise<Array<{ full_name: string; endpoint: string; status: string; error: string | null }>> {

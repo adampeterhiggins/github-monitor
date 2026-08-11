@@ -1,7 +1,15 @@
 import { useCallback, useMemo, useRef, useState } from "react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useApp } from "../lib/state/app";
-import { ALL_ENDPOINTS, ENDPOINT_LABELS, runSync, type EndpointId, type SyncError } from "../lib/ingest/sync";
+import {
+  ALL_ENDPOINTS,
+  ENDPOINT_LABELS,
+  runSync,
+  type EndpointId,
+  type SyncError,
+  type SyncMode,
+} from "../lib/ingest/sync";
+import { outstandingWork } from "../lib/db/queries";
 import { Button, Callout, Card, CardHeader, DataTable, Spinner, full } from "./ui";
 
 /**
@@ -17,7 +25,18 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
   const [selectedEndpoints, setSelectedEndpoints] = useState<EndpointId[]>(ALL_ENDPOINTS);
   const [fatal, setFatal] = useState<string | null>(null);
 
-  const start = useCallback(async () => {
+  const selectedRepoIds = useApp((s) => s.selectedRepoIds);
+
+  // What a resume would actually do, so the offer can be specific rather than
+  // asking the user to run a sync to find out.
+  const work = useQuery({
+    queryKey: ["outstanding-work", selectedRepoIds.join(","), selectedEndpoints.join(","), syncing],
+    enabled: db != null && selectedRepoIds.length > 0,
+    queryFn: () => outstandingWork(db!, selectedRepoIds, selectedEndpoints),
+    staleTime: 5_000,
+  });
+
+  const start = useCallback(async (mode: SyncMode) => {
     if (!db || !token || !org) return;
     const controller = new AbortController();
     abortRef.current = controller;
@@ -28,6 +47,7 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
         db,
         token,
         org,
+        mode,
         endpoints: selectedEndpoints,
         signal: controller.signal,
         onProgress: setSync,
@@ -36,13 +56,14 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
       await reloadSyncTime();
       // Every page reads from SQLite, so invalidating clears all of them at once.
       await queryClient.invalidateQueries();
+      await work.refetch();
     } catch (err) {
       setFatal((err as Error)?.message ?? String(err));
     } finally {
       setSyncing(false);
       abortRef.current = null;
     }
-  }, [db, token, org, selectedEndpoints, setSync, setSyncing, refreshRepos, reloadSyncTime, queryClient]);
+  }, [db, token, org, selectedEndpoints, setSync, setSyncing, refreshRepos, reloadSyncTime, queryClient, work]);
 
   const cancel = () => abortRef.current?.abort();
 
@@ -63,9 +84,26 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
               Cancel
             </Button>
           ) : (
-            <Button variant="primary" onClick={start} disabled={!db || !token || !org}>
-              Sync now
-            </Button>
+            <>
+              {work.data?.resumable ? (
+                <Button
+                  variant="primary"
+                  onClick={() => void start("resume")}
+                  disabled={!db || !token || !org}
+                  title={`Fetch only the ${full(work.data.outstanding)} outstanding items, keeping the ${full(work.data.complete)} already done`}
+                >
+                  Resume ({full(work.data.outstanding)})
+                </Button>
+              ) : null}
+              <Button
+                variant={work.data?.resumable ? "default" : "primary"}
+                onClick={() => void start("full")}
+                disabled={!db || !token || !org}
+                title="Re-fetch everything, including items already synced"
+              >
+                {work.data?.resumable ? "Full re-sync" : "Sync now"}
+              </Button>
+            </>
           )
         }
       />
@@ -85,6 +123,9 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
             </span>
             <span className="tabular text-ink-secondary">
               {sync ? `${full(sync.done)} / ${full(sync.total)}` : ""}
+              {sync && sync.skipped > 0 ? (
+                <span className="text-ink-muted"> · {full(sync.skipped)} skipped</span>
+              ) : null}
             </span>
           </div>
           <div
@@ -105,6 +146,28 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
             </p>
           ) : null}
         </div>
+      ) : null}
+
+      {!syncing && work.data && work.data.resumable ? (
+        <div className="mb-3">
+          <Callout>
+            <strong className="text-ink">{full(work.data.complete)}</strong> of{" "}
+            <strong className="text-ink">{full(work.data.complete + work.data.outstanding)}</strong>{" "}
+            items are already synced. <strong className="text-ink">Resume</strong> fetches only the{" "}
+            <strong className="text-ink">{full(work.data.outstanding)}</strong> outstanding —
+            {work.data.pending > 0 ? ` ${full(work.data.pending)} GitHub was still computing,` : ""}
+            {work.data.errored > 0 ? ` ${full(work.data.errored)} that failed,` : ""}
+            {work.data.never > 0 ? ` ${full(work.data.never)} not yet attempted,` : ""} and leaves the
+            rest alone. A full re-sync repeats everything.
+          </Callout>
+        </div>
+      ) : null}
+
+      {!syncing && work.data && !work.data.resumable && work.data.complete > 0 ? (
+        <p className="mb-3 text-[12px] text-ink-secondary">
+          All {full(work.data.complete)} items are synced for the current selection. A full re-sync
+          refreshes them.
+        </p>
       ) : null}
 
       {sync?.phase === "warming" ? (

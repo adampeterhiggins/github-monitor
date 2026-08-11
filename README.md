@@ -207,8 +207,37 @@ The sync exploits this rather than fighting it:
    120-second-per-endpoint budget.
 
 Polling each repository to completion in turn would serialise all that waiting.
-Anything still pending is recorded in `sync_state` and picked up next sync, so a
-first sync is never wasted. The per-endpoint poll budget is 7 minutes because a
+
+### Resuming an interrupted sync
+
+Every (repository, endpoint) pair's outcome is written to `sync_state` as it
+completes — including when a run is cancelled — so an interrupted sync leaves an
+accurate record of how far it got. **Settings → Sync** then offers:
+
+- **Resume (N)** — fetches only the outstanding items and leaves finished work
+  alone. Shown only when there is both finished and unfinished work, with a
+  breakdown of what the N is made of.
+- **Full re-sync** — ignores the record and re-fetches everything, which is what
+  you want when the data itself has gone stale rather than incomplete.
+
+What counts as finished:
+
+| Status | Resume | Why |
+|---|---|---|
+| `ok` | skip | got the data |
+| `empty` | skip | a repository with no commits still has none |
+| `forbidden` | skip | no access will not change without a new token |
+| `pending` | **retry** | GitHub was still computing; retrying usually succeeds |
+| `error` | **retry** | transient failures are the common case |
+| *(no record)* | **attempt** | new repository, or a run that stopped early |
+
+Because `forbidden` is treated as finished, **run a full re-sync after changing
+the token** — a resume would keep skipping repositories the old token could not
+read.
+
+The decision is a single exported function, `shouldSkip(status, mode)`, tested
+directly. Skipping something that had not actually finished is the one way this
+feature could quietly lose data, so it is worth isolating. The per-endpoint poll budget is 7 minutes because a
 very active repository (`focaldata/orchestra`) was observed returning 202
 continuously for over 20 minutes — constant bot pushes appear to keep invalidating
 GitHub's cache. Such repositories land in `pending` and are retried; **Settings →

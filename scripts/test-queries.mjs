@@ -46,6 +46,7 @@ async function bundle(entry, out) {
 }
 
 const q = await bundle("src/lib/db/queries.ts", "queries.cjs");
+const sync = await bundle("src/lib/ingest/sync.ts", "sync.cjs");
 const { splitStatements } = await bundle("src/lib/db/index.ts", "dbindex.cjs");
 const { SCHEMA_SQL } = await bundle("src/lib/db/schema.ts", "schema.cjs");
 
@@ -239,6 +240,60 @@ T(
   pulseMine.prsOpened === 1 && pulseMine.prsMerged === 1,
   `opened=${pulseMine.prsOpened} merged=${pulseMine.prsMerged}`,
 );
+
+/* ── Resume accounting ────────────────────────────────────────────────────── */
+
+// sync_state is what makes an interrupted sync resumable, so the arithmetic that
+// decides "already done" versus "still to do" needs to be right — skipping
+// something unfinished would leave a permanent hole in the data.
+const EPS = ["contributors", "commit_activity", "traffic"];
+sqlite.exec(`INSERT INTO sync_state (repo_id, endpoint, status, last_attempt_at, attempts) VALUES
+  (1,'contributors','ok','2026-08-11T00:00:00Z',1),
+  (1,'commit_activity','pending','2026-08-11T00:00:00Z',1),
+  (1,'traffic','forbidden','2026-08-11T00:00:00Z',1),
+  (2,'contributors','error','2026-08-11T00:00:00Z',1),
+  (2,'commit_activity','empty','2026-08-11T00:00:00Z',1)`);
+
+const w = await q.outstandingWork(db, [1, 2, 3], EPS);
+T(
+  "complete counts ok, empty and forbidden",
+  w.complete === 3,
+  `got ${w.complete} (ok + empty + forbidden)`,
+);
+T("pending is counted separately", w.pending === 1, `got ${w.pending}`);
+T("errored is counted separately", w.errored === 1, `got ${w.errored}`);
+// 3 repos x 3 endpoints = 9 expected; 5 have a row, so 4 were never attempted.
+T("never-attempted is inferred from the expected total", w.never === 4, `got ${w.never}`);
+T(
+  "outstanding is what a resume would fetch",
+  w.outstanding === 6 && w.outstanding === w.pending + w.errored + w.never,
+  `got ${w.outstanding}`,
+);
+T("resumable when there is both finished and unfinished work", w.resumable === true);
+
+const wNone = await q.outstandingWork(db, [], EPS);
+T("no repositories selected means nothing outstanding", wNone.outstanding === 0 && !wNone.resumable);
+
+// Narrowing the endpoint selection must narrow the accounting with it.
+const wNarrow = await q.outstandingWork(db, [1], ["contributors"]);
+T(
+  "accounting respects the endpoint selection",
+  wNarrow.complete === 1 && wNarrow.outstanding === 0 && !wNarrow.resumable,
+  `complete=${wNarrow.complete} outstanding=${wNarrow.outstanding}`,
+);
+
+/* ── The skip decision itself ─────────────────────────────────────────────── */
+
+// Skipping something that did not finish would leave a hole no later resume fills.
+const { shouldSkip } = sync;
+T("full mode never skips, even finished work", !shouldSkip("ok", "full"));
+T("resume skips ok", shouldSkip("ok", "resume"));
+T("resume skips empty (a repo with no commits still has none)", shouldSkip("empty", "resume"));
+T("resume skips forbidden (no access will not change)", shouldSkip("forbidden", "resume"));
+T("resume RETRIES pending (GitHub was still computing)", !shouldSkip("pending", "resume"));
+T("resume RETRIES error", !shouldSkip("error", "resume"));
+T("resume attempts never-recorded pairs", !shouldSkip(undefined, "resume"));
+T("full mode redoes everything", ["ok","empty","forbidden","pending","error"].every((st) => !shouldSkip(st, "full")));
 
 /* ── No manual transactions anywhere ──────────────────────────────────────── */
 
