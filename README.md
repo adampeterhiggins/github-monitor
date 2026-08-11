@@ -148,10 +148,12 @@ can update**. If that becomes limiting, host the artifacts in a small public rep
 and drop the auth headers.
 
 **`raw.githubusercontent.com` caches**, so a freshly published manifest is not
-served immediately — measured still returning the previous version minutes after
-the commit landed. Harmless for updates, which are not urgent, but it means:
+served immediately. Measured on the v0.1.1 release: **182 seconds** between the
+commit landing on the `releases` branch and raw serving it. Harmless for updates,
+which are not urgent, but it means:
 
-- the app may not offer a new release for a few minutes after the run goes green;
+- the app will not offer a new release for roughly three minutes after the run
+  goes green;
 - **verification must not gate on raw**, or every release would look broken. Both
   the workflow and `make verify-release` check the `releases` branch through the
   contents API, which is authoritative about what was committed, and report raw's
