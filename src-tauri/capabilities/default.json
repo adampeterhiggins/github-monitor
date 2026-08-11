@@ -1,0 +1,42 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "store:default",
+    "sql:default",
+    "sql:allow-load",
+    "sql:allow-execute",
+    "sql:allow-select",
+    "sql:allow-close",
+    {
+      "identifier": "http:default",
+      "allow": [
+        { "url": "https://api.github.com/*" }
+      ]
+    },
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "gh-token-homebrew-arm",
+          "cmd": "/opt/homebrew/bin/gh",
+          "args": ["auth", "token"]
+        },
+        {
+          "name": "gh-token-homebrew-intel",
+          "cmd": "/usr/local/bin/gh",
+          "args": ["auth", "token"]
+        },
+        {
+          "name": "gh-token-path",
+          "cmd": "gh",
+          "args": ["auth", "token"]
+        }
+      ]
+    }
+  ]
+}
