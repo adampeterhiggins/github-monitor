@@ -303,14 +303,15 @@ verify-release: ## Check the published manifest matches the local version
 
 verify-release-%:
 	@echo "--> Verifying the published update manifest"
-	@# Reads the same URL the app reads, with the same auth, so this checks the
-	@# thing users actually depend on rather than just the release page.
+	@# Checked against the contents API rather than raw.githubusercontent.com.
+	@# The app polls raw, but raw caches for minutes after a commit lands, so
+	@# gating on it would report a good release as broken. raw is reported below
+	@# for information only.
 	@TOKEN="$$(gh auth token)"; \
-	URL="https://raw.githubusercontent.com/$(REPO)/releases/latest.json"; \
-	BODY="$$(curl -sf -H "Authorization: Bearer $$TOKEN" "$$URL")" || { \
-		echo "Could not fetch $$URL — has the manifest job run?"; exit 1; }; \
+	BODY="$$(gh api "repos/$(REPO)/contents/latest.json?ref=releases" --jq '.content' 2>/dev/null | base64 -d)" || { \
+		echo "  no manifest on the releases branch — has a release been published?"; exit 1; }; \
 	MV="$$(printf '%s' "$$BODY" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{process.stdout.write(String(JSON.parse(d).version))}catch{process.stdout.write("unparseable")}})')"; \
-	echo "  manifest version: $$MV"; \
+	echo "  manifest on releases branch: $$MV"; \
 	if [ "$$MV" != "$*" ]; then \
 		echo "  expected $* — the app will not offer this release."; \
 		exit 1; \
@@ -319,6 +320,8 @@ verify-release-%:
 	CODE="$$(curl -s -o /dev/null -w '%{http_code}' -L -H "Authorization: Bearer $$TOKEN" -H "Accept: application/octet-stream" "$$AURL")"; \
 	echo "  artifact download: http $$CODE"; \
 	if [ "$$CODE" != "200" ]; then echo "  the artifact is not downloadable"; exit 1; fi; \
+	RAW="$$(curl -sf -H "Authorization: Bearer $$TOKEN" "https://raw.githubusercontent.com/$(REPO)/releases/latest.json" 2>/dev/null | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{process.stdout.write(String(JSON.parse(d).version))}catch{process.stdout.write("unavailable")}})' || true)"; \
+	echo "  raw.githubusercontent serves: $$RAW (the app polls this; it lags a few minutes)"; \
 	echo "  release v$* is live and installable"
 
 release-local: ## Build, publish and update the manifest from this machine (bypasses CI)

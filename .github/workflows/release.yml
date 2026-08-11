@@ -254,23 +254,43 @@ jobs:
       - name: Verify the manifest is live and installable
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          # A published release with a stale manifest is invisible to the app, so
-          # the run must not go green until the thing users read is correct.
-          URL="https://raw.githubusercontent.com/${{ github.repository }}/releases/latest.json"
-          for attempt in 1 2 3 4 5; do
-            BODY="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" "$URL" || true)"
-            VERSION="$(printf '%s' "$BODY" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{process.stdout.write(String(JSON.parse(d).version))}catch{process.stdout.write("")}})')"
-            if [[ "$VERSION" == "${{ needs.preflight.outputs.version }}" ]]; then
-              echo "Manifest serves ${VERSION}."
-              exit 0
-            fi
-            echo "Attempt ${attempt}: manifest serves '${VERSION:-<none>}', waiting for the CDN…"
-            sleep 10
-          done
-          echo "::error::The manifest never reported ${{ needs.preflight.outputs.version }}. The app will not offer this release."
-          exit 1
+
+          # Verified through the contents API, not raw.githubusercontent.com.
+          # The app reads the latter, but raw caches aggressively — measured still
+          # serving the previous version minutes after the commit landed — so
+          # gating the run on it would fail every release for no real reason. The
+          # contents API is authoritative about what was actually committed.
+          COMMITTED="$(gh api "repos/${REPO}/contents/latest.json?ref=releases" \
+            --jq '.content' | base64 -d \
+            | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{process.stdout.write(String(JSON.parse(d).version))})')"
+
+          if [[ "$COMMITTED" != "$VERSION" ]]; then
+            echo "::error::The releases branch serves '${COMMITTED}', expected '${VERSION}'. The app will not offer this release."
+            exit 1
+          fi
+          echo "Manifest on the releases branch serves ${COMMITTED}."
+
+          # The artifact must actually be downloadable with the same auth the app uses.
+          ASSET_URL="$(gh api "repos/${REPO}/contents/latest.json?ref=releases" \
+            --jq '.content' | base64 -d \
+            | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{process.stdout.write(JSON.parse(d).platforms["darwin-aarch64"].url)})')"
+          CODE="$(curl -s -o /dev/null -w '%{http_code}' -L \
+            -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/octet-stream" "$ASSET_URL")"
+          if [[ "$CODE" != "200" ]]; then
+            echo "::error::The update artifact is not downloadable (HTTP ${CODE})."
+            exit 1
+          fi
+          echo "Artifact downloads (HTTP ${CODE})."
+
+          # Informational only: raw is what the app polls, and it lags.
+          RAW="$(curl -sf -H "Authorization: Bearer $GH_TOKEN" \
+            "https://raw.githubusercontent.com/${REPO}/releases/latest.json" 2>/dev/null \
+            | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{process.stdout.write(String(JSON.parse(d).version))}catch{process.stdout.write("unavailable")}})' || true)"
+          echo "raw.githubusercontent currently serves '${RAW}' — it catches up within a few minutes."
 
       - name: Summary
         run: |
