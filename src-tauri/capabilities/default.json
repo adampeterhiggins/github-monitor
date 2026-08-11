@@ -12,10 +12,13 @@
     "sql:allow-execute",
     "sql:allow-select",
     "sql:allow-close",
+    "updater:default",
+    "process:allow-restart",
     {
       "identifier": "http:default",
       "allow": [
-        { "url": "https://api.github.com/*" }
+        { "url": "https://api.github.com/*" },
+        { "url": "https://raw.githubusercontent.com/*" }
       ]
     },
     {

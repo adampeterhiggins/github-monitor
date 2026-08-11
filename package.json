@@ -11,16 +11,21 @@
     "typecheck": "tsc --noEmit",
     "verify:aggregation": "node scripts/verify-aggregation.mjs",
     "test:queries": "node scripts/test-queries.mjs",
-    "check": "npm run typecheck && npm run test:queries"
+    "check": "npm run typecheck && npm run test:queries && npm run check:workflows",
+    "release:prepare": "node scripts/set-version.mjs",
+    "release:manifest": "node scripts/build-update-manifest.mjs",
+    "check:workflows": "node scripts/lint-workflows.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-http": "^2.5.9",
     "@tauri-apps/plugin-opener": "^2",
+    "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-shell": "^2.3.5",
     "@tauri-apps/plugin-sql": "^2.4.0",
     "@tauri-apps/plugin-store": "^2.4.4",
+    "@tauri-apps/plugin-updater": "^2.10.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.4.0",
     "react": "^19.1.0",
@@ -36,6 +41,7 @@
     "@vitejs/plugin-react": "^4.6.0",
     "tailwindcss": "^4.3.3",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4"
+    "vite": "^7.0.4",
+    "yaml": "^2.9.0"
   }
 }

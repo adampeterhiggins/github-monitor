@@ -27,4 +27,5 @@ tauri-plugin-shell = "2.3.5"
 tauri-plugin-store = "2.4.4"
 tauri-plugin-sql = { version = "2.4.0", features = ["sqlite"] }
 tauri-plugin-updater = "2.10.1"
+tauri-plugin-process = "2.3.1"
 

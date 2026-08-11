@@ -1,0 +1,251 @@
+name: Release
+
+# Modelled on the t3code release flow: a preflight job resolves the version and
+# previous tag, a build job produces the artifacts, a release job publishes them,
+# and a final job updates the updater manifest.
+#
+# Two channels were deliberately not implemented (stable only). Tauri's JS updater
+# API cannot switch endpoints at runtime and there is no {{channel}} template
+# variable, so user-selectable channels would need a custom Rust command. Adding
+# nightly later means: a scheduled trigger, a second manifest (nightly.json), and
+# that Rust command.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.2.0). Tags the current commit."
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      previous_tag: ${{ steps.previous.outputs.previous_tag }}
+      ref: ${{ steps.meta.outputs.ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: meta
+        name: Resolve version and tag
+        env:
+          DISPATCH_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            version="${DISPATCH_VERSION#v}"
+            tag="v${version}"
+          else
+            tag="${GITHUB_REF_NAME}"
+            version="${tag#v}"
+          fi
+
+          # The version the updater compares is the one in tauri.conf.json. If it
+          # disagrees with the tag, the app would either re-offer a version it is
+          # already running or never offer it at all — so fail loudly instead.
+          conf_version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          if [[ "$conf_version" != "$version" ]]; then
+            echo "::error::tauri.conf.json is $conf_version but the release is $version." \
+                 "Run 'npm run release:prepare -- $version', commit, then tag."
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ref=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag from ${GITHUB_SHA}"
+
+      - id: previous
+        name: Find previous tag
+        run: |
+          set -euo pipefail
+          previous="$(git tag --list 'v*.*.*' --sort=-v:refname \
+            | grep -v "^${{ steps.meta.outputs.tag }}$" | head -n 1 || true)"
+          echo "previous_tag=$previous" >> "$GITHUB_OUTPUT"
+          echo "Previous tag: ${previous:-<none>}"
+
+  build:
+    name: Build macOS bundle
+    needs: [preflight]
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install Rust with both macOS targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # A universal binary means one updater artifact serves Apple Silicon and
+          # Intel alike, so the manifest needs no per-arch asset.
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - run: npm ci
+
+      - name: Typecheck and test
+        run: npm run check
+
+      - name: Build signed universal bundle
+        env:
+          # Without these the bundle has no .sig and the app will refuse it.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]]; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY is not set. Updates cannot be signed." \
+                 "See the Releasing section of the README."
+            exit 1
+          fi
+          npm run tauri -- build --target universal-apple-darwin
+
+      - name: Collect artifacts
+        id: collect
+        run: |
+          set -euo pipefail
+          bundle="src-tauri/target/universal-apple-darwin/release/bundle"
+          mkdir -p dist-release
+
+          shopt -s nullglob
+          tarballs=("$bundle"/macos/*.app.tar.gz)
+          sigs=("$bundle"/macos/*.app.tar.gz.sig)
+          dmgs=("$bundle"/dmg/*.dmg)
+
+          if [[ ${#tarballs[@]} -eq 0 || ${#sigs[@]} -eq 0 ]]; then
+            echo "::error::No updater artifacts produced. Check bundle.createUpdaterArtifacts."
+            ls -R "$bundle" || true
+            exit 1
+          fi
+
+          # Spaces in "GitHub Monitor.app.tar.gz" make some tooling awkward; rename
+          # to a stable, boring asset name.
+          version="${{ needs.preflight.outputs.version }}"
+          cp "${tarballs[0]}" "dist-release/github-monitor_${version}_universal.app.tar.gz"
+          cp "${sigs[0]}"     "dist-release/github-monitor_${version}_universal.app.tar.gz.sig"
+          for d in "${dmgs[@]}"; do
+            cp "$d" "dist-release/github-monitor_${version}_universal.dmg"
+          done
+
+          ls -la dist-release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-bundle
+          path: dist-release/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: [preflight, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-bundle
+          path: dist-release
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          target_commitish: ${{ needs.preflight.outputs.ref }}
+          name: ${{ needs.preflight.outputs.tag }}
+          generate_release_notes: true
+          previous_tag: ${{ needs.preflight.outputs.previous_tag }}
+          make_latest: true
+          files: |
+            dist-release/*.app.tar.gz
+            dist-release/*.app.tar.gz.sig
+            dist-release/*.dmg
+          # A release with no assets would look successful while shipping nothing.
+          fail_on_unmatched_files: true
+          token: ${{ github.token }}
+
+  manifest:
+    name: Update updater manifest
+    needs: [preflight, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Generate latest.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node scripts/build-update-manifest.mjs --tag "${{ needs.preflight.outputs.tag }}" --out latest.json
+
+      - name: Publish manifest to the releases branch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The app fetches this file from raw.githubusercontent.com, which serves
+          # private repositories to an authenticated request. It therefore needs a
+          # stable branch path, not a per-release asset URL.
+          cp latest.json /tmp/latest.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --heads origin releases >/dev/null 2>&1; then
+            git fetch origin releases
+            git checkout releases
+          else
+            # Orphan branch: the manifest has no relationship to the source history.
+            git checkout --orphan releases
+            git rm -rf . >/dev/null 2>&1 || true
+          fi
+
+          cp /tmp/latest.json latest.json
+          git add latest.json
+          git commit -m "chore(release): manifest for ${{ needs.preflight.outputs.tag }}"
+          git push origin releases
+
+      - name: Summary
+        run: |
+          {
+            echo "### Released ${{ needs.preflight.outputs.tag }}"
+            echo
+            echo "The app will offer this update on its next check (startup + every 6 hours)."
+            echo
+            echo '```json'
+            cat latest.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

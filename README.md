@@ -48,6 +48,82 @@ and the app says so rather than rendering blank charts.
 | Actions usage | `actions/runs` | Wall-clock elapsed, not billable minutes |
 | Actions performance | `actions/runs` | p50/p90/p99 duration, failure rates |
 
+## Releasing and updating
+
+Modelled on t3code's release flow — preflight resolves the version, build produces
+artifacts, release publishes them, a final job updates the update manifest — but
+implemented for Tauri rather than Electron, and **stable channel only**.
+
+### One-time setup
+
+The signing key is what the app uses to prove an update is genuinely yours; without
+it, an update cannot be installed.
+
+```bash
+# 1. Generate a keypair (already done if .updater/ exists — it is gitignored)
+npx tauri signer generate -w .updater/signing.key -p ""
+
+# 2. Give CI the private key
+gh secret set TAURI_SIGNING_PRIVATE_KEY < .updater/signing.key
+gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body ""
+```
+
+The **public** key lives in `src-tauri/tauri.conf.json` and is committed — that is
+what each build trusts. **Back up `.updater/signing.key`.** Lose it and existing
+installs can never be updated again; they would need replacing by hand.
+
+### Cutting a release
+
+```bash
+npm run release:prepare -- 0.2.0    # bumps package.json, tauri.conf.json, Cargo.toml
+git commit -am "chore(release): 0.2.0"
+git tag v0.2.0
+git push origin main --tags
+```
+
+The workflow then builds a signed **universal** macOS bundle, publishes a GitHub
+Release with the `.dmg`, `.app.tar.gz` and `.app.tar.gz.sig`, and commits a
+`latest.json` to the `releases` branch. The running app picks it up on its next
+check — 15 seconds after launch, then every 6 hours — or immediately via
+**Settings → Updates → Check now**.
+
+`workflow_dispatch` with a version input does the same thing without a local tag.
+
+Preflight **fails deliberately** if `tauri.conf.json`'s version disagrees with the
+tag. That mismatch is silent but nasty: the updater compares against the config
+version, so the app would either re-offer a version it already runs or never offer
+it at all.
+
+### How updates reach a private repo
+
+This repository is private, so the updater cannot fetch anonymously. Two facts make
+it work without any Rust:
+
+- the plugin sends configured request headers on **both** the manifest fetch and
+  the binary download, defaulting `Accept` only when unset — `application/json` for
+  the manifest, `application/octet-stream` for the download. Passing just
+  `Authorization` therefore leaves both correct;
+- `raw.githubusercontent.com` honours a bearer token on private repositories, and
+  so does `api.github.com/repos/…/releases/assets/<id>`.
+
+So the manifest lives on the `releases` branch (a stable URL, unlike per-release
+asset ids) and points the download at the asset's **API** URL. Both were verified
+against this repository before the code was written: authenticated requests return
+200, unauthenticated ones 404.
+
+The app reuses the GitHub token you already gave it, so updating needs no extra
+credential — but it does mean **only accounts with read access to this repository
+can update**. If that becomes limiting, host the artifacts in a small public repo
+and drop the auth headers.
+
+### Why no nightly channel
+
+t3code ships stable and nightly. Tauri's JS updater API cannot switch endpoints at
+runtime and there is no `{{channel}}` template variable, so a user-selectable
+channel needs a custom Rust command wrapping `updater_builder().endpoints(…)`.
+Stable-only keeps the whole implementation in TypeScript. Adding nightly later
+means: a scheduled trigger, a second `nightly.json`, and that Rust command.
+
 ## Filters
 
 **Repository.** Curate the set in **Settings → Repositories** (a checkbox list with

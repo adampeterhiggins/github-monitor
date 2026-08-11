@@ -1,6 +1,9 @@
 import { useEffect, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useApp } from "./lib/state/app";
+import { useUpdates } from "./lib/state/updates";
+import { provideUpdateToken } from "./lib/state/updates";
+import { UpdateBadge } from "./components/UpdatePanel";
 import { Button, Card, Spinner } from "./components/ui";
 import { Setup } from "./pages/Setup";
 import { Settings } from "./pages/Settings";
@@ -54,6 +57,15 @@ function Shell() {
   useEffect(() => {
     void boot();
   }, [boot]);
+
+  // One updater poller for the whole app, so the sidebar badge and the Settings
+  // card never issue competing checks. The token is read lazily so one added
+  // after launch is picked up.
+  const startPoller = useUpdates((s) => s.startPoller);
+  useEffect(() => {
+    provideUpdateToken(() => useApp.getState().token);
+    return startPoller();
+  }, [startPoller]);
 
   if (!booted) {
     return (
@@ -123,6 +135,7 @@ function Sidebar({ page, onNavigate }: { page: PageId; onNavigate: (p: PageId) =
       </ul>
 
       <div className="border-t border-hairline p-2">
+        <UpdateBadge onClick={() => onNavigate("settings")} />
         <Button
           variant={page === "settings" ? "default" : "ghost"}
           className="w-full justify-start"
