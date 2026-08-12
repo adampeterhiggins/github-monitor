@@ -156,3 +156,29 @@ export function formatDate(d: Date | number): string {
 export function formatShort(d: Date | number): string {
   return SHORT_FMT.format(typeof d === "number" ? new Date(d) : d);
 }
+
+const MONTH_YEAR_FMT = new Intl.DateTimeFormat("en-GB", {
+  month: "short",
+  year: "2-digit",
+  timeZone: "UTC",
+});
+
+/** e.g. "Aug 26" — for axes spanning more than a year. */
+export function formatMonthYear(d: Date | number): string {
+  return MONTH_YEAR_FMT.format(typeof d === "number" ? new Date(d) : d);
+}
+
+/**
+ * Pick an axis tick format for a set of week starts.
+ *
+ * Day-and-month alone is ambiguous once an axis spans years: successive ticks
+ * land in the same month of different years and read as "4 Aug, 9 Aug, 8 Aug",
+ * which looks like days in one month rather than seven separate years.
+ */
+export function weekTickFormatter(weeks: readonly number[]): (week: number) => string {
+  if (weeks.length < 2) return (w) => formatShort(w * 1000);
+  const spanDays = (weeks[weeks.length - 1] - weeks[0]) / 86_400;
+  return spanDays > 400
+    ? (w) => formatMonthYear(w * 1000)
+    : (w) => formatShort(w * 1000);
+}

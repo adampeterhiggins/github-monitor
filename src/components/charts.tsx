@@ -16,7 +16,7 @@ import {
 import { useMemo } from "react";
 import { useVizPalette } from "../lib/viz/useVizPalette";
 import { sequentialStep, type VizPalette } from "../lib/viz/palette";
-import { formatShort, formatDate } from "../lib/agg/weeks";
+import { formatShort, formatDate, weekTickFormatter } from "../lib/agg/weeks";
 import { compact, full } from "./ui";
 
 /* ── Shared chart chrome ────────────────────────────────────────────────────
@@ -139,6 +139,7 @@ export function WeeklyColumns({
   const palette = useVizPalette();
   // One series: no legend box — the card title already names what is plotted.
   const color = palette.series[0];
+  const tick = weekTickFormatter(data.map((d) => d.week));
 
   if (data.length === 0) return <NoData height={height} />;
 
@@ -149,7 +150,7 @@ export function WeeklyColumns({
         <XAxis
           dataKey="week"
           {...axisProps(palette)}
-          tickFormatter={(w: number) => formatShort(w * 1000)}
+          tickFormatter={tick}
           minTickGap={28}
         />
         <YAxis
@@ -180,7 +181,7 @@ export function WeeklyColumns({
             travellerWidth={8}
             stroke={palette.baseline}
             fill={palette.mode === "dark" ? "rgba(255,255,255,0.03)" : "rgba(11,11,11,0.02)"}
-            tickFormatter={(w: number) => formatShort(w * 1000)}
+            tickFormatter={tick}
             onChange={(range) => {
               const r = range as { startIndex?: number; endIndex?: number };
               if (r.startIndex != null && r.endIndex != null) {
@@ -217,6 +218,7 @@ export function Sparkline({
   // Small multiples all carry the same single series, so the all-pairs series cap
   // does not bite here — every card is slot 1.
   const color = palette.series[colorIndex] ?? palette.series[0];
+  const tick = weekTickFormatter(data.map((d) => d.week));
 
   if (data.length === 0) return <NoData height={height} compactMessage />;
 
@@ -228,7 +230,7 @@ export function Sparkline({
           dataKey="week"
           {...axisProps(palette)}
           tick={{ fill: palette.inkMuted, fontSize: 10 }}
-          tickFormatter={(w: number) => formatShort(w * 1000)}
+          tickFormatter={tick}
           minTickGap={34}
           axisLine={false}
         />
@@ -282,6 +284,7 @@ export function DivergingWeekly({
     () => data.map((d) => ({ week: d.week, additions: d.additions, deletions: -d.deletions })),
     [data],
   );
+  const tick = weekTickFormatter(data.map((d) => d.week));
 
   if (data.length === 0) return <NoData height={height} />;
 
@@ -293,7 +296,7 @@ export function DivergingWeekly({
           <XAxis
             dataKey="week"
             {...axisProps(palette)}
-            tickFormatter={(w: number) => formatShort(w * 1000)}
+            tickFormatter={tick}
             minTickGap={28}
           />
           <YAxis

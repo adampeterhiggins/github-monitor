@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useApp, type ContributionMetric } from "../lib/state/app";
 import { useScope, useScopedQuery } from "../lib/hooks";
 import {
@@ -85,21 +85,77 @@ export function Contributors() {
     }));
   }, [totals.data, axisWeeks, metric]);
 
+  /**
+   * The brushed window, as indices into `axisWeeks`.
+   *
+   * Debounced: the brush fires continuously while dragging, and with "All time"
+   * spanning thousands of weeks, recomputing every card on each event makes the
+   * drag stutter.
+   */
+  const [brush, setBrush] = useState<{ start: number; end: number } | null>(null);
+  const [pendingBrush, setPendingBrush] = useState<{ start: number; end: number } | null>(null);
+
+  useEffect(() => {
+    if (pendingBrush === null) return;
+    const t = setTimeout(() => setBrush(pendingBrush), 60);
+    return () => clearTimeout(t);
+  }, [pendingBrush]);
+
+  // A new period or repo selection changes the axis, so old indices are meaningless.
+  useEffect(() => {
+    setBrush(null);
+    setPendingBrush(null);
+  }, [scope.key]);
+
+  /** Weeks the cards should cover: the brushed window, or the whole range. */
+  const visibleWeeks = useMemo(() => {
+    if (!brush || axisWeeks.length === 0) return axisWeeks;
+    const last = axisWeeks.length - 1;
+    const start = Math.max(0, Math.min(brush.start, last));
+    const end = Math.max(start, Math.min(brush.end, last));
+    return axisWeeks.slice(start, end + 1);
+  }, [axisWeeks, brush]);
+
+  const zoomed = visibleWeeks.length > 0 && visibleWeeks.length !== axisWeeks.length;
+
+  /**
+   * login -> week -> row. Built from the query result alone so that brushing does
+   * not redo it; only the windowed slice below re-runs on a drag.
+   */
+  const byLogin = useMemo(() => {
+    const out = new Map<string, Map<number, ContributorWeekRow>>();
+    for (const row of perLogin.data ?? []) {
+      let m = out.get(row.login);
+      if (!m) {
+        m = new Map();
+        out.set(row.login, m);
+      }
+      m.set(row.week, row);
+    }
+    return out;
+  }, [perLogin.data]);
+
   const cards = useMemo(() => {
     const metaByLogin = new Map(meta.data?.map((m) => [m.login, m]) ?? []);
-    const grouped = new Map<string, ContributorWeekRow[]>();
-    for (const row of perLogin.data ?? []) {
-      const list = grouped.get(row.login);
-      if (list) list.push(row);
-      else grouped.set(row.login, [row]);
-    }
-
     const out: ContributorCard[] = [];
-    for (const [login, rows] of grouped) {
-      const byWeek = new Map(rows.map((r) => [r.week, r]));
-      const commits = rows.reduce((a, r) => a + Number(r.commits), 0);
-      const additions = rows.reduce((a, r) => a + Number(r.additions), 0);
-      const deletions = rows.reduce((a, r) => a + Number(r.deletions), 0);
+
+    for (const [login, weeksByNumber] of byLogin) {
+      let commits = 0;
+      let additions = 0;
+      let deletions = 0;
+      const weeks: Array<{ week: number; value: number }> = [];
+
+      // Totals are summed over the visible window too, so the figures on a card
+      // always describe the chart beside them — which is what makes brushing
+      // useful rather than confusing.
+      for (const week of visibleWeeks) {
+        const row = weeksByNumber.get(week);
+        commits += Number(row?.commits ?? 0);
+        additions += Number(row?.additions ?? 0);
+        deletions += Number(row?.deletions ?? 0);
+        weeks.push({ week, value: Number(row?.[metric] ?? 0) });
+      }
+
       out.push({
         login,
         avatar: metaByLogin.get(login)?.avatar_url ?? null,
@@ -107,18 +163,14 @@ export function Contributors() {
         commits,
         additions,
         deletions,
-        weeks: axisWeeks.map((week) => ({
-          week,
-          value: Number(byWeek.get(week)?.[metric] ?? 0),
-        })),
+        weeks,
       });
     }
 
-    // Rank by the selected contribution type, as the repo-level page does.
-    return out
-      .filter((c) => c[metric] > 0)
-      .sort((a, b) => b[metric] - a[metric]);
-  }, [perLogin.data, meta.data, axisWeeks, metric]);
+    // Rank by the selected contribution type, as the repo-level page does. The
+    // order therefore changes as the window changes, which is the point.
+    return out.filter((c) => c[metric] > 0).sort((a, b) => b[metric] - a[metric]);
+  }, [byLogin, meta.data, visibleWeeks, metric]);
 
   /** One shared scale across the cards — self-scaled small multiples mislead. */
   const cardYMax = useMemo(
@@ -168,14 +220,34 @@ export function Contributors() {
       <div className="flex flex-col gap-4">
         <ChartCard
           title={`${METRICS.find((m) => m.id === metric)!.label} over time`}
-          subtitle={`Weekly from ${formatDate(scope.range.fromWeek * 1000)} to ${formatDate(
-            scope.range.toWeek * 1000 + WEEK_SECONDS * 1000 - 1,
-          )}`}
+          subtitle={
+            zoomed
+              ? `Weekly from ${formatDate(visibleWeeks[0] * 1000)} to ${formatDate(
+                  visibleWeeks[visibleWeeks.length - 1] * 1000 + WEEK_SECONDS * 1000 - 1,
+                )} — drag the handles below to change the window`
+              : `Weekly from ${formatDate(scope.range.fromWeek * 1000)} to ${formatDate(
+                  scope.range.toWeek * 1000 + WEEK_SECONDS * 1000 - 1,
+                )}`
+          }
           loading={loading}
           actions={
-            <span className="mr-1 text-[12px] tabular text-ink-secondary">
-              {full(grandTotal)} total
-            </span>
+            <>
+              {zoomed ? (
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    setBrush(null);
+                    setPendingBrush(null);
+                  }}
+                  title="Show the whole period again"
+                >
+                  Reset zoom
+                </Button>
+              ) : null}
+              <span className="mr-1 text-[12px] tabular text-ink-secondary">
+                {full(grandTotal)} total
+              </span>
+            </>
           }
           table={
             <DataTable
@@ -201,7 +273,13 @@ export function Contributors() {
             />
           }
         >
-          <WeeklyColumns data={masterSeries} metricLabel={metricLabel} height={240} withBrush />
+          <WeeklyColumns
+            data={masterSeries}
+            metricLabel={metricLabel}
+            height={240}
+            withBrush
+            onBrushChange={(r) => setPendingBrush({ start: r.startIndex, end: r.endIndex })}
+          />
         </ChartCard>
 
         {cards.length === 0 ? (
@@ -211,6 +289,13 @@ export function Contributors() {
           />
         ) : (
           <>
+            {zoomed ? (
+              <p className="text-[12px] text-ink-secondary">
+                Cards below cover the selected window ({full(visibleWeeks.length)} week
+                {visibleWeeks.length === 1 ? "" : "s"}), so totals and ranking change with it.
+              </p>
+            ) : null}
+
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
               {cards.slice(0, limit).map((c, i) => (
                 <ContributorCardView
