@@ -154,17 +154,25 @@ export interface ContributorSummary {
   login: string;
   avatar_url: string | null;
   html_url: string | null;
+  /** Commits inside the selected period. */
   commits: number;
   additions: number;
   deletions: number;
+  /** Distinct repositories touched inside the period. */
   repos: number;
+  /** Commits across all time, so someone quiet now is still listed. */
+  commits_all: number;
   last_week: number | null;
 }
 
 /**
- * Contributors with activity in the selected repositories, ranked by commits.
- * Drives the contributor filter's list. Deliberately not date-scoped, so someone
- * who is quiet in the current period can still be selected.
+ * Contributors in the selected repositories, for the contributor filter.
+ *
+ * Identity is deliberately *not* date-scoped while the aggregates are: someone
+ * with no commits this period must still be listed, or they could never be
+ * selected in order to look at their history. `commits` is therefore the period
+ * figure the dropdown displays and filters on, and `commits_all` is what keeps
+ * them present at all.
  *
  * Grouped by `LOWER(login)` rather than `login`. GitHub normally returns one
  * consistent casing per account, but the cache's primary key is case-sensitive, so
@@ -177,18 +185,27 @@ export interface ContributorSummary {
 export async function listContributors(
   db: Database,
   repoIds: readonly number[],
+  /** Period bounds. Aggregates are scoped to these; identity is not. */
+  fromWeek?: number,
+  toWeek?: number,
 ): Promise<ContributorSummary[]> {
   const p = new Params();
   const ids = p.in(repoIds);
+  // Unbounded defaults keep the aggregates equal to all time when no period is
+  // given, so callers that do not care about a window need not pass one.
+  const from = p.add(fromWeek ?? 0);
+  const to = p.add(toWeek ?? Number.MAX_SAFE_INTEGER);
+
   return db.select<ContributorSummary[]>(
     `WITH agg AS (
-       SELECT LOWER(login)          AS key,
-              MIN(login)            AS login,
-              SUM(commits)          AS commits,
-              SUM(additions)        AS additions,
-              SUM(deletions)        AS deletions,
-              COUNT(DISTINCT repo_id) AS repos,
-              MAX(week)             AS last_week
+       SELECT LOWER(login) AS key,
+              MIN(login)   AS login,
+              SUM(commits) AS commits_all,
+              SUM(CASE WHEN week >= ${from} AND week <= ${to} THEN commits   ELSE 0 END) AS commits,
+              SUM(CASE WHEN week >= ${from} AND week <= ${to} THEN additions ELSE 0 END) AS additions,
+              SUM(CASE WHEN week >= ${from} AND week <= ${to} THEN deletions ELSE 0 END) AS deletions,
+              COUNT(DISTINCT CASE WHEN week >= ${from} AND week <= ${to} THEN repo_id END) AS repos,
+              MAX(week) AS last_week
        FROM contributor_weeks
        WHERE repo_id IN ${ids}
        GROUP BY LOWER(login)
@@ -196,10 +213,10 @@ export async function listContributors(
      SELECT a.login,
             (SELECT c.avatar_url FROM contributors c WHERE LOWER(c.login) = a.key LIMIT 1) AS avatar_url,
             (SELECT c.html_url   FROM contributors c WHERE LOWER(c.login) = a.key LIMIT 1) AS html_url,
-            a.commits, a.additions, a.deletions, a.repos, a.last_week
+            a.commits, a.additions, a.deletions, a.repos, a.commits_all, a.last_week
      FROM agg a
-     WHERE a.commits > 0
-     ORDER BY a.commits DESC`,
+     WHERE a.commits_all > 0
+     ORDER BY a.commits DESC, a.commits_all DESC`,
     p.values,
   );
 }

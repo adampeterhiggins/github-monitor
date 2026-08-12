@@ -1,9 +1,8 @@
 import { useMemo, useState } from "react";
 import { useApp } from "../lib/state/app";
-import { useScope, type UserFilterSupport } from "../lib/hooks";
+import { useScope, useScopedQuery, type UserFilterSupport } from "../lib/hooks";
 import { listContributors } from "../lib/db/queries";
-import { useScopedQuery } from "../lib/hooks";
-import { Button, Checkbox, Dropdown, compact, full } from "./ui";
+import { Button, Checkbox, Dropdown, DropdownRow, compact, full } from "./ui";
 
 /**
  * Contributor filter.
@@ -15,17 +14,46 @@ import { Button, Checkbox, Dropdown, compact, full } from "./ui";
  * per-contributor breakdown the control is disabled and says why, rather than
  * appearing to work and quietly changing nothing.
  */
+
+type UserSort = "commits" | "name" | "repos";
+
+const SORTS: Array<{ id: UserSort; label: string }> = [
+  { id: "commits", label: "Commits in period" },
+  { id: "name", label: "Name (A–Z)" },
+  { id: "repos", label: "Repositories touched" },
+];
+
+const SORT_KEY = "github-monitor.userSort";
+const HIDE_KEY = "github-monitor.userHideInactive";
+
 export function UserFilter({ support }: { support: UserFilterSupport }) {
   const scope = useScope();
   const selected = useApp((s) => s.selectedLogins);
   const setSelectedLogins = useApp((s) => s.setSelectedLogins);
   const myLogin = useApp((s) => s.login);
   const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<UserSort>(
+    () => (localStorage.getItem(SORT_KEY) as UserSort) || "commits",
+  );
+  const [hideInactive, setHideInactive] = useState(
+    () => localStorage.getItem(HIDE_KEY) !== "false",
+  );
 
+  const applySort = (s: UserSort) => {
+    localStorage.setItem(SORT_KEY, s);
+    setSort(s);
+  };
+  const applyHide = (v: boolean) => {
+    localStorage.setItem(HIDE_KEY, String(v));
+    setHideInactive(v);
+  };
+
+  // Aggregates are scoped to the period; identity is not, so someone quiet now is
+  // still selectable in order to look at their history.
   const contributors = useScopedQuery(
     "contributor-list",
     scope,
-    (db) => listContributors(db, scope.repoIds),
+    (db) => listContributors(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek),
     { staleTime: 5 * 60_000 },
   );
 
@@ -34,8 +62,34 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return q ? all.filter((c) => c.login.toLowerCase().includes(q)) : all;
-  }, [all, query]);
+    const rows = all
+      .filter((c) => (q ? c.login.toLowerCase().includes(q) : true))
+      // A selected contributor is never hidden — otherwise the page would be
+      // scoped by someone invisible in the control that scopes it.
+      .filter(
+        (c) => !hideInactive || Number(c.commits) > 0 || selectedSet.has(c.login.toLowerCase()),
+      );
+
+    return [...rows].sort((a, b) => {
+      if (sort === "name") return a.login.localeCompare(b.login);
+      if (sort === "repos") {
+        const diff = Number(b.repos) - Number(a.repos);
+        return diff !== 0 ? diff : a.login.localeCompare(b.login);
+      }
+      const diff = Number(b.commits) - Number(a.commits);
+      return diff !== 0 ? diff : a.login.localeCompare(b.login);
+    });
+  }, [all, query, hideInactive, selectedSet, sort]);
+
+  const hiddenCount = useMemo(
+    () =>
+      hideInactive
+        ? all.filter(
+            (c) => Number(c.commits) === 0 && !selectedSet.has(c.login.toLowerCase()),
+          ).length
+        : 0,
+    [all, hideInactive, selectedSet],
+  );
 
   if (support === "none") {
     return (
@@ -71,10 +125,10 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
           ) : null}
         </span>
       }
-      width={320}
+      width={400}
       align="left"
     >
-      <div className="flex flex-col" style={{ maxHeight: 460 }}>
+      <div className="flex flex-col" style={{ maxHeight: 520 }}>
         <div className="border-b border-hairline p-2">
           <input
             value={query}
@@ -93,11 +147,45 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
             ) : null}
             <Button
               variant="ghost"
-              title="The ten contributors with the most commits in the selected repositories"
-              onClick={() => apply(all.slice(0, 10).map((c) => c.login))}
+              title="The ten contributors with the most commits in the selected period"
+              onClick={() => apply(visible.slice(0, 10).map((c) => c.login))}
             >
               Top 10
             </Button>
+          </div>
+
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <Dropdown
+              label={`Sort: ${SORTS.find((s) => s.id === sort)!.label}`}
+              width={190}
+              align="left"
+            >
+              {(close) => (
+                <div className="py-1">
+                  {SORTS.map((s) => (
+                    <DropdownRow
+                      key={s.id}
+                      selected={s.id === sort}
+                      onClick={() => {
+                        applySort(s.id);
+                        close();
+                      }}
+                    >
+                      {s.label}
+                    </DropdownRow>
+                  ))}
+                </div>
+              )}
+            </Dropdown>
+            <Checkbox
+              checked={hideInactive}
+              onChange={applyHide}
+              label={
+                <span className="text-ink-secondary">
+                  Hide inactive{hiddenCount > 0 ? ` (${full(hiddenCount)})` : ""}
+                </span>
+              }
+            />
           </div>
         </div>
 
@@ -108,37 +196,52 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
             <p className="px-1.5 py-3 text-center text-[12px] text-ink-secondary">
               {all.length === 0
                 ? "No contributor data cached yet — run a sync first."
-                : "No contributors match"}
+                : hideInactive
+                  ? "Nobody committed in this period. Untick “Hide inactive” to see everyone."
+                  : "No contributors match"}
             </p>
           ) : (
-            visible.map((c) => (
-              <div key={c.login} className="flex items-center gap-2 px-1.5 py-[3px]">
-                <div className="min-w-0 flex-1">
-                  <Checkbox
-                    checked={selectedSet.has(c.login.toLowerCase())}
-                    onChange={() =>
-                      apply(
-                        selectedSet.has(c.login.toLowerCase())
-                          ? selected.filter((l) => l.toLowerCase() !== c.login.toLowerCase())
-                          : [...selected, c.login],
-                      )
+            visible.map((c) => {
+              const periodCommits = Number(c.commits);
+              return (
+                <div key={c.login} className="flex items-center gap-2 px-1.5 py-[3px]">
+                  <div className="min-w-0 flex-1">
+                    <Checkbox
+                      checked={selectedSet.has(c.login.toLowerCase())}
+                      onChange={() =>
+                        apply(
+                          selectedSet.has(c.login.toLowerCase())
+                            ? selected.filter((l) => l.toLowerCase() !== c.login.toLowerCase())
+                            : [...selected, c.login],
+                        )
+                      }
+                      label={
+                        <span className="flex min-w-0 items-center gap-1.5">
+                          <span className="truncate">{c.login}</span>
+                          {myLogin && c.login.toLowerCase() === myLogin.toLowerCase() ? (
+                            <span className="shrink-0 text-[9px] uppercase text-ink-muted">you</span>
+                          ) : null}
+                        </span>
+                      }
+                    />
+                  </div>
+                  <span
+                    className="shrink-0 text-[10px] tabular text-ink-muted"
+                    title={
+                      periodCommits > 0
+                        ? `${full(periodCommits)} commits across ${full(Number(c.repos))} repositories in this period`
+                        : `No commits in this period; ${full(Number(c.commits_all))} all time`
                     }
-                    label={
-                      <span className="flex min-w-0 items-center gap-1.5">
-                        <span className="truncate">{c.login}</span>
-                        {myLogin && c.login.toLowerCase() === myLogin.toLowerCase() ? (
-                          <span className="shrink-0 text-[9px] uppercase text-ink-muted">you</span>
-                        ) : null}
-                      </span>
-                    }
-                  />
+                  >
+                    {periodCommits > 0
+                      ? `${compact(periodCommits)} · ${full(Number(c.repos))} repo${
+                          Number(c.repos) === 1 ? "" : "s"
+                        }`
+                      : "—"}
+                  </span>
                 </div>
-                <span className="shrink-0 text-[10px] tabular text-ink-muted">
-                  {compact(Number(c.commits))} · {full(Number(c.repos))} repo
-                  {Number(c.repos) === 1 ? "" : "s"}
-                </span>
-              </div>
-            ))
+              );
+            })
           )}
         </div>
 

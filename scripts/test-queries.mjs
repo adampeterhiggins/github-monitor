@@ -296,6 +296,49 @@ T("resume RETRIES error", !shouldSkip("error", "resume"));
 T("resume attempts never-recorded pairs", !shouldSkip(undefined, "resume"));
 T("full mode redoes everything", ["ok","empty","forbidden","pending","error"].every((st) => !shouldSkip(st, "full")));
 
+/* ── Filter dropdown data ─────────────────────────────────────────────────── */
+
+// The dropdowns show period figures and hide people with none, but must still
+// LIST someone quiet — otherwise they could never be selected to look at their
+// history, which is the one thing you would open the filter to do.
+{
+  // W2 only: 'someoneelse' committed in W and not W2.
+  const windowed = await q.listContributors(db, IDS, W2, W2);
+  const quiet = windowed.find((c) => c.login === "someoneelse");
+  T("a contributor with no commits in the period is still listed", quiet !== undefined);
+  T("their period commits are zero", quiet && Number(quiet.commits) === 0, `commits=${quiet?.commits}`);
+  T(
+    "but their all-time total is retained so they can be found",
+    quiet && Number(quiet.commits_all) === 3,
+    `all=${quiet?.commits_all}`,
+  );
+
+  const active = windowed.find((c) => c.login.toLowerCase() === "claude");
+  T("period commits reflect the window, not all time", active && Number(active.commits) === 7,
+    `period=${active?.commits} all=${active?.commits_all}`);
+  T("all-time still available alongside", active && Number(active.commits_all) === 17);
+  T(
+    "repos counts distinct repositories touched in the window",
+    active && Number(active.repos) === 1,
+    `repos=${active?.repos}`,
+  );
+
+  // Unbounded call must behave exactly as before.
+  const unbounded = await q.listContributors(db, IDS);
+  T(
+    "omitting the period aggregates over all time",
+    unbounded.find((c) => c.login.toLowerCase() === "claude").commits === 17,
+  );
+
+  // Repository counts for the repo dropdown come from the same period scoping.
+  const repoTotals = await q.commitsByRepo(db, IDS, W2, W2);
+  T(
+    "repository totals are period-scoped too",
+    repoTotals.length === 1 && Number(repoTotals[0].commits) === 10,
+    `rows=${repoTotals.length}`,
+  );
+}
+
 /* ── Breakdown queries ────────────────────────────────────────────────────── */
 
 const repoWeeks = await q.weeklyByRepo(db, IDS, 0, W2 + 1);
