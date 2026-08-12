@@ -184,6 +184,36 @@ been deleted shows a **stale** count in Settings and those entries are skipped w
 applied — rather than the selection quietly shrinking each time. Contributor
 selections store logins and are unaffected.
 
+## Timeline views
+
+Modelled on fd-manager's fieldwork timeline. The Contributors chart — and every
+contributor card, which follows the same controls — offers:
+
+| Control | Options |
+|---|---|
+| Shape | Bars · Area · Line |
+| Accumulation | Per period · Cumulative |
+| Period | Weekly · Monthly · Quarterly |
+| Break down | None · By contributor · By repository |
+| Stacking | Stacked · Overlaid (when broken down) |
+
+The legend is clickable: the first click isolates a series, further clicks add or
+remove, and clearing the last one returns to showing everything. Hovering gives a
+crosshair readout of every visible series at that point, totalled.
+
+Two deliberate details. Fill opacity differs by mode — stacked bands do not
+overlap so the fill *is* the encoding and reads solid, whereas overlaid series do
+overlap, so there the 2px stroke carries identity and the fill is only a wash that
+would otherwise hide what sits behind it. And a cumulative card drops the shared y
+scale, because accumulated totals differ by an order of magnitude between the top
+and bottom of the list and a shared ceiling would flatten everyone but the leader.
+
+Roll-up and accumulation are applied last, so they compose with every breakdown
+rather than each view needing its own path. Both are pure functions in
+`lib/agg/series.ts` and tested directly: the failure modes — a cumulative series
+that dips, a roll-up that loses a bucket or misplaces a month boundary — all still
+draw a plausible curve.
+
 ## Breakdowns
 
 The org-wide chart on Contributors can be split **by contributor** or **by

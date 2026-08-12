@@ -48,6 +48,7 @@ async function bundle(entry, out) {
 const q = await bundle("src/lib/db/queries.ts", "queries.cjs");
 const sync = await bundle("src/lib/ingest/sync.ts", "sync.cjs");
 const stacks = await bundle("src/lib/agg/stacks.ts", "stacks.cjs");
+const series = await bundle("src/lib/agg/series.ts", "series.cjs");
 const { splitStatements } = await bundle("src/lib/db/index.ts", "dbindex.cjs");
 const { SCHEMA_SQL } = await bundle("src/lib/db/schema.ts", "schema.cjs");
 
@@ -547,6 +548,68 @@ T(
     valueOf: (r) => r.v,
   });
   T("entities with no activity are omitted", zeros.series.length === 1 && zeros.series[0].key === "real");
+}
+
+/* ── Timeline reshaping ───────────────────────────────────────────────────── */
+
+// Both of these still draw a plausible curve when wrong, so they are checked
+// directly: a cumulative series that dips, or a roll-up that loses a bucket, looks
+// like data rather than a bug.
+{
+  const { rollUp, toCumulative, bucketStart } = series;
+  const WEEK = 604800;
+  // 10 consecutive weeks from 5 Jan 2026 (a Monday-ish anchor is irrelevant; the
+  // function keys off the week start it is given).
+  const first = Math.floor(Date.UTC(2026, 0, 4) / 1000);
+  const rows = Array.from({ length: 10 }, (_, i) => ({ week: first + i * WEEK, a: i + 1, b: 1 }));
+
+  const cum = toCumulative(rows, ["a", "b"]);
+  T("cumulative ends at the sum", cum[9].a === 55 && cum[9].b === 10, `a=${cum[9].a} b=${cum[9].b}`);
+  T("cumulative never decreases", cum.every((r, i) => i === 0 || r.a >= cum[i - 1].a));
+  T("cumulative keeps the same number of rows", cum.length === rows.length);
+
+  // A gap must plateau, not drop to zero.
+  const gapped = [
+    { week: first, a: 5 },
+    { week: first + WEEK, a: 0 },
+    { week: first + 2 * WEEK, a: 3 },
+  ];
+  const gapCum = toCumulative(gapped, ["a"]);
+  T(
+    "a quiet bucket plateaus rather than dropping",
+    gapCum[1].a === 5 && gapCum[2].a === 8,
+    gapCum.map((r) => r.a).join(","),
+  );
+
+  // Roll-up must conserve totals and reduce bucket count.
+  const monthly = rollUp(rows, ["a", "b"], "month");
+  const sumOf = (rs, k) => rs.reduce((acc, r) => acc + r[k], 0);
+  T("monthly roll-up conserves the total", sumOf(monthly, "a") === 55, `got ${sumOf(monthly, "a")}`);
+  T("monthly roll-up reduces bucket count", monthly.length < rows.length && monthly.length >= 2,
+    `buckets=${monthly.length}`);
+  T("roll-up output is ordered by time", monthly.every((r, i) => i === 0 || r.week > monthly[i - 1].week));
+
+  const quarterly = rollUp(rows, ["a", "b"], "quarter");
+  T("quarterly conserves the total too", sumOf(quarterly, "a") === 55);
+  T("quarterly buckets are fewer than monthly", quarterly.length <= monthly.length);
+
+  T("weekly roll-up is a no-op", rollUp(rows, ["a"], "week") === rows);
+
+  // Bucket keys must be real month/quarter starts, or the axis lies.
+  const jan = bucketStart(Math.floor(Date.UTC(2026, 0, 20) / 1000), "month");
+  T("month buckets anchor to the first of the month",
+    new Date(jan * 1000).toISOString().startsWith("2026-01-01"), new Date(jan * 1000).toISOString());
+  const q = bucketStart(Math.floor(Date.UTC(2026, 4, 20) / 1000), "quarter");
+  T("quarter buckets anchor to the quarter start",
+    new Date(q * 1000).toISOString().startsWith("2026-04-01"), new Date(q * 1000).toISOString());
+
+  // Order of operations matters: rolling up then accumulating must equal
+  // accumulating then sampling at bucket ends.
+  const rolledThenCum = toCumulative(rollUp(rows, ["a"], "month"), ["a"]);
+  T(
+    "roll-up then cumulative reaches the same grand total",
+    rolledThenCum[rolledThenCum.length - 1].a === 55,
+  );
 }
 
 /* ── No manual transactions anywhere ──────────────────────────────────────── */

@@ -217,35 +217,47 @@ export function WeeklyColumns({
 }
 
 
-/* ── Stacked weekly columns (break a series down by contributor or repo) ───── */
 
-export interface StackSeriesSpec {
-  key: string;
-  label: string;
-  /** 0..7 for a categorical slot; null renders as the muted "Other" band. */
-  slot: number | null;
-}
+/* ── Timeline area chart ──────────────────────────────────────────────────── */
+
+export type TimelineShape = "area" | "line" | "bar";
 
 /**
- * A stacked version of the weekly column chart.
+ * The curve view: stacked or overlaid areas over time, with a clickable legend.
  *
- * Stacking uses the *adjacent* pairlist the palette was validated against —
- * neighbouring segments are the pairs that touch — so the eight slots are safe
- * here. Anything past eight arrives folded into a single "Other" band rather than
- * taking a ninth colour.
+ * Fill opacity differs by mode on purpose. Stacked bands do not overlap, so the
+ * fill *is* the encoding and needs to read as a solid band. Overlaid series do
+ * overlap, so a heavy fill would hide whatever sits behind it — there the 2px
+ * stroke carries identity and the fill is only a wash.
+ *
+ * Clicking a legend entry isolates or restores that series. An empty active set
+ * means everything is shown, which keeps "no filter" and "all selected"
+ * indistinguishable rather than requiring them to be kept in step.
  */
-export function StackedWeeklyColumns({
+export function TimelineArea({
   data,
   series,
-  height = 240,
-  metricLabel,
+  height = 260,
+  shape = "area",
+  stacked = true,
+  valueLabel,
+  labelOf,
+  activeKeys,
+  onToggleKey,
   withBrush = false,
   onBrushChange,
 }: {
   data: Array<Record<string, number>>;
   series: StackSeriesSpec[];
   height?: number;
-  metricLabel: string;
+  shape?: TimelineShape;
+  stacked?: boolean;
+  valueLabel: string;
+  /** Formats the x value for the tooltip heading. */
+  labelOf: (week: number) => string;
+  /** Empty means every series is shown. */
+  activeKeys?: Set<string>;
+  onToggleKey?: (key: string) => void;
   withBrush?: boolean;
   onBrushChange?: (range: { startIndex: number; endIndex: number }) => void;
 }) {
@@ -258,170 +270,197 @@ export function StackedWeeklyColumns({
     color: s.slot == null ? palette.inkMuted : (palette.series[s.slot] ?? palette.inkMuted),
   }));
 
+  const isActive = (key: string) => !activeKeys || activeKeys.size === 0 || activeKeys.has(key);
+  const shown = colored.filter((s) => isActive(s.key));
+
   if (data.length === 0 || series.length === 0) return <NoData height={height} />;
+
+  const axes = (
+    <>
+      <CartesianGrid {...gridProps(palette)} />
+      <XAxis dataKey="week" {...axisProps(palette)} tickFormatter={tick} minTickGap={28} />
+      <YAxis {...axisProps(palette)} width={48} tickFormatter={compact} allowDecimals={false} />
+      <Tooltip
+        // A crosshair on continuous forms so the reader aims at a date rather than
+        // at a 2px line; bars keep the per-mark highlight.
+        cursor={
+          shape === "bar"
+            ? { fill: palette.mode === "dark" ? "rgba(255,255,255,0.06)" : "rgba(11,11,11,0.04)" }
+            : { stroke: palette.baseline, strokeWidth: 1 }
+        }
+        content={({ active, payload }) => {
+          if (!active || !payload?.length) return null;
+          const row = payload[0].payload as Record<string, number>;
+          const rows = shown
+            .map((s) => ({ label: s.label, raw: Number(row[s.key] ?? 0), color: s.color }))
+            .filter((r) => r.raw > 0)
+            .sort((a, b) => b.raw - a.raw);
+          const total = rows.reduce((a, r) => a + r.raw, 0);
+          const capped = rows.slice(0, 10);
+          return (
+            <TooltipShell
+              palette={palette}
+              heading={`${labelOf(Number(row.week))}${
+                rows.length > 1 ? ` · ${full(total)} ${valueLabel}` : ""
+              }`}
+              rows={[
+                ...capped.map((r) => ({ label: r.label, value: full(r.raw), color: r.color })),
+                ...(rows.length > capped.length
+                  ? [{ label: `and ${rows.length - capped.length} more`, value: "" }]
+                  : []),
+              ]}
+            />
+          );
+        }}
+      />
+    </>
+  );
+
+  const brush = withBrush ? (
+    <Brush
+      dataKey="week"
+      height={28}
+      travellerWidth={8}
+      stroke={palette.baseline}
+      fill={palette.mode === "dark" ? "rgba(255,255,255,0.03)" : "rgba(11,11,11,0.02)"}
+      tickFormatter={tick}
+      onChange={(range) => {
+        const r = range as { startIndex?: number; endIndex?: number };
+        if (r.startIndex != null && r.endIndex != null) {
+          onBrushChange?.({ startIndex: r.startIndex, endIndex: r.endIndex });
+        }
+      }}
+    />
+  ) : null;
 
   return (
     <div>
       <ResponsiveContainer width="100%" height={height}>
-        <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} barCategoryGap={geom.gap}>
-          <CartesianGrid {...gridProps(palette)} />
-          <XAxis dataKey="week" {...axisProps(palette)} tickFormatter={tick} minTickGap={28} />
-          <YAxis {...axisProps(palette)} width={44} tickFormatter={compact} allowDecimals={false} />
-          <Tooltip
-            cursor={{ fill: palette.mode === "dark" ? "rgba(255,255,255,0.06)" : "rgba(11,11,11,0.04)" }}
-            content={({ active, payload }) => {
-              if (!active || !payload?.length) return null;
-              const week = Number((payload[0].payload as Record<string, number>).week);
-              const rows = colored
-                .map((s) => ({
-                  label: s.label,
-                  raw: Number((payload[0].payload as Record<string, number>)[s.key] ?? 0),
-                  color: s.color,
-                }))
-                .filter((r) => r.raw > 0)
-                .sort((a, b) => b.raw - a.raw);
-              const total = rows.reduce((a, r) => a + r.raw, 0);
-              // Long stacks make an unreadable tooltip; the table view has the rest.
-              const shown = rows.slice(0, 8);
-              return (
-                <TooltipShell
-                  palette={palette}
-                  heading={`Week of ${formatDate(week * 1000)} · ${full(total)} ${metricLabel}`}
-                  rows={[
-                    ...shown.map((r) => ({ label: r.label, value: full(r.raw), color: r.color })),
-                    ...(rows.length > shown.length
-                      ? [{ label: `and ${rows.length - shown.length} more`, value: "" }]
-                      : []),
-                  ]}
-                />
-              );
-            }}
-          />
-          {colored.map((s) => (
-            <Bar
-              key={s.key}
-              dataKey={s.key}
-              stackId="stack"
-              fill={s.color}
-              maxBarSize={BAR_MAX}
-              /* Only the topmost segment gets the rounded data-end; rounding every
-                 segment would carve notches out of the middle of the stack. */
-              radius={s.key === colored[colored.length - 1].key ? geom.radius : [0, 0, 0, 0]}
-            />
-          ))}
-          {withBrush ? (
-            <Brush
-              dataKey="week"
-              height={28}
-              travellerWidth={8}
-              stroke={palette.baseline}
-              fill={palette.mode === "dark" ? "rgba(255,255,255,0.03)" : "rgba(11,11,11,0.02)"}
-              tickFormatter={tick}
-              onChange={(range) => {
-                const r = range as { startIndex?: number; endIndex?: number };
-                if (r.startIndex != null && r.endIndex != null) {
-                  onBrushChange?.({ startIndex: r.startIndex, endIndex: r.endIndex });
-                }
-              }}
-            />
-          ) : null}
-        </BarChart>
+        {shape === "bar" ? (
+          <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} barCategoryGap={geom.gap}>
+            {axes}
+            {shown.map((s, i) => (
+              <Bar
+                key={s.key}
+                dataKey={s.key}
+                stackId={stacked ? "stack" : undefined}
+                fill={s.color}
+                maxBarSize={BAR_MAX}
+                radius={!stacked || i === shown.length - 1 ? geom.radius : [0, 0, 0, 0]}
+              />
+            ))}
+            {brush}
+          </BarChart>
+        ) : shape === "line" ? (
+          <LineChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
+            {axes}
+            {shown.map((s) => (
+              <Line
+                key={s.key}
+                type="monotone"
+                dataKey={s.key}
+                stroke={s.color}
+                strokeWidth={2}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                dot={false}
+                activeDot={{ r: 4, strokeWidth: 2, stroke: palette.surface }}
+              />
+            ))}
+            {brush}
+          </LineChart>
+        ) : (
+          <AreaChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
+            {axes}
+            {shown.map((s) => (
+              <Area
+                key={s.key}
+                type="monotone"
+                dataKey={s.key}
+                stackId={stacked ? "stack" : undefined}
+                stroke={s.color}
+                strokeWidth={2}
+                fill={s.color}
+                fillOpacity={stacked ? 0.75 : 0.12}
+                dot={false}
+                activeDot={{ r: 4, strokeWidth: 2, stroke: palette.surface }}
+              />
+            ))}
+            {brush}
+          </AreaChart>
+        )}
       </ResponsiveContainer>
-      <div className="mt-2">
-        <Legend shape="rect" items={colored.map((s) => ({ label: s.label, color: s.color }))} />
-      </div>
+
+      {colored.length >= 2 ? (
+        <div className="mt-2">
+          <ClickableLegend
+            items={colored.map((s) => ({ key: s.key, label: s.label, color: s.color }))}
+            isActive={isActive}
+            onToggle={onToggleKey}
+            shape={shape === "line" ? "line" : "rect"}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
 
-/** Compact stacked variant for the contributor cards. */
-export function StackedSparkline({
-  data,
-  series,
-  height = 72,
-  metricLabel,
-  yMax,
+/**
+ * Legend whose entries toggle their series.
+ *
+ * Inactive entries drop to 35% rather than losing their swatch, so the set of
+ * series stays legible while filtered — hiding them would make it impossible to
+ * find what you switched off.
+ */
+export function ClickableLegend({
+  items,
+  isActive,
+  onToggle,
+  shape = "rect",
 }: {
-  data: Array<Record<string, number>>;
-  series: StackSeriesSpec[];
-  height?: number;
-  metricLabel: string;
-  yMax?: number;
+  items: Array<{ key: string; label: string; color: string }>;
+  isActive: (key: string) => boolean;
+  onToggle?: (key: string) => void;
+  shape?: "line" | "rect";
 }) {
-  const palette = useVizPalette();
-  const tick = weekTickFormatter(data.map((d) => d.week));
-  const geom = barGeometry(data.length, [2, 2, 0, 0]);
-  const colored = series.map((s) => ({
-    ...s,
-    color: s.slot == null ? palette.inkMuted : (palette.series[s.slot] ?? palette.inkMuted),
-  }));
-
-  if (data.length === 0 || series.length === 0) return <NoData height={height} compactMessage />;
-
   return (
-    <div>
-      <ResponsiveContainer width="100%" height={height}>
-        <BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 0 }} barCategoryGap={geom.gap}>
-          <CartesianGrid {...gridProps(palette)} />
-          <XAxis
-            dataKey="week"
-            {...axisProps(palette)}
-            tick={{ fill: palette.inkMuted, fontSize: 10 }}
-            tickFormatter={tick}
-            minTickGap={34}
-            axisLine={false}
-          />
-          <YAxis
-            {...axisProps(palette)}
-            orientation="right"
-            width={30}
-            axisLine={false}
-            tick={{ fill: palette.inkMuted, fontSize: 9 }}
-            tickCount={3}
-            allowDecimals={false}
-            domain={yMax != null ? [0, yMax] : undefined}
-            tickFormatter={compact}
-          />
-          <Tooltip
-            cursor={{ fill: palette.mode === "dark" ? "rgba(255,255,255,0.06)" : "rgba(11,11,11,0.04)" }}
-            content={({ active, payload }) => {
-              if (!active || !payload?.length) return null;
-              const row = payload[0].payload as Record<string, number>;
-              const rows = colored
-                .map((s) => ({ label: s.label, raw: Number(row[s.key] ?? 0), color: s.color }))
-                .filter((r) => r.raw > 0)
-                .sort((a, b) => b.raw - a.raw);
-              const total = rows.reduce((a, r) => a + r.raw, 0);
-              return (
-                <TooltipShell
-                  palette={palette}
-                  heading={`Week of ${formatDate(Number(row.week) * 1000)} · ${full(total)} ${metricLabel}`}
-                  rows={rows.slice(0, 6).map((r) => ({
-                    label: r.label,
-                    value: full(r.raw),
-                    color: r.color,
-                  }))}
-                />
-              );
-            }}
-          />
-          {colored.map((s) => (
-            <Bar
-              key={s.key}
-              dataKey={s.key}
-              stackId="stack"
-              fill={s.color}
-              maxBarSize={14}
-              radius={s.key === colored[colored.length - 1].key ? geom.radius : [0, 0, 0, 0]}
-            />
-          ))}
-        </BarChart>
-      </ResponsiveContainer>
-      <div className="mt-1.5">
-        <Legend shape="rect" items={colored.map((s) => ({ label: s.label, color: s.color }))} />
-      </div>
-    </div>
+    <ul className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      {items.map((it) => {
+        const active = isActive(it.key);
+        return (
+          <li key={it.key}>
+            <button
+              type="button"
+              onClick={() => onToggle?.(it.key)}
+              disabled={!onToggle}
+              aria-pressed={active}
+              title={onToggle ? (active ? `Hide ${it.label}` : `Show ${it.label}`) : it.label}
+              className="flex items-center gap-1.5 rounded px-1 py-0.5 text-[11px] text-ink-secondary transition-opacity hover:bg-wash disabled:cursor-default"
+              style={{ opacity: active ? 1 : 0.35 }}
+            >
+              <span
+                aria-hidden="true"
+                style={{
+                  background: it.color,
+                  width: shape === "line" ? 12 : 9,
+                  height: shape === "line" ? 2 : 9,
+                  borderRadius: shape === "line" ? 1 : 2,
+                }}
+              />
+              {it.label}
+            </button>
+          </li>
+        );
+      })}
+    </ul>
   );
+}
+
+export interface StackSeriesSpec {
+  key: string;
+  label: string;
+  /** 0..7 for a categorical slot; null renders as the muted "Other" band. */
+  slot: number | null;
 }
 
 /* ── Sparkline (contributor cards) ────────────────────────────────────────── */

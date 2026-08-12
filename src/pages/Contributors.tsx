@@ -11,9 +11,16 @@ import {
   type ContributorWeekRow,
 } from "../lib/db/queries";
 import { buildStacks } from "../lib/agg/stacks";
+import {
+  GRANULARITIES,
+  bucketLabel,
+  rollUp,
+  toCumulative,
+  type Granularity,
+} from "../lib/agg/series";
 import { WEEK_SECONDS, axisWeeksFor, formatDate } from "../lib/agg/weeks";
 import { PageShell } from "../components/PageShell";
-import { Sparkline, StackedSparkline, StackedWeeklyColumns, WeeklyColumns } from "../components/charts";
+import { Sparkline, TimelineArea, type TimelineShape } from "../components/charts";
 import {
   Button,
   ChartCard,
@@ -51,6 +58,30 @@ export function Contributors() {
   const [limit, setLimit] = useState(24);
   /** How the org-wide chart is split. */
   const [breakdown, setBreakdown] = useState<"none" | "contributor" | "repository">("none");
+
+  /**
+   * Timeline view state. Persisted, because these are a way of reading the data
+   * rather than a transient action, and re-choosing them on every visit is a chore.
+   */
+  const [shape, setShape] = useState<TimelineShape>(
+    () => (localStorage.getItem("github-monitor.shape") as TimelineShape) || "bar",
+  );
+  const [stacked, setStacked] = useState(
+    () => localStorage.getItem("github-monitor.stacked") !== "false",
+  );
+  const [cumulative, setCumulative] = useState(
+    () => localStorage.getItem("github-monitor.cumulative") === "true",
+  );
+  const [granularity, setGranularity] = useState<Granularity>(
+    () => (localStorage.getItem("github-monitor.granularity") as Granularity) || "week",
+  );
+  /** Series switched off via the legend. Empty means everything is shown. */
+  const [activeKeys, setActiveKeys] = useState<Set<string>>(new Set());
+
+  const persist = <T,>(key: string, value: T, set: (v: T) => void) => {
+    localStorage.setItem(key, String(value));
+    set(value);
+  };
 
   /** How every contributor card is split. One control for all of them. */
   const [cardSplit, setCardSplit] = useState<"none" | "repository">(
@@ -235,13 +266,48 @@ export function Contributors() {
         weeks: visibleWeeks,
         weekOf: (r) => r.week,
         keyOf: (r) => String(r.repo_id),
-        // The owner prefix is the same for every row here and just costs width.
         labelOf: (r) => r.full_name.split("/").pop() ?? r.full_name,
         valueOf: (r) => Number(r[metric] ?? 0),
       });
     }
     return null;
   }, [breakdown, perLogin.data, byRepoWeekly.data, visibleWeeks, metric]);
+
+  /**
+   * One dataset for the org chart whichever view is selected: the breakdown when
+   * there is one, otherwise a single total series. Rolled up and accumulated last,
+   * so those two controls compose with every breakdown rather than each view
+   * needing its own path.
+   */
+  const orgChart = useMemo(() => {
+    const series = orgStack
+      ? orgStack.series.map((sr) => ({ key: sr.key, label: sr.label, slot: sr.slot }))
+      : [{ key: "total", label: METRICS.find((m) => m.id === metric)!.label, slot: 0 }];
+
+    const base: Array<Record<string, number>> = orgStack
+      ? orgStack.data
+      : masterSeries.map((d) => ({ week: d.week, total: d.value }));
+
+    const keys = series.map((sr) => sr.key);
+    const rolled = rollUp(base, keys, granularity);
+    return { series, data: cumulative ? toCumulative(rolled, keys) : rolled };
+  }, [orgStack, masterSeries, metric, granularity, cumulative]);
+
+  // A breakdown change invalidates which series exist, so a stale legend filter
+  // would silently hide everything.
+  useEffect(() => setActiveKeys(new Set()), [breakdown, metric]);
+
+  const toggleKey = (key: string) =>
+    setActiveKeys((prev) => {
+      const all = orgChart.series.map((sr) => sr.key);
+      // First click isolates; subsequent clicks add or remove. Emptying the set
+      // returns to "everything", which is also its initial state.
+      if (prev.size === 0) return new Set(all.filter((k) => k !== key));
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next.size === all.length ? new Set() : next;
+    });
 
   /**
    * login -> stacked-by-repository series, built once for every card rather than
@@ -333,6 +399,49 @@ export function Contributors() {
           loading={loading}
           actions={
             <>
+              <Segmented<TimelineShape>
+                ariaLabel="Chart shape"
+                value={shape}
+                onChange={(v) => persist("github-monitor.shape", v, setShape)}
+                options={[
+                  { value: "bar", label: "Bars" },
+                  { value: "area", label: "Area" },
+                  { value: "line", label: "Line" },
+                ]}
+              />
+              <Segmented
+                ariaLabel="Accumulation"
+                value={cumulative ? "cumulative" : "per"}
+                onChange={(v) =>
+                  persist("github-monitor.cumulative", v === "cumulative", setCumulative)
+                }
+                options={[
+                  { value: "per", label: "Per period" },
+                  { value: "cumulative", label: "Cumulative" },
+                ]}
+              />
+              <Dropdown
+                label={`Period: ${GRANULARITIES.find((g) => g.id === granularity)!.label}`}
+                width={160}
+                align="right"
+              >
+                {(close) => (
+                  <div className="py-1">
+                    {GRANULARITIES.map((g) => (
+                      <DropdownRow
+                        key={g.id}
+                        selected={g.id === granularity}
+                        onClick={() => {
+                          persist("github-monitor.granularity", g.id, setGranularity);
+                          close();
+                        }}
+                      >
+                        {g.label}
+                      </DropdownRow>
+                    ))}
+                  </div>
+                )}
+              </Dropdown>
               <Dropdown
                 label={`Break down: ${
                   breakdown === "none"
@@ -367,6 +476,17 @@ export function Contributors() {
                   </div>
                 )}
               </Dropdown>
+              {breakdown !== "none" ? (
+                <Segmented
+                  ariaLabel="Stacking"
+                  value={stacked ? "stacked" : "overlaid"}
+                  onChange={(v) => persist("github-monitor.stacked", v === "stacked", setStacked)}
+                  options={[
+                    { value: "stacked", label: "Stacked" },
+                    { value: "overlaid", label: "Overlaid" },
+                  ]}
+                />
+              ) : null}
               {zoomed ? (
                 <Button
                   variant="ghost"
@@ -408,24 +528,20 @@ export function Contributors() {
             />
           }
         >
-          {orgStack ? (
-            <StackedWeeklyColumns
-              data={orgStack.data}
-              series={orgStack.series}
-              metricLabel={metricLabel}
-              height={240}
-              withBrush
-              onBrushChange={(r) => setPendingBrush({ start: r.startIndex, end: r.endIndex })}
-            />
-          ) : (
-            <WeeklyColumns
-              data={masterSeries}
-              metricLabel={metricLabel}
-              height={240}
-              withBrush
-              onBrushChange={(r) => setPendingBrush({ start: r.startIndex, end: r.endIndex })}
-            />
-          )}
+          <TimelineArea
+            data={orgChart.data}
+            series={orgChart.series}
+            shape={shape}
+            stacked={stacked}
+            height={260}
+            valueLabel={metricLabel}
+            labelOf={(week) => bucketLabel(week, granularity)}
+            activeKeys={activeKeys}
+            onToggleKey={toggleKey}
+            withBrush={granularity === "week"}
+            onBrushChange={(r) => setPendingBrush({ start: r.startIndex, end: r.endIndex })}
+          />
+
         </ChartCard>
 
         {cards.length === 0 ? (
@@ -465,6 +581,7 @@ export function Contributors() {
                   yMax={cardYMax}
                   repoCount={repos.length}
                   repoStack={cardStacks?.get(c.login.toLowerCase()) ?? null}
+                  view={{ shape, stacked, cumulative, granularity }}
                 />
               ))}
             </div>
@@ -533,6 +650,7 @@ function ContributorCardView({
   yMax,
   repoCount,
   repoStack,
+  view,
 }: {
   card: ContributorCard;
   rank: number;
@@ -541,9 +659,36 @@ function ContributorCardView({
   repoCount: number;
   /** Prepared by the page so one query serves every card, not one query each. */
   repoStack: ReturnType<typeof buildStacks> | null;
+  /** The shared timeline view, so cards and the org chart never disagree. */
+  view: {
+    shape: TimelineShape;
+    stacked: boolean;
+    cumulative: boolean;
+    granularity: Granularity;
+  };
 }) {
   const scope = useScope();
   const [expanded, setExpanded] = useState(false);
+
+  /**
+   * The card's data, put through the same roll-up and accumulation as the org
+   * chart so the two always describe time the same way.
+   *
+   * A cumulative card drops the shared y scale: accumulated totals differ by an
+   * order of magnitude between the top and bottom of the list, so a shared ceiling
+   * would flatten everyone but the leader.
+   */
+  const { cardData, cardSeries } = useMemo(() => {
+    const series = repoStack
+      ? repoStack.series.map((sr) => ({ key: sr.key, label: sr.label, slot: sr.slot }))
+      : [{ key: "value", label: metric, slot: 0 }];
+    const keys = series.map((sr) => sr.key);
+    const base: Array<Record<string, number>> = repoStack
+      ? repoStack.data
+      : card.weeks.map((w) => ({ week: w.week, value: w.value }));
+    const rolled = rollUp(base, keys, view.granularity);
+    return { cardData: view.cumulative ? toCumulative(rolled, keys) : rolled, cardSeries: series };
+  }, [repoStack, card.weeks, metric, view.granularity, view.cumulative]);
 
   const breakdown = useScopedQuery(
     `contrib-repos-${card.login}`,
@@ -600,16 +745,25 @@ function ContributorCardView({
         </button>
       </div>
 
-      {repoStack && repoStack.series.length > 0 ? (
-        <StackedSparkline
-          data={repoStack.data}
-          series={repoStack.series}
+      {view.shape === "bar" && !repoStack ? (
+        // The plain bar sparkline stays for the unbroken case: it is denser and
+        // needs no legend, which matters at two dozen cards on screen.
+        <Sparkline
+          data={cardData as Array<{ week: number; value: number }>}
           metricLabel={metric}
-          yMax={yMax}
+          yMax={view.cumulative ? undefined : yMax}
           height={72}
         />
       ) : (
-        <Sparkline data={card.weeks} metricLabel={metric} yMax={yMax} height={72} />
+        <TimelineArea
+          data={cardData}
+          series={cardSeries}
+          shape={view.shape}
+          stacked={view.stacked}
+          height={96}
+          valueLabel={metric}
+          labelOf={(week) => bucketLabel(week, view.granularity)}
+        />
       )}
 
       {expanded ? (
