@@ -36,7 +36,7 @@ and the app says so rather than rendering blank charts.
 | Page | Source | Notes |
 |---|---|---|
 | Pulse | GraphQL PRs + issues | Derived — GitHub has no Pulse API |
-| Contributors | `stats/contributors` | Exact parity with the website |
+| Contributors | `stats/contributors` | Exact parity, plus stacked breakdowns |
 | Community | `community/profile` | Health score + checklist coverage |
 | Traffic | `traffic/*` | 14-day GitHub limit; accumulates locally |
 | Commits | `stats/commit_activity`, `stats/contributors` | Day-level detail covers 52 weeks |
@@ -166,6 +166,25 @@ runtime and there is no `{{channel}}` template variable, so a user-selectable
 channel needs a custom Rust command wrapping `updater_builder().endpoints(…)`.
 Stable-only keeps the whole implementation in TypeScript. Adding nightly later
 means: a scheduled trigger, a second `nightly.json`, and that Rust command.
+
+## Breakdowns
+
+The org-wide chart on Contributors can be split **by contributor** or **by
+repository**, and each contributor's card can be split **by repository** via
+*Split by repo*. Both are stacked columns over the same weekly buckets, and both
+follow the range slider, so zooming rescopes the split too.
+
+The palette has eight categorical slots, assigned in fixed order and never
+cycled — a ninth colour would either repeat one already in use or be invented, and
+both make the chart lie about identity. So the eight largest contributors or
+repositories take the slots and the rest fold into a single muted **Other** band,
+which is honest about being an aggregate rather than posing as a category. The
+fold is total-preserving: `buildStacks` is tested to conserve the sum, to emit a
+row for weeks with no data so the axis has no holes, and to break ties
+deterministically so colours do not flicker between renders.
+
+Stacking is also the case the palette was validated for: neighbouring segments are
+the pairs that touch, and the adjacent-pair CVD and normal-vision gates both pass.
 
 ## Filters
 

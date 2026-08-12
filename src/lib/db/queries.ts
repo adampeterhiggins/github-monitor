@@ -274,6 +274,73 @@ export async function contributorWeeklyByLogin(
   );
 }
 
+export interface RepoWeekRow extends WeekPoint {
+  repo_id: number;
+  full_name: string;
+}
+
+/**
+ * Weekly totals per repository — the repository breakdown of the org-wide chart.
+ * Honours the contributor filter, so "these five people, split by repository" works.
+ */
+export async function weeklyByRepo(
+  db: Database,
+  repoIds: readonly number[],
+  fromWeek: number,
+  toWeek: number,
+  logins: Logins = null,
+): Promise<RepoWeekRow[]> {
+  const p = new Params();
+  const from = p.add(fromWeek);
+  const to = p.add(toWeek);
+  const ids = p.in(repoIds);
+  const loginClause = p.loginFilter("cw.login", logins);
+  return db.select<RepoWeekRow[]>(
+    `SELECT cw.repo_id, r.full_name, cw.week,
+            SUM(cw.commits)   AS commits,
+            SUM(cw.additions) AS additions,
+            SUM(cw.deletions) AS deletions
+     FROM contributor_weeks cw
+     JOIN repos r ON r.id = cw.repo_id
+     WHERE cw.week >= ${from} AND cw.week <= ${to} AND cw.repo_id IN ${ids}${loginClause}
+     GROUP BY cw.repo_id, r.full_name, cw.week
+     ORDER BY cw.week`,
+    p.values,
+  );
+}
+
+/**
+ * Weekly totals per repository for one contributor — the repository breakdown of
+ * an individual's card.
+ */
+export async function contributorWeeklyByRepo(
+  db: Database,
+  login: string,
+  repoIds: readonly number[],
+  fromWeek: number,
+  toWeek: number,
+): Promise<RepoWeekRow[]> {
+  const p = new Params();
+  const who = p.add(login);
+  const from = p.add(fromWeek);
+  const to = p.add(toWeek);
+  const ids = p.in(repoIds);
+  return db.select<RepoWeekRow[]>(
+    `SELECT cw.repo_id, r.full_name, cw.week,
+            SUM(cw.commits)   AS commits,
+            SUM(cw.additions) AS additions,
+            SUM(cw.deletions) AS deletions
+     FROM contributor_weeks cw
+     JOIN repos r ON r.id = cw.repo_id
+     WHERE LOWER(cw.login) = LOWER(${who})
+       AND cw.week >= ${from} AND cw.week <= ${to}
+       AND cw.repo_id IN ${ids}
+     GROUP BY cw.repo_id, r.full_name, cw.week
+     ORDER BY cw.week`,
+    p.values,
+  );
+}
+
 export interface ContributorMeta {
   login: string;
   avatar_url: string | null;

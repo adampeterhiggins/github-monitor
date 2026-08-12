@@ -47,6 +47,7 @@ async function bundle(entry, out) {
 
 const q = await bundle("src/lib/db/queries.ts", "queries.cjs");
 const sync = await bundle("src/lib/ingest/sync.ts", "sync.cjs");
+const stacks = await bundle("src/lib/agg/stacks.ts", "stacks.cjs");
 const { splitStatements } = await bundle("src/lib/db/index.ts", "dbindex.cjs");
 const { SCHEMA_SQL } = await bundle("src/lib/db/schema.ts", "schema.cjs");
 
@@ -294,6 +295,117 @@ T("resume RETRIES pending (GitHub was still computing)", !shouldSkip("pending", 
 T("resume RETRIES error", !shouldSkip("error", "resume"));
 T("resume attempts never-recorded pairs", !shouldSkip(undefined, "resume"));
 T("full mode redoes everything", ["ok","empty","forbidden","pending","error"].every((st) => !shouldSkip(st, "full")));
+
+/* ── Breakdown queries ────────────────────────────────────────────────────── */
+
+const repoWeeks = await q.weeklyByRepo(db, IDS, 0, W2 + 1);
+// Grouped by (repo, week): (1,W)=17, (2,W2)=10, (3,W)=1.
+T(
+  "weeklyByRepo splits totals by repository and week",
+  repoWeeks.length === 3 && sum(repoWeeks) === 28,
+  `rows=${repoWeeks.length} commits=${sum(repoWeeks)}`,
+);
+T(
+  "weeklyByRepo carries the repository name for labelling",
+  repoWeeks.every((r) => typeof r.full_name === "string" && r.full_name.includes("/")),
+);
+T(
+  "weeklyByRepo honours the contributor filter",
+  sum(await q.weeklyByRepo(db, IDS, 0, W2 + 1, ["claude"])) === 17,
+);
+T(
+  "contributorWeeklyByRepo scopes to one person",
+  sum(await q.contributorWeeklyByRepo(db, "claude", IDS, 0, W2 + 1)) === 17,
+);
+T(
+  "contributorWeeklyByRepo is case-insensitive and splits by repo",
+  (await q.contributorWeeklyByRepo(db, "CLAUDE", IDS, 0, W2 + 1)).length === 2,
+);
+
+/* ── Stacked breakdowns ───────────────────────────────────────────────────── */
+
+// The palette has eight categorical slots assigned in fixed order and never
+// cycled, so a ninth series must fold into "Other" rather than take an invented
+// colour. Totals must survive the fold, or the stack silently under-reports.
+{
+  const { buildStacks, OTHER_KEY } = stacks;
+  const WEEKS = [100, 200, 300];
+  const rows = [];
+  // 12 entities, descending totals, so 8 take slots and 4 fold.
+  for (let i = 0; i < 12; i++) {
+    for (const w of WEEKS) rows.push({ w, k: `e${i}`, v: (12 - i) * 10 });
+  }
+  const built = buildStacks({
+    rows,
+    weeks: WEEKS,
+    weekOf: (r) => r.w,
+    keyOf: (r) => r.k,
+    labelOf: (r) => r.k,
+    valueOf: (r) => r.v,
+  });
+
+  T("stack emits one row per requested week", built.data.length === WEEKS.length);
+  T(
+    "at most eight slots, plus a single Other band",
+    built.series.length === 9 && built.series.filter((x) => x.slot != null).length === 8,
+    `series=${built.series.length}`,
+  );
+  T("Other is the last band and has no slot", built.series[8].key === OTHER_KEY && built.series[8].slot === null);
+  T("folded count is reported", built.foldedCount === 4, `folded=${built.foldedCount}`);
+  T(
+    "slots are assigned in rank order, highest total first",
+    built.series[0].key === "e0" && built.series[7].key === "e7",
+  );
+
+  // Nothing may be lost in the fold.
+  const grand = rows.reduce((a, r) => a + r.v, 0);
+  const stacked = built.data.reduce(
+    (a, row) => a + Object.entries(row).filter(([k]) => k !== "week").reduce((x, [, v]) => x + v, 0),
+    0,
+  );
+  T("the fold conserves the total", stacked === grand, `stacked=${stacked} grand=${grand}`);
+
+  // Weeks with no data still need a row, or the axis develops holes.
+  const sparse = buildStacks({
+    rows: [{ w: 100, k: "a", v: 5 }],
+    weeks: [100, 200, 300],
+    weekOf: (r) => r.w,
+    keyOf: (r) => r.k,
+    labelOf: (r) => r.k,
+    valueOf: (r) => r.v,
+  });
+  T(
+    "weeks without data appear as zeroes",
+    sparse.data.length === 3 && sparse.data[1].a === 0 && sparse.data[2].a === 0,
+  );
+  T("no Other band when nothing folds", sparse.series.length === 1 && sparse.foldedCount === 0);
+
+  // Ties must not reorder between renders, or colours flicker.
+  const tie = () =>
+    buildStacks({
+      rows: [
+        { w: 1, k: "b", v: 5 },
+        { w: 1, k: "a", v: 5 },
+      ],
+      weeks: [1],
+      weekOf: (r) => r.w,
+      keyOf: (r) => r.k,
+      labelOf: (r) => r.k,
+      valueOf: (r) => r.v,
+    });
+  T("ties break deterministically", tie().series[0].key === tie().series[0].key && tie().series[0].key === "a");
+
+  // Zero-valued rows must not create a phantom series.
+  const zeros = buildStacks({
+    rows: [{ w: 1, k: "ghost", v: 0 }, { w: 1, k: "real", v: 3 }],
+    weeks: [1],
+    weekOf: (r) => r.w,
+    keyOf: (r) => r.k,
+    labelOf: (r) => r.k,
+    valueOf: (r) => r.v,
+  });
+  T("entities with no activity are omitted", zeros.series.length === 1 && zeros.series[0].key === "real");
+}
 
 /* ── No manual transactions anywhere ──────────────────────────────────────── */
 

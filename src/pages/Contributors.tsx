@@ -4,13 +4,16 @@ import { useScope, useScopedQuery } from "../lib/hooks";
 import {
   contributorRepoBreakdown,
   contributorWeeklyByLogin,
+  contributorWeeklyByRepo,
   contributorWeeklyTotals,
   listContributorMeta,
+  weeklyByRepo,
   type ContributorWeekRow,
 } from "../lib/db/queries";
+import { buildStacks } from "../lib/agg/stacks";
 import { WEEK_SECONDS, axisWeeksFor, formatDate } from "../lib/agg/weeks";
 import { PageShell } from "../components/PageShell";
-import { Sparkline, WeeklyColumns } from "../components/charts";
+import { Sparkline, StackedSparkline, StackedWeeklyColumns, WeeklyColumns } from "../components/charts";
 import {
   Button,
   ChartCard,
@@ -45,6 +48,8 @@ export function Contributors() {
   const setMetric = useApp((s) => s.setMetric);
   const repos = useApp((s) => s.repos);
   const [limit, setLimit] = useState(24);
+  /** How the org-wide chart is split. */
+  const [breakdown, setBreakdown] = useState<"none" | "contributor" | "repository">("none");
 
   const totals = useScopedQuery("contrib-totals", scope, (db) =>
     contributorWeeklyTotals(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek, scope.logins),
@@ -63,6 +68,16 @@ export function Contributors() {
   const meta = useScopedQuery("contrib-meta", scope, (db) => listContributorMeta(db), {
     staleTime: 10 * 60_000,
   });
+
+  // Only fetched when the repository breakdown is on — it is a bigger result than
+  // the plain totals and most views never need it.
+  const byRepoWeekly = useScopedQuery(
+    "contrib-by-repo-weekly",
+    scope,
+    (db) =>
+      weeklyByRepo(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek, scope.logins),
+    { enabled: scope.ready && breakdown === "repository" },
+  );
 
   const selectedRepoCount = scope.repoIds.length;
 
@@ -172,6 +187,37 @@ export function Contributors() {
     return out.filter((c) => c[metric] > 0).sort((a, b) => b[metric] - a[metric]);
   }, [byLogin, meta.data, visibleWeeks, metric]);
 
+  /**
+   * The org-wide chart, split by contributor or repository.
+   *
+   * Both are derived from data already loaded for the cards where possible — the
+   * contributor split reuses `perLogin` rather than issuing a second query.
+   */
+  const orgStack = useMemo(() => {
+    if (breakdown === "contributor") {
+      return buildStacks({
+        rows: perLogin.data ?? [],
+        weeks: visibleWeeks,
+        weekOf: (r) => r.week,
+        keyOf: (r) => r.login.toLowerCase(),
+        labelOf: (r) => r.login,
+        valueOf: (r) => Number(r[metric] ?? 0),
+      });
+    }
+    if (breakdown === "repository") {
+      return buildStacks({
+        rows: byRepoWeekly.data ?? [],
+        weeks: visibleWeeks,
+        weekOf: (r) => r.week,
+        keyOf: (r) => String(r.repo_id),
+        // The owner prefix is the same for every row here and just costs width.
+        labelOf: (r) => r.full_name.split("/").pop() ?? r.full_name,
+        valueOf: (r) => Number(r[metric] ?? 0),
+      });
+    }
+    return null;
+  }, [breakdown, perLogin.data, byRepoWeekly.data, visibleWeeks, metric]);
+
   /** One shared scale across the cards — self-scaled small multiples mislead. */
   const cardYMax = useMemo(
     () => Math.max(1, ...cards.slice(0, limit).flatMap((c) => c.weeks.map((w) => w.value))),
@@ -232,6 +278,40 @@ export function Contributors() {
           loading={loading}
           actions={
             <>
+              <Dropdown
+                label={`Break down: ${
+                  breakdown === "none"
+                    ? "None"
+                    : breakdown === "contributor"
+                      ? "Contributor"
+                      : "Repository"
+                }`}
+                width={200}
+                align="right"
+              >
+                {(close) => (
+                  <div className="py-1">
+                    {(
+                      [
+                        ["none", "None"],
+                        ["contributor", "By contributor"],
+                        ["repository", "By repository"],
+                      ] as const
+                    ).map(([id, label]) => (
+                      <DropdownRow
+                        key={id}
+                        selected={breakdown === id}
+                        onClick={() => {
+                          setBreakdown(id);
+                          close();
+                        }}
+                      >
+                        {label}
+                      </DropdownRow>
+                    ))}
+                  </div>
+                )}
+              </Dropdown>
               {zoomed ? (
                 <Button
                   variant="ghost"
@@ -273,13 +353,24 @@ export function Contributors() {
             />
           }
         >
-          <WeeklyColumns
-            data={masterSeries}
-            metricLabel={metricLabel}
-            height={240}
-            withBrush
-            onBrushChange={(r) => setPendingBrush({ start: r.startIndex, end: r.endIndex })}
-          />
+          {orgStack ? (
+            <StackedWeeklyColumns
+              data={orgStack.data}
+              series={orgStack.series}
+              metricLabel={metricLabel}
+              height={240}
+              withBrush
+              onBrushChange={(r) => setPendingBrush({ start: r.startIndex, end: r.endIndex })}
+            />
+          ) : (
+            <WeeklyColumns
+              data={masterSeries}
+              metricLabel={metricLabel}
+              height={240}
+              withBrush
+              onBrushChange={(r) => setPendingBrush({ start: r.startIndex, end: r.endIndex })}
+            />
+          )}
         </ChartCard>
 
         {cards.length === 0 ? (
@@ -305,6 +396,7 @@ export function Contributors() {
                   metric={metric}
                   yMax={cardYMax}
                   repoCount={repos.length}
+                  weeks={visibleWeeks}
                 />
               ))}
             </div>
@@ -372,15 +464,38 @@ function ContributorCardView({
   metric,
   yMax,
   repoCount,
+  weeks,
 }: {
   card: ContributorCard;
   rank: number;
   metric: ContributionMetric;
   yMax: number;
   repoCount: number;
+  /** The window the card covers, so its stack lines up with the sparkline. */
+  weeks: number[];
 }) {
   const scope = useScope();
   const [expanded, setExpanded] = useState(false);
+
+  const repoWeekly = useScopedQuery(
+    `contrib-repo-weekly-${card.login}`,
+    scope,
+    (db) =>
+      contributorWeeklyByRepo(db, card.login, scope.repoIds, scope.range.fromWeek, scope.range.toWeek),
+    { enabled: scope.ready && expanded },
+  );
+
+  const repoStack = useMemo(() => {
+    if (!expanded || !repoWeekly.data) return null;
+    return buildStacks({
+      rows: repoWeekly.data,
+      weeks,
+      weekOf: (r) => r.week,
+      keyOf: (r) => String(r.repo_id),
+      labelOf: (r) => r.full_name.split("/").pop() ?? r.full_name,
+      valueOf: (r) => Number(r[metric] ?? 0),
+    });
+  }, [expanded, repoWeekly.data, weeks, metric]);
 
   const breakdown = useScopedQuery(
     `contrib-repos-${card.login}`,
@@ -433,11 +548,21 @@ function ContributorCardView({
           className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-wash hover:text-ink"
           aria-expanded={expanded}
         >
-          {expanded ? "Hide repos" : "By repo"}
+          {expanded ? "Hide repos" : "Split by repo"}
         </button>
       </div>
 
-      <Sparkline data={card.weeks} metricLabel={metric} yMax={yMax} height={64} />
+      {repoStack && repoStack.series.length > 0 ? (
+        <StackedSparkline
+          data={repoStack.data}
+          series={repoStack.series}
+          metricLabel={metric}
+          yMax={yMax}
+          height={72}
+        />
+      ) : (
+        <Sparkline data={card.weeks} metricLabel={metric} yMax={yMax} height={72} />
+      )}
 
       {expanded ? (
         <div className="mt-3 border-t border-hairline pt-2">
