@@ -44,6 +44,26 @@ function gridProps(palette: VizPalette) {
   };
 }
 
+
+/**
+ * Bar geometry for a given number of categories.
+ *
+ * The 2px surface gap and 4px rounded data-end assume bars are comfortably wide.
+ * They are not, on a dense weekly series: 134 weeks in a ~600px card leaves ~4.5px
+ * of pitch per bar, and subtracting a 2px gap then rounding by 2px consumes almost
+ * the whole mark — what survives is an antialiased sliver that reads as washed-out
+ * rather than as the solid colour it is meant to be.
+ *
+ * So the spacers scale down with the pitch and disappear entirely once bars are
+ * hairline width, where touching bars are the honest rendering — the shape of the
+ * series is the information, not the separation between individual weeks.
+ */
+function barGeometry(pointCount: number, fullRadius: [number, number, number, number]) {
+  if (pointCount <= 40) return { gap: 2, radius: fullRadius };
+  if (pointCount <= 90) return { gap: 1, radius: [1, 1, 0, 0] as [number, number, number, number] };
+  return { gap: 0, radius: [0, 0, 0, 0] as [number, number, number, number] };
+}
+
 /** Values lead, labels follow; series keyed with a short stroke, not a filled box. */
 function TooltipShell({
   heading,
@@ -140,12 +160,13 @@ export function WeeklyColumns({
   // One series: no legend box — the card title already names what is plotted.
   const color = palette.series[0];
   const tick = weekTickFormatter(data.map((d) => d.week));
+  const geom = barGeometry(data.length, BAR_RADIUS);
 
   if (data.length === 0) return <NoData height={height} />;
 
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} barCategoryGap={2}>
+      <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} barCategoryGap={geom.gap}>
         <CartesianGrid {...gridProps(palette)} />
         <XAxis
           dataKey="week"
@@ -173,7 +194,7 @@ export function WeeklyColumns({
             );
           }}
         />
-        <Bar dataKey="value" fill={color} maxBarSize={BAR_MAX} radius={BAR_RADIUS} />
+        <Bar dataKey="value" fill={color} maxBarSize={BAR_MAX} radius={geom.radius} minPointSize={1} />
         {withBrush ? (
           <Brush
             dataKey="week"
@@ -219,12 +240,17 @@ export function Sparkline({
   // does not bite here — every card is slot 1.
   const color = palette.series[colorIndex] ?? palette.series[0];
   const tick = weekTickFormatter(data.map((d) => d.week));
+  const geom = barGeometry(data.length, [2, 2, 0, 0]);
 
   if (data.length === 0) return <NoData height={height} compactMessage />;
 
   return (
     <ResponsiveContainer width="100%" height={height}>
-      <BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 0 }} barCategoryGap={2}>
+      <BarChart
+        data={data}
+        margin={{ top: 4, right: 4, bottom: 0, left: 0 }}
+        barCategoryGap={geom.gap}
+      >
         <CartesianGrid {...gridProps(palette)} />
         <XAxis
           dataKey="week"
@@ -259,7 +285,15 @@ export function Sparkline({
             );
           }}
         />
-        <Bar dataKey="value" fill={color} maxBarSize={14} radius={[2, 2, 0, 0]} />
+        <Bar
+          dataKey="value"
+          fill={color}
+          maxBarSize={14}
+          radius={geom.radius}
+          /* A week with activity must paint at least a pixel, or low-but-nonzero
+             weeks vanish and read the same as silence. */
+          minPointSize={1}
+        />
       </BarChart>
     </ResponsiveContainer>
   );
@@ -285,13 +319,14 @@ export function DivergingWeekly({
     [data],
   );
   const tick = weekTickFormatter(data.map((d) => d.week));
+  const geom = barGeometry(data.length, BAR_RADIUS);
 
   if (data.length === 0) return <NoData height={height} />;
 
   return (
     <div>
       <ResponsiveContainer width="100%" height={height}>
-        <BarChart data={shaped} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} barCategoryGap={2} stackOffset="sign">
+        <BarChart data={shaped} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} barCategoryGap={geom.gap} stackOffset="sign">
           <CartesianGrid {...gridProps(palette)} />
           <XAxis
             dataKey="week"
@@ -322,13 +357,13 @@ export function DivergingWeekly({
               );
             }}
           />
-          <Bar dataKey="additions" fill={pos} stackId="cf" maxBarSize={BAR_MAX} radius={BAR_RADIUS} />
+          <Bar dataKey="additions" fill={pos} stackId="cf" maxBarSize={BAR_MAX} radius={geom.radius} />
           <Bar
             dataKey="deletions"
             fill={neg}
             stackId="cf"
             maxBarSize={BAR_MAX}
-            radius={[0, 0, 4, 4]}
+            radius={geom.radius[0] ? [0, 0, geom.radius[0], geom.radius[1]] : [0, 0, 0, 0]}
           />
         </BarChart>
       </ResponsiveContainer>
