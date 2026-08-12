@@ -75,6 +75,122 @@ export async function setRepoSelection(
   );
 }
 
+/* ── Saved selections ───────────────────────────────────────────────────── */
+
+export type SavedFilterKind = "repos" | "contributors";
+
+export interface SavedFilter {
+  id: number;
+  kind: SavedFilterKind;
+  name: string;
+  /** Repo ids for `repos`, logins for `contributors`. */
+  values: Array<number | string>;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+interface SavedFilterRow {
+  id: number;
+  kind: SavedFilterKind;
+  name: string;
+  payload: string;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+/**
+ * Decode a stored selection.
+ *
+ * The payload is user-editable through the UI and survives schema changes, so a
+ * malformed one must not take the whole list down with it — a single unreadable
+ * selection becomes an empty one rather than an exception.
+ */
+function decodeSaved(row: SavedFilterRow): SavedFilter {
+  let values: Array<number | string> = [];
+  try {
+    const parsed = JSON.parse(row.payload);
+    if (Array.isArray(parsed)) {
+      values = parsed.filter((v) => typeof v === "number" || typeof v === "string");
+    }
+  } catch {
+    // Leave it empty; the UI shows the count, so an empty one is visibly wrong.
+  }
+  return { ...row, values };
+}
+
+export async function listSavedFilters(
+  db: Database,
+  kind?: SavedFilterKind,
+): Promise<SavedFilter[]> {
+  const p = new Params();
+  const where = kind ? `WHERE kind = ${p.add(kind)}` : "";
+  const rows = await db.select<SavedFilterRow[]>(
+    `SELECT id, kind, name, payload, created_at, updated_at
+     FROM saved_filters ${where}
+     ORDER BY name COLLATE NOCASE`,
+    p.values,
+  );
+  return rows.map(decodeSaved);
+}
+
+/**
+ * Create or replace a selection by name.
+ *
+ * Saving over an existing name updates it rather than adding a second entry that
+ * looks identical in the list — the UNIQUE(kind, name) constraint makes that the
+ * only sensible reading.
+ */
+export async function saveFilter(
+  db: Database,
+  kind: SavedFilterKind,
+  name: string,
+  values: Array<number | string>,
+): Promise<void> {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error("A saved selection needs a name.");
+  const now = new Date().toISOString();
+  await withWriteLock(() =>
+    db.execute(
+      `INSERT INTO saved_filters (kind, name, payload, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $4)
+       ON CONFLICT (kind, name) DO UPDATE SET
+         payload = excluded.payload,
+         updated_at = excluded.updated_at`,
+      [kind, trimmed, JSON.stringify(values), now],
+    ),
+  );
+}
+
+export async function renameSavedFilter(db: Database, id: number, name: string): Promise<void> {
+  const trimmed = name.trim();
+  if (!trimmed) throw new Error("A saved selection needs a name.");
+  await withWriteLock(() =>
+    db.execute("UPDATE saved_filters SET name = $1, updated_at = $2 WHERE id = $3", [
+      trimmed,
+      new Date().toISOString(),
+      id,
+    ]),
+  );
+}
+
+export async function updateSavedFilterValues(
+  db: Database,
+  id: number,
+  values: Array<number | string>,
+): Promise<void> {
+  await withWriteLock(() =>
+    db.execute("UPDATE saved_filters SET payload = $1, updated_at = $2 WHERE id = $3", [
+      JSON.stringify(values),
+      new Date().toISOString(),
+      id,
+    ]),
+  );
+}
+
+export async function deleteSavedFilter(db: Database, id: number): Promise<void> {
+  await withWriteLock(() => db.execute("DELETE FROM saved_filters WHERE id = $1", [id]));
+}
+
 /* ── Repository / contributor inventories for the filter UIs ─────────────── */
 
 export interface RepoActivityRow {

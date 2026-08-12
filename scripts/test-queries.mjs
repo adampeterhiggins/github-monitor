@@ -60,10 +60,26 @@ const T = (name, ok, detail) => {
   if (!ok) failures++;
 };
 
-T(
-  "schema applies cleanly",
-  sqlite.prepare("SELECT count(*) n FROM sqlite_master WHERE type = 'table'").get().n === 22,
-);
+{
+  const tables = sqlite
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+    .all()
+    .map((r) => r.name)
+    .filter((n) => !n.startsWith("sqlite_"));
+  const expected = [
+    "author_repo_probe", "branches", "code_frequency", "commit_activity", "community",
+    "contributor_weeks", "contributors", "dependabot_alerts", "dependencies", "forks",
+    "issues", "meta", "participation", "public.repos", "pull_requests", "punchcard",
+    "repo_selection", "repos", "saved_filters", "sync_state", "traffic_daily",
+    "traffic_paths", "traffic_referrers", "workflow_runs",
+  ].filter((t) => t !== "public.repos");
+  const missing = expected.filter((t) => !tables.includes(t));
+  T(
+    "schema applies cleanly",
+    missing.length === 0,
+    missing.length ? `missing: ${missing.join(", ")}` : `${tables.length} tables`,
+  );
+}
 
 /* ── Fixtures ──────────────────────────────────────────────────────────────── */
 
@@ -296,6 +312,66 @@ T("resume RETRIES error", !shouldSkip("error", "resume"));
 T("resume attempts never-recorded pairs", !shouldSkip(undefined, "resume"));
 T("full mode redoes everything", ["ok","empty","forbidden","pending","error"].every((st) => !shouldSkip(st, "full")));
 
+/* ── Saved selections ─────────────────────────────────────────────────────── */
+
+{
+  await q.saveFilter(db, "repos", "Core services", [1, 2]);
+  await q.saveFilter(db, "contributors", "Platform team", ["claude", "adampeterhiggins"]);
+
+  let saved = await q.listSavedFilters(db);
+  T("saved selections round-trip", saved.length === 2);
+  T(
+    "values decode to the right types",
+    saved.find((f) => f.kind === "repos").values.every((v) => typeof v === "number") &&
+      saved.find((f) => f.kind === "contributors").values.every((v) => typeof v === "string"),
+  );
+  T("listing can be scoped to one kind", (await q.listSavedFilters(db, "repos")).length === 1);
+
+  // Saving over a name updates rather than creating a near-identical twin.
+  await q.saveFilter(db, "repos", "Core services", [1, 2, 3]);
+  saved = await q.listSavedFilters(db, "repos");
+  T(
+    "saving over an existing name replaces it",
+    saved.length === 1 && saved[0].values.length === 3,
+    `count=${saved.length} values=${saved[0]?.values.length}`,
+  );
+
+  // The same name under the other kind is a different selection.
+  await q.saveFilter(db, "contributors", "Core services", ["someoneelse"]);
+  T("the same name may exist per kind", (await q.listSavedFilters(db)).length === 3);
+
+  const repoFilter = (await q.listSavedFilters(db, "repos"))[0];
+  await q.renameSavedFilter(db, repoFilter.id, "  Core platform  ");
+  T(
+    "renaming trims whitespace",
+    (await q.listSavedFilters(db, "repos"))[0].name === "Core platform",
+  );
+
+  await q.updateSavedFilterValues(db, repoFilter.id, [3]);
+  T("values can be replaced in place", (await q.listSavedFilters(db, "repos"))[0].values.length === 1);
+
+  let threw = false;
+  try {
+    await q.saveFilter(db, "repos", "   ", [1]);
+  } catch {
+    threw = true;
+  }
+  T("an empty name is rejected", threw);
+
+  // A malformed payload must not take the whole list down with it.
+  sqlite.exec(
+    "INSERT INTO saved_filters (kind, name, payload) VALUES ('repos', 'broken', 'not json')",
+  );
+  const withBroken = await q.listSavedFilters(db, "repos");
+  T(
+    "a malformed payload degrades to empty rather than throwing",
+    withBroken.length === 2 && withBroken.find((f) => f.name === "broken").values.length === 0,
+  );
+
+  await q.deleteSavedFilter(db, repoFilter.id);
+  T("deleting removes just that one", (await q.listSavedFilters(db, "repos")).length === 1);
+}
+
 /* ── Filter dropdown data ─────────────────────────────────────────────────── */
 
 // The dropdowns show period figures and hide people with none, but must still
@@ -498,6 +574,25 @@ T(
   "setRepoSelection persists as a single upsert",
   Number(sqlite.prepare("SELECT included FROM repo_selection WHERE repo_id = 1").get().included) === 1,
 );
+
+/* ── Clearing the cache must not lose user-authored content ───────────────── */
+
+{
+  const dbIndex = await bundle("src/lib/db/index.ts", "dbindex2.cjs");
+  await q.saveFilter(db, "contributors", "Survives a wipe", ["claude"]);
+  const before = (await q.listSavedFilters(db)).length;
+  await dbIndex.clearAnalytics(db);
+  const after = await q.listSavedFilters(db);
+  T(
+    "clearAnalytics leaves saved selections alone",
+    after.length === before && after.some((f) => f.name === "Survives a wipe"),
+    `before=${before} after=${after.length}`,
+  );
+  T(
+    "clearAnalytics does wipe the analytics it is meant to",
+    sqlite.prepare("SELECT count(*) n FROM contributor_weeks").get().n === 0,
+  );
+}
 
 console.log(failures === 0 ? "\nAll query tests passed." : `\n${failures} test(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

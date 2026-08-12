@@ -5,6 +5,7 @@ import { activeRepoIds, myRepoIds, useRepoSelectionData } from "../lib/repoSelec
 import { commitsByRepo } from "../lib/db/queries";
 import { formatDate } from "../lib/agg/weeks";
 import { Button, Checkbox, Dropdown, DropdownRow, compact, full } from "./ui";
+import { SavedSelections } from "./SavedSelections";
 import type { RepoRow } from "../lib/db/queries";
 
 /**
@@ -194,6 +195,18 @@ export function RepoFilter() {
             />
           </div>
         </div>
+
+        <SavedSelections
+          kind="repos"
+          currentValues={selected}
+          suggested={`${selected.length} repositories`}
+          onApply={(values) => {
+            // Ids can outlive the repositories they point at, so drop any that no
+            // longer exist rather than carrying phantom selections forward.
+            const known = new Set(repos.map((r) => r.id));
+            apply(values.map(Number).filter((id) => known.has(id)));
+          }}
+        />
 
         <div className="overflow-y-auto p-1.5">
           {visible.length === 0 ? (

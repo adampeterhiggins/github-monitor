@@ -3,6 +3,7 @@ import { useApp } from "../lib/state/app";
 import { useScope, useScopedQuery, type UserFilterSupport } from "../lib/hooks";
 import { listContributors } from "../lib/db/queries";
 import { Button, Checkbox, Dropdown, DropdownRow, compact, full } from "./ui";
+import { SavedSelections } from "./SavedSelections";
 
 /**
  * Contributor filter.
@@ -188,6 +189,13 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
             />
           </div>
         </div>
+
+        <SavedSelections
+          kind="contributors"
+          currentValues={selected}
+          suggested={`${selected.length} contributors`}
+          onApply={(values) => apply(values.map(String))}
+        />
 
         <div className="overflow-y-auto p-1.5">
           {contributors.isLoading ? (

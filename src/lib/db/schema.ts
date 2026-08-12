@@ -13,7 +13,7 @@
  * series with empty weeks and keeping them would multiply row counts for nothing.
  */
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -81,6 +81,26 @@ CREATE TABLE IF NOT EXISTS author_repo_probe (
   PRIMARY KEY (login, repo_id)
 );
 CREATE INDEX IF NOT EXISTS idx_probe_login ON author_repo_probe (login);
+
+-- Named selections of repositories or contributors.
+--
+-- Kept in SQLite rather than the settings store because a repository selection is
+-- a list of ids that only mean anything alongside the repos table, and because
+-- these are user-authored content: clearAnalytics deliberately leaves this table
+-- alone, so wiping the cache never loses a saved selection.
+CREATE TABLE IF NOT EXISTS saved_filters (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind       TEXT NOT NULL,          -- repos | contributors
+  name       TEXT NOT NULL,
+  -- JSON array: repo ids for 'repos', logins for 'contributors'.
+  payload    TEXT NOT NULL,
+  created_at TEXT,
+  updated_at TEXT,
+  -- One name per kind, so saving over an existing name updates it rather than
+  -- quietly creating a second entry that looks identical in the list.
+  UNIQUE (kind, name)
+);
+CREATE INDEX IF NOT EXISTS idx_saved_kind ON saved_filters (kind);
 
 CREATE TABLE IF NOT EXISTS contributors (
   login      TEXT PRIMARY KEY,

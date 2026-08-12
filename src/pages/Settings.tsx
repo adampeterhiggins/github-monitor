@@ -9,6 +9,7 @@ import { ENDPOINT_LABELS, type EndpointId } from "../lib/ingest/sync";
 import { Button, Callout, Card, CardHeader, DataTable, Segmented, Spinner, full } from "../components/ui";
 import { SyncPanel } from "../components/SyncPanel";
 import { RepoSelectionPanel } from "../components/RepoSelectionPanel";
+import { SavedSelectionsPanel } from "../components/SavedSelectionsPanel";
 import { UpdatePanel } from "../components/UpdatePanel";
 import { PageShell } from "../components/PageShell";
 
@@ -49,6 +50,8 @@ export function Settings() {
         <UpdatePanel />
 
         <RepoSelectionPanel />
+
+        <SavedSelectionsPanel />
 
         <SyncPanel />
 

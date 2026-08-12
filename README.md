@@ -167,6 +167,23 @@ channel needs a custom Rust command wrapping `updater_builder().endpoints(…)`.
 Stable-only keeps the whole implementation in TypeScript. Adding nightly later
 means: a scheduled trigger, a second `nightly.json`, and that Rust command.
 
+### Saved selections
+
+Groups of repositories or contributors can be named and reused. Save from either
+filter dropdown ("Save current selection…") or from **Settings → Saved
+selections**, which is also where you rename them, overwrite one with whatever is
+currently selected, apply, or delete.
+
+They live in SQLite rather than the settings store, for two reasons: a repository
+selection is a list of ids that only mean anything alongside the `repos` table, and
+`clearAnalytics` deliberately skips the table so wiping the cache never destroys
+something you authored. There is a test asserting exactly that.
+
+Repository selections store ids, so one referencing a repository that has since
+been deleted shows a **stale** count in Settings and those entries are skipped when
+applied — rather than the selection quietly shrinking each time. Contributor
+selections store logins and are unaffected.
+
 ## Breakdowns
 
 The org-wide chart on Contributors can be split **by contributor** or **by
