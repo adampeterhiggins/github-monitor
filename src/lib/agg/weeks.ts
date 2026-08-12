@@ -68,6 +68,40 @@ export function dayKey(date: Date | number): string {
   return d.toISOString().slice(0, 10);
 }
 
+/**
+ * A first/last week pair as a period, in ms.
+ *
+ * The last week runs to its end rather than to its Sunday morning: a range that
+ * stopped at the week start would exclude six days of the commits it was built to
+ * cover. Null passes through, so callers can hand this an unanswered query.
+ */
+export function weekSpan(
+  bounds: { firstWeek: number; lastWeek: number } | null | undefined,
+): { from: number; to: number } | null {
+  if (!bounds) return null;
+  return {
+    from: bounds.firstWeek * 1000,
+    to: (bounds.lastWeek + WEEK_SECONDS) * 1000 - 1,
+  };
+}
+
+/**
+ * A `yyyy-mm-dd` from a date input, as UTC ms. Null when it is not a full date,
+ * which is what a half-typed field gives.
+ *
+ * `endOfDay` matters for the upper bound of a range: everything here treats the
+ * end as inclusive, and midnight would drop the last day's commits.
+ */
+export function parseDayInput(value: string, endOfDay = false): number | null {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return null;
+  const [, year, month, day] = match;
+  const ms = endOfDay
+    ? Date.UTC(+year, +month - 1, +day, 23, 59, 59, 999)
+    : Date.UTC(+year, +month - 1, +day);
+  return Number.isNaN(ms) ? null : ms;
+}
+
 /** GitHub's Insights period options, as offered on the repo-level pages. */
 export type PeriodId =
   | "24h"
@@ -114,11 +148,17 @@ export function resolvePeriod(
   opts: { now?: Date; customFrom?: number; customTo?: number; earliestWeek?: number } = {},
 ): ResolvedRange {
   const now = opts.now ?? new Date();
-  const toMs = opts.customTo ?? now.getTime();
+
+  /* The custom bounds describe the custom period and nothing else. A remembered
+     range is held on to while a preset is selected, and reading its end date as
+     the end of "last week" would date the whole page to whenever that range
+     happened to finish — with every number still looking perfectly reasonable. */
+  const custom = period === "custom" && opts.customFrom != null;
+  const toMs = custom ? (opts.customTo ?? now.getTime()) : now.getTime();
 
   let fromMs: number;
-  if (period === "custom" && opts.customFrom != null) {
-    fromMs = opts.customFrom;
+  if (custom) {
+    fromMs = opts.customFrom!;
   } else if (period === "all") {
     fromMs = opts.earliestWeek != null ? opts.earliestWeek * 1000 : 0;
   } else if (period === "ytd") {

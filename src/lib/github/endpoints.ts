@@ -52,25 +52,27 @@ export async function listOrgs(
 }
 
 /**
- * How many commits `login` authored in a repository — in a single request.
+ * How many commits a repository has — in a single request.
  *
- * Asking for `per_page=1` makes the Link rel="last" page number equal the total
- * commit count, so no commits are actually downloaded. This is what lets
- * "repositories I've committed in" work *before* any sync: the `stats/*` cache is
- * empty at that point, and GraphQL's `contributionsCollection` is no use either
- * because it withholds private-repository contributions (it reports them only as
- * an opaque `restrictedContributionsCount`).
+ * Asking for `per_page=1` makes the Link rel="last" page number equal the commit
+ * count, so no commits are actually downloaded. This is what lets the app know
+ * anything about commits *before* a sync: the `stats/*` endpoints are the only
+ * source of full history and they answer 202 while cold, so on a fresh install
+ * they tell you nothing. GraphQL is no help either — `contributionsCollection`
+ * withholds private-repository contributions, reporting them only as an opaque
+ * `restrictedContributionsCount`.
  *
- * Returns 0 when the person has no commits, and null when the repository cannot
- * be read (empty repo, no access), so callers can tell "none" from "unknown".
+ * `author` narrows it to one person, `since` to a window; both are the same single
+ * request. Returns 0 for "none" and null when the repository cannot be read at all
+ * (empty repo, no access), so callers can tell those two apart.
  */
-export async function commitCountByAuthor(
+export async function commitCount(
   client: GitHubClient,
   repo: RepoRef,
-  login: string,
-  opts: { signal?: AbortSignal; since?: string } = {},
+  opts: { signal?: AbortSignal; author?: string; since?: string } = {},
 ): Promise<number | null> {
-  const params = new URLSearchParams({ author: login, per_page: "1" });
+  const params = new URLSearchParams({ per_page: "1" });
+  if (opts.author) params.set("author", opts.author);
   if (opts.since) params.set("since", opts.since);
 
   const res = await client.request<unknown[]>(`${base(repo)}/commits?${params.toString()}`, {

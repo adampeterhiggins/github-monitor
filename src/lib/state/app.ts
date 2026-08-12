@@ -11,10 +11,10 @@ import {
   setToken as persistToken,
 } from "../auth";
 import type { PeriodId } from "../agg/weeks";
+import type { ContributionMetric } from "../agg/metrics";
 import type { SyncProgress } from "../ingest/sync";
 
 export type ThemeMode = "system" | "light" | "dark";
-export type ContributionMetric = "commits" | "additions" | "deletions";
 
 interface AppState {
   db: Database | null;
@@ -73,7 +73,24 @@ interface AppState {
 
 const THEME_KEY = "github-monitor.theme";
 const PERIOD_KEY = "github-monitor.period";
+const CUSTOM_RANGE_KEY = "github-monitor.customRange";
 const LOGINS_KEY = "github-monitor.logins";
+
+/**
+ * The last custom range, kept so a reload does not silently fall back to a
+ * preset — `resolvePeriod` reads "custom" with no dates as 90 days, which would
+ * quietly show something other than what the label says.
+ */
+function readStoredCustomRange(): { from: number; to: number } | null {
+  try {
+    const raw = localStorage.getItem(CUSTOM_RANGE_KEY);
+    const parsed = raw ? (JSON.parse(raw) as { from?: unknown; to?: unknown }) : null;
+    if (typeof parsed?.from !== "number" || typeof parsed?.to !== "number") return null;
+    return { from: parsed.from, to: parsed.to };
+  } catch {
+    return null;
+  }
+}
 
 function readStoredLogins(): string[] {
   try {
@@ -83,6 +100,12 @@ function readStoredLogins(): string[] {
   } catch {
     return [];
   }
+}
+
+/** "custom" without a range would resolve to a preset while saying "Custom". */
+function readStoredPeriod(): PeriodId {
+  const stored = (localStorage.getItem(PERIOD_KEY) as PeriodId) || "3m";
+  return stored === "custom" && readStoredCustomRange() == null ? "3m" : stored;
 }
 
 function readStoredTheme(): ThemeMode {
@@ -110,9 +133,9 @@ export const useApp = create<AppState>((set, get) => ({
   selectedRepoIds: [],
   selectedLogins: readStoredLogins(),
 
-  period: (localStorage.getItem(PERIOD_KEY) as PeriodId) || "3m",
-  customFrom: null,
-  customTo: null,
+  period: readStoredPeriod(),
+  customFrom: readStoredCustomRange()?.from ?? null,
+  customTo: readStoredCustomRange()?.to ?? null,
   metric: "commits",
 
   theme: readStoredTheme(),
@@ -204,10 +227,13 @@ export const useApp = create<AppState>((set, get) => ({
 
   setPeriod: (period, custom) => {
     localStorage.setItem(PERIOD_KEY, period);
+    if (custom) localStorage.setItem(CUSTOM_RANGE_KEY, JSON.stringify(custom));
     set({
       period,
-      customFrom: custom?.from ?? null,
-      customTo: custom?.to ?? null,
+      // Held on to when a preset is picked, so going back to a custom range does
+      // not mean typing the dates again. Only `period === "custom"` reads them.
+      customFrom: custom?.from ?? get().customFrom,
+      customTo: custom?.to ?? get().customTo,
     });
   },
 

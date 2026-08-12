@@ -41,6 +41,13 @@ export interface StackInput<T> {
   valueOf: (row: T) => number;
   /** Slots available before folding. Defaults to the palette's eight. */
   maxSeries?: number;
+  /**
+   * How a total earns a slot. Defaults to the total itself, which is right while
+   * values only go up. For a signed metric pass `Math.abs`: under net lines, the
+   * repository that deleted the most is as much worth seeing as the one that added
+   * the most, and ranking by the signed total would fold it into "Other".
+   */
+  rankBy?: (total: number) => number;
 }
 
 export function buildStacks<T>({
@@ -51,6 +58,7 @@ export function buildStacks<T>({
   labelOf,
   valueOf,
   maxSeries = 8,
+  rankBy = (total) => total,
 }: StackInput<T>): StackResult {
   const totals = new Map<string, { label: string; total: number }>();
   // key -> week -> value
@@ -77,7 +85,7 @@ export function buildStacks<T>({
     .map(([key, v]) => ({ key, label: v.label, total: v.total }))
     // Ties broken by key so the ordering is stable rather than dependent on
     // insertion order, which would make colours flicker between renders.
-    .sort((a, b) => b.total - a.total || a.key.localeCompare(b.key));
+    .sort((a, b) => rankBy(b.total) - rankBy(a.total) || a.key.localeCompare(b.key));
 
   const top = ranked.slice(0, maxSeries);
   const folded = ranked.slice(maxSeries);

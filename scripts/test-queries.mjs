@@ -31,6 +31,14 @@ const work = mkdtempSync(join(tmpdir(), "gm-test-"));
 const stub = join(work, "stub.mjs");
 writeFileSync(stub, "export default { load: async () => ({}) };\n");
 
+// Tauri's fetch is the only way out to the network, so routing it at a global lets
+// the ingestion code run against a fake GitHub without touching the code itself.
+const httpStub = join(work, "http.mjs");
+writeFileSync(
+  httpStub,
+  "export const fetch = (...args) => globalThis.__ghFetch(...args);\n",
+);
+
 async function bundle(entry, out) {
   const file = join(work, out);
   await build({
@@ -40,7 +48,7 @@ async function bundle(entry, out) {
     format: "cjs",
     outfile: file,
     logLevel: "error",
-    alias: { "@tauri-apps/plugin-sql": stub },
+    alias: { "@tauri-apps/plugin-sql": stub, "@tauri-apps/plugin-http": httpStub },
   });
   return require(file);
 }
@@ -49,6 +57,8 @@ const q = await bundle("src/lib/db/queries.ts", "queries.cjs");
 const sync = await bundle("src/lib/ingest/sync.ts", "sync.cjs");
 const stacks = await bundle("src/lib/agg/stacks.ts", "stacks.cjs");
 const series = await bundle("src/lib/agg/series.ts", "series.cjs");
+const weeksLib = await bundle("src/lib/agg/weeks.ts", "weeks.cjs");
+const metrics = await bundle("src/lib/agg/metrics.ts", "metrics.cjs");
 const { splitStatements } = await bundle("src/lib/db/index.ts", "dbindex.cjs");
 const { SCHEMA_SQL } = await bundle("src/lib/db/schema.ts", "schema.cjs");
 
@@ -170,6 +180,137 @@ T(
   "no repositories selected yields nothing",
   sum(await q.contributorWeeklyTotals(db, [], 0, W2 + 1, ["claude"])) === 0,
 );
+
+/* ── Commit extent, for the "All commits" period ──────────────────────────── */
+
+{
+  const all = await q.commitWeekBounds(db, IDS);
+  T(
+    "commit bounds span the first and last week with commits",
+    all.firstWeek === W && all.lastWeek === W2,
+    JSON.stringify(all),
+  );
+
+  // Repo 1 only has rows in the first week; repo 2 only in the second.
+  const one = await q.commitWeekBounds(db, [1]);
+  T("bounds narrow to the selected repositories", one.firstWeek === W && one.lastWeek === W, JSON.stringify(one));
+
+  const claude = await q.commitWeekBounds(db, IDS, ["claude"]);
+  T(
+    "bounds respect the contributor filter, casing and all",
+    claude.firstWeek === W && claude.lastWeek === W2,
+    JSON.stringify(claude),
+  );
+  const oneOnly = await q.commitWeekBounds(db, IDS, ["someoneelse"]);
+  T("a contributor with one week gets a single-week span",
+    oneOnly.firstWeek === W && oneOnly.lastWeek === W, JSON.stringify(oneOnly));
+
+  T("no repositories selected has no bounds", (await q.commitWeekBounds(db, [])) === null);
+  T("an unknown contributor has no bounds",
+    (await q.commitWeekBounds(db, IDS, ["nobody"])) === null);
+
+  // A zero-commit row must not extend the span, or the range claims history that
+  // has no commits in it.
+  sqlite.exec(
+    `INSERT INTO contributor_weeks (repo_id,login,week,commits,additions,deletions)
+     VALUES (1,'quiet',${W2 + 604800},0,0,0)`,
+  );
+  const afterZero = await q.commitWeekBounds(db, IDS);
+  T("a week with no commits does not extend the span", afterZero.lastWeek === W2, JSON.stringify(afterZero));
+  sqlite.exec(`DELETE FROM contributor_weeks WHERE login = 'quiet'`);
+}
+
+/* ── Per-contributor extents, for the card action ──────────────────────────── */
+
+// This drives "set the period to all their commits", so a span that is short by a
+// week silently hides commits the card was opened to look at.
+{
+  const rows = await q.contributorWeekBounds(db, IDS);
+  const byLogin = new Map(rows.map((r) => [r.login.toLowerCase(), r]));
+
+  T("one row per contributor, not per repository", rows.length === 3, `${rows.length} rows`);
+  T(
+    "casings merge into one span",
+    Number(byLogin.get("claude").first_week) === W && Number(byLogin.get("claude").last_week) === W2,
+    JSON.stringify(byLogin.get("claude")),
+  );
+  T(
+    "a contributor with one week spans that week",
+    Number(byLogin.get("someoneelse").first_week) === W &&
+      Number(byLogin.get("someoneelse").last_week) === W,
+    JSON.stringify(byLogin.get("someoneelse")),
+  );
+
+  // Scoped to the selected repositories, like everything else on the page.
+  const repo2 = await q.contributorWeekBounds(db, [2]);
+  T(
+    "extents narrow to the selected repositories",
+    repo2.every((r) => Number(r.first_week) === W2),
+    JSON.stringify(repo2.map((r) => [r.login, r.first_week])),
+  );
+  T("no repositories selected yields no extents", (await q.contributorWeekBounds(db, [])).length === 0);
+
+  // The span the menu applies has to reach the end of the last week with commits.
+  const span = weeksLib.weekSpan({
+    firstWeek: Number(byLogin.get("claude").first_week),
+    lastWeek: Number(byLogin.get("claude").last_week),
+  });
+  T(
+    "the applied span covers the whole of the last week",
+    span.from === W * 1000 && span.to === (W2 + 604800) * 1000 - 1,
+    `${new Date(span.from).toISOString()} to ${new Date(span.to).toISOString()}`,
+  );
+}
+
+/* ── Per-contributor repositories, for the card action ─────────────────────── */
+
+// This one has to see past the current selection, since selecting a wider set is
+// the whole point of it.
+{
+  const rows = await q.contributorRepoIds(db);
+  const byLogin = new Map();
+  for (const r of rows) {
+    const key = r.login.toLowerCase();
+    byLogin.set(key, [...(byLogin.get(key) ?? []), Number(r.repo_id)]);
+  }
+
+  T(
+    "casings merge, so one person is one entry",
+    byLogin.size === 3,
+    [...byLogin.keys()].join(", "),
+  );
+  T(
+    "a contributor spanning two repositories gets both",
+    byLogin.get("claude").sort().join(",") === "1,2",
+    JSON.stringify(byLogin.get("claude")),
+  );
+  T(
+    "a contributor is listed under every repository they touched",
+    byLogin.get("adampeterhiggins").sort().join(",") === "1,2",
+    JSON.stringify(byLogin.get("adampeterhiggins")),
+  );
+  T(
+    "someoneelse is in the two repositories they committed to",
+    byLogin.get("someoneelse").sort().join(",") === "1,3",
+    JSON.stringify(byLogin.get("someoneelse")),
+  );
+  T("no repository is listed twice for one person",
+    [...byLogin.values()].every((ids) => new Set(ids).size === ids.length));
+
+  // A row referencing a repository that is no longer in the cache must not come
+  // back as something to select: the selection has a foreign key to repos.
+  sqlite.exec(
+    `INSERT INTO contributor_weeks (repo_id,login,week,commits,additions,deletions)
+     VALUES (999,'claude',${W},5,5,5)`,
+  );
+  const after = await q.contributorRepoIds(db);
+  T(
+    "a repository missing from the cache is left out",
+    after.every((r) => Number(r.repo_id) !== 999),
+    after.filter((r) => Number(r.repo_id) === 999).length + " dangling rows",
+  );
+  sqlite.exec("DELETE FROM contributor_weeks WHERE repo_id = 999");
+}
 
 /* ── Identity merging ─────────────────────────────────────────────────────── */
 
@@ -610,6 +751,293 @@ T(
     "roll-up then cumulative reaches the same grand total",
     rolledThenCum[rolledThenCum.length - 1].a === 55,
   );
+
+  /* Brush window mapping. A wrong answer here zooms the cards to the wrong dates
+     while still looking like a legitimate window, so each case is pinned. */
+  const { weekWindow } = series;
+  const weeks = rows.map((r) => r.week);
+
+  T(
+    "weekly buckets map straight through",
+    JSON.stringify(weekWindow(rows, weeks, 2, 5)) === JSON.stringify({ start: 2, end: 5 }),
+    JSON.stringify(weekWindow(rows, weeks, 2, 5)),
+  );
+
+  // 10 weeks from 4 Jan 2026 span January, February and (one week of) March.
+  T("monthly roll-up gives three buckets here", monthly.length === 3, `got ${monthly.length}`);
+  const janOnly = weekWindow(monthly, weeks, 0, 0);
+  T(
+    "one monthly bucket selects only that month's weeks",
+    weeks.slice(janOnly.start, janOnly.end + 1).every((w) => new Date(w * 1000).getUTCMonth() === 0),
+    JSON.stringify(janOnly),
+  );
+  T("a month window starts at the first week", janOnly.start === 0, JSON.stringify(janOnly));
+
+  const febOn = weekWindow(monthly, weeks, 1, 2);
+  T(
+    "a window ending at the last bucket reaches the final week",
+    febOn.end === weeks.length - 1,
+    JSON.stringify(febOn),
+  );
+  T(
+    "consecutive bucket windows meet without a gap or overlap",
+    febOn.start === janOnly.end + 1,
+    `${JSON.stringify(janOnly)} then ${JSON.stringify(febOn)}`,
+  );
+
+  T("the whole range maps to every week",
+    JSON.stringify(weekWindow(monthly, weeks, 0, monthly.length - 1)) ===
+      JSON.stringify({ start: 0, end: weeks.length - 1 }));
+
+  // Rows covering a slice of the axis still resolve against the whole axis, which
+  // is what happens when a breakdown redraws the chart over an existing window.
+  const tail = weekWindow(rows.slice(6), weeks, 0, 1);
+  T("a sliced chart still maps onto the full axis",
+    JSON.stringify(tail) === JSON.stringify({ start: 6, end: 7 }), JSON.stringify(tail));
+
+  T("a stale index yields no window", weekWindow(monthly, weeks, 99, 99) === null);
+  T("an empty chart yields no window", weekWindow([], weeks, 0, 0) === null);
+}
+
+/* ── Contribution metrics ─────────────────────────────────────────────────── */
+
+{
+  const { metricValue, metricCanBeNegative, METRICS } = metrics;
+  // SQLite hands big integers back as strings, and the cache has gaps.
+  const row = { commits: 12, additions: "5000", deletions: 1200 };
+
+  T("a stored metric reads its own column", metricValue(row, "commits") === 12);
+  T("a string column is still a number", metricValue(row, "additions") === 5000);
+  T("net is additions minus deletions", metricValue(row, "net") === 3800);
+  T(
+    "net goes negative when more was removed than added",
+    metricValue({ additions: 10, deletions: 400 }, "net") === -390,
+  );
+  T("a missing column reads as zero, not NaN", metricValue({ commits: 1 }, "net") === 0);
+  T("no row at all reads as zero", metricValue(null, "commits") === 0);
+  T("only net is signed",
+    metricCanBeNegative("net") === true && METRICS.filter((m) => metricCanBeNegative(m.id)).length === 1);
+}
+
+/* ── Signed shares, for the normalised view ───────────────────────────────── */
+
+// The divisor is the point that matters: a mixed row's signed sum is nowhere near
+// the movement it actually contains, and dividing by it reports shares over 100%.
+{
+  const { toShares } = series;
+  const at = (rows, i, k) => Number(rows[i][k].toFixed(4));
+
+  const positive = toShares([{ week: 1, a: 100, b: 500 }], ["a", "b"]);
+  T("shares of a positive row sum to one",
+    at(positive, 0, "a") === 0.1667 && at(positive, 0, "b") === 0.8333,
+    JSON.stringify(positive[0]));
+
+  const mixed = toShares([{ week: 1, a: 300, b: -400 }], ["a", "b"]);
+  T("a mixed row divides by the churn, not the signed sum",
+    at(mixed, 0, "a") === 0.4286 && at(mixed, 0, "b") === -0.5714,
+    JSON.stringify(mixed[0]));
+  T("mixed shares still fill one unit of axis",
+    Math.abs(mixed[0].a) + Math.abs(mixed[0].b) === 1);
+
+  const allNegative = toShares([{ week: 1, a: -200, b: -600 }], ["a", "b"]);
+  T("an all-negative row sits entirely below the baseline",
+    at(allNegative, 0, "a") === -0.25 && at(allNegative, 0, "b") === -0.75,
+    JSON.stringify(allNegative[0]));
+
+  // The signed sum is zero here: dividing by it would be a division by zero, and
+  // the shares are still perfectly well defined.
+  const cancelling = toShares([{ week: 1, a: 500, b: -500 }], ["a", "b"]);
+  T("a row that cancels out still has shares",
+    at(cancelling, 0, "a") === 0.5 && at(cancelling, 0, "b") === -0.5,
+    JSON.stringify(cancelling[0]));
+
+  const empty = toShares([{ week: 1, a: 0, b: 0 }], ["a", "b"]);
+  T("an empty row stays at zero rather than dividing by it",
+    empty[0].a === 0 && empty[0].b === 0);
+
+  T("keys outside the series list are left alone",
+    toShares([{ week: 7, a: 10 }], ["a"])[0].week === 7);
+}
+
+/* ── Shared y bounds across small multiples ───────────────────────────────── */
+
+// The failure here is silent: a floor of zero draws a week that deleted 5,000
+// lines as nothing, and the card still looks like a chart.
+{
+  const { chartBounds } = series;
+  const chart = (keys, rows) => ({ keys, data: rows });
+
+  const positive = [chart(["a"], [{ week: 1, a: 40 }]), chart(["a"], [{ week: 1, a: 120 }])];
+  T(
+    "positive charts keep a zero floor",
+    JSON.stringify(chartBounds(positive, true)) === JSON.stringify({ floor: 0, ceiling: 120 }),
+    JSON.stringify(chartBounds(positive, true)),
+  );
+
+  const signed = [
+    chart(["a"], [{ week: 1, a: 200 }, { week: 2, a: -5000 }]),
+    chart(["a"], [{ week: 1, a: 80 }]),
+  ];
+  T(
+    "a negative week pushes the floor below zero",
+    JSON.stringify(chartBounds(signed, true)) === JSON.stringify({ floor: -5000, ceiling: 200 }),
+    JSON.stringify(chartBounds(signed, true)),
+  );
+
+  // Mixed signs in one row: stacked bands grow in both directions at once, and
+  // summing them against each other would understate both ends.
+  const mixed = [chart(["a", "b"], [{ week: 1, a: 300, b: -400 }])];
+  T(
+    "stacked mixed signs measure each direction separately",
+    JSON.stringify(chartBounds(mixed, true)) === JSON.stringify({ floor: -400, ceiling: 300 }),
+    JSON.stringify(chartBounds(mixed, true)),
+  );
+  T(
+    "overlaid mixed signs take the extremes, not the sums",
+    JSON.stringify(chartBounds([chart(["a", "b"], [{ week: 1, a: 300, b: 500 }])], false)) ===
+      JSON.stringify({ floor: 0, ceiling: 500 }),
+    JSON.stringify(chartBounds([chart(["a", "b"], [{ week: 1, a: 300, b: 500 }])], false)),
+  );
+  T(
+    "stacked positives do sum",
+    chartBounds([chart(["a", "b"], [{ week: 1, a: 300, b: 500 }])], true).ceiling === 800,
+  );
+
+  T("an empty set still has a scale to draw against",
+    JSON.stringify(chartBounds([], true)) === JSON.stringify({ floor: 0, ceiling: 1 }));
+}
+
+/* ── How many series are drawn before "Other" ─────────────────────────────── */
+
+// The band has to keep totalling the same whatever the limit, or the chart changes
+// its story depending on how many colours it was allowed.
+{
+  const entities = Array.from({ length: 12 }, (_, i) => ({
+    k: `repo-${String(i).padStart(2, "0")}`,
+    w: W,
+    v: 1200 - i * 100,
+  }));
+  const input = {
+    rows: entities,
+    weeks: [W],
+    weekOf: (r) => r.w,
+    keyOf: (r) => r.k,
+    labelOf: (r) => r.k,
+    valueOf: (r) => r.v,
+  };
+  const grandTotal = entities.reduce((a, e) => a + e.v, 0);
+  const drawn = (result) => result.series.reduce((a, s) => a + s.total, 0);
+
+  const four = stacks.buildStacks({ ...input, maxSeries: 4 });
+  T("a limit of four draws four plus Other", four.series.length === 5, `${four.series.length} series`);
+  T("the folded count says how many went in", four.foldedCount === 8, `${four.foldedCount} folded`);
+  T("folding conserves the total", drawn(four) === grandTotal, `${drawn(four)} of ${grandTotal}`);
+
+  const eight = stacks.buildStacks({ ...input, maxSeries: 8 });
+  T("the default eight leaves four in Other", eight.foldedCount === 4, `${eight.foldedCount} folded`);
+  T("eight also conserves the total", drawn(eight) === grandTotal);
+
+  // "All": no Other band at all, and every entity keeps its own slot number so the
+  // chart can colour them — repeating hues past the eighth, deliberately.
+  const all = stacks.buildStacks({ ...input, maxSeries: Number.POSITIVE_INFINITY });
+  T("showing all draws every entity", all.series.length === 12, `${all.series.length} series`);
+  T("showing all folds nothing", all.foldedCount === 0);
+  T("no Other band exists when nothing is folded",
+    all.series.every((s) => s.slot !== null));
+  T("showing all conserves the total too", drawn(all) === grandTotal);
+  T(
+    "slots keep counting past the palette's eight",
+    all.series[8].slot === 8 && all.series[11].slot === 11,
+    all.series.map((s) => s.slot).join(","),
+  );
+
+  // Fewer entities than the limit must not invent an empty Other band.
+  const few = stacks.buildStacks({
+    ...input,
+    rows: entities.slice(0, 3),
+    maxSeries: 8,
+  });
+  T("a short list has no Other band", few.series.length === 3 && few.foldedCount === 0);
+}
+
+/* ── Slot ranking for a signed metric ─────────────────────────────────────── */
+
+// Under net lines, the repository that deleted the most is as interesting as the
+// one that added the most; ranking by the signed total buries it in "Other".
+{
+  const rows = [
+    { k: "adds-a-lot", w: W, v: 900 },
+    { k: "adds-some", w: W, v: 500 },
+    { k: "deletes-a-lot", w: W, v: -8000 },
+  ];
+  const input = {
+    rows,
+    weeks: [W],
+    weekOf: (r) => r.w,
+    keyOf: (r) => r.k,
+    labelOf: (r) => r.k,
+    valueOf: (r) => r.v,
+    maxSeries: 2,
+  };
+
+  const signed = stacks.buildStacks(input);
+  T(
+    "by signed total, the big deletion folds away",
+    signed.series.map((s) => s.key).join(",") === "adds-a-lot,adds-some,__other__",
+    signed.series.map((s) => s.key).join(","),
+  );
+
+  const byMagnitude = stacks.buildStacks({ ...input, rankBy: Math.abs });
+  T(
+    "by magnitude, the big deletion takes a slot",
+    byMagnitude.series.map((s) => s.key).join(",") === "deletes-a-lot,adds-a-lot,__other__",
+    byMagnitude.series.map((s) => s.key).join(","),
+  );
+  T(
+    "folding still sums the signed totals",
+    byMagnitude.series.find((s) => s.key === "__other__").total === 500,
+  );
+}
+
+/* ── Period resolution ────────────────────────────────────────────────────── */
+
+// A wrong range here dates every number on the page while still looking entirely
+// reasonable, so the custom bounds and the presets are pinned against each other.
+{
+  const { resolvePeriod, parseDayInput } = weeksLib;
+  const now = new Date("2026-08-12T09:30:00Z");
+  const jan1 = Date.UTC(2026, 0, 1);
+  const mar15End = Date.UTC(2026, 2, 15, 23, 59, 59, 999);
+
+  const custom = resolvePeriod("custom", { now, customFrom: jan1, customTo: mar15End });
+  T("a custom period uses both bounds",
+    custom.fromMs === jan1 && custom.toMs === mar15End,
+    new Date(custom.fromMs).toISOString() + " to " + new Date(custom.toMs).toISOString());
+
+  // The dates are remembered while a preset is selected; a preset must ignore them.
+  const week = resolvePeriod("1w", { now, customFrom: jan1, customTo: mar15End });
+  T("a preset ends now, not at a remembered custom end",
+    week.toMs === now.getTime(),
+    new Date(week.toMs).toISOString());
+  T("a preset starts its own span back from now",
+    week.fromMs === now.getTime() - 7 * 86_400_000,
+    new Date(week.fromMs).toISOString());
+
+  const ytd = resolvePeriod("ytd", { now, customFrom: jan1, customTo: mar15End });
+  T("year to date still starts on 1 January",
+    new Date(ytd.fromMs).toISOString().startsWith("2026-01-01") && ytd.toMs === now.getTime());
+
+  const all = resolvePeriod("all", { now, customTo: mar15End });
+  T("all time still ends now", all.toMs === now.getTime() && all.fromMs === 0);
+
+  // "custom" with no dates must not silently claim a bound it does not have.
+  const bare = resolvePeriod("custom", { now });
+  T("custom without dates falls back to a span ending now", bare.toMs === now.getTime());
+
+  T("a date input parses as UTC midnight", parseDayInput("2026-01-01") === jan1);
+  T("an end date parses as the last millisecond of the day",
+    parseDayInput("2026-03-15", true) === mar15End);
+  T("a half-typed date is not a date", parseDayInput("2026-03") === null);
 }
 
 /* ── No manual transactions anywhere ──────────────────────────────────────── */
@@ -638,6 +1066,161 @@ T(
   Number(sqlite.prepare("SELECT included FROM repo_selection WHERE repo_id = 1").get().included) === 1,
 );
 
+/* ── Pre-sync commit counts ───────────────────────────────────────────────── */
+
+// These are what the sync targets get chosen from, so "unreadable" has to stay
+// distinguishable from "read it, there is nothing there" all the way to the table.
+{
+  const since = "2026-01-01T00:00:00.000Z";
+  await q.saveRepoStats(db, [
+    { repoId: 1, commits: 4200, recentCommits: 130, since, readable: true },
+    { repoId: 2, commits: 0, recentCommits: 0, since, readable: true },
+    { repoId: 3, commits: null, recentCommits: null, since, readable: false },
+  ]);
+
+  const rows = await q.getRepoStats(db);
+  const byId = new Map(rows.map((r) => [r.repo_id, r]));
+  T("pre-sync counts round-trip", rows.length === 3, `${rows.length} rows`);
+  T(
+    "a counted repository keeps both figures",
+    Number(byId.get(1).commits) === 4200 && Number(byId.get(1).recent_commits) === 130,
+    JSON.stringify(byId.get(1)),
+  );
+  T(
+    "an empty repository is zero, not unknown",
+    byId.get(2).commits === 0 && byId.get(2).readable === 1,
+    JSON.stringify(byId.get(2)),
+  );
+  T(
+    "an unreadable repository is null, not zero",
+    byId.get(3).commits === null && byId.get(3).readable === 0,
+    JSON.stringify(byId.get(3)),
+  );
+  T("the window is recorded alongside the count", byId.get(1).since === since);
+  T("every row is stamped", rows.every((r) => typeof r.checked_at === "string"));
+
+  // Re-counting must correct a row rather than add a second one for the same repo.
+  await q.saveRepoStats(db, [
+    { repoId: 1, commits: 4300, recentCommits: 230, since, readable: true },
+  ]);
+  const after = await q.getRepoStats(db);
+  T(
+    "re-counting updates in place",
+    after.length === 3 && Number(after.find((r) => r.repo_id === 1).commits) === 4300,
+    `${after.length} rows`,
+  );
+}
+
+/* ── The pre-sync sweep, against a fake GitHub ────────────────────────────── */
+
+/*
+ * Driven through the real client, so the Link rel="last" trick the whole feature
+ * rests on is exercised rather than assumed. What is being checked is the request
+ * accounting: the point of a pre-sync is that it costs far less than a sync, and an
+ * extra request per repository would quietly undo that.
+ */
+{
+  const presync = await bundle("src/lib/ingest/presync.ts", "presync.cjs");
+
+  const requests = [];
+  const reply = (body, headers = {}) =>
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json", ...headers },
+    });
+
+  globalThis.__ghFetch = async (url) => {
+    const path = String(url);
+    requests.push(path);
+    // o/a: 1,204 commits, 12 of them inside the window.
+    if (path.includes("/repos/o/a/commits")) {
+      const page = path.includes("since=") ? 12 : 1204;
+      return reply([{}], {
+        link: `<https://api.github.com/x?page=2>; rel="next", <https://api.github.com/x?page=${page}>; rel="last"`,
+      });
+    }
+    // o/b: readable, single page, no commits at all.
+    if (path.includes("/repos/o/b/commits")) return reply([]);
+    // o/c: no access.
+    if (path.includes("/repos/o/c/commits")) {
+      return new Response("{}", { status: 403, headers: { "x-ratelimit-remaining": "4999" } });
+    }
+    throw new Error(`unexpected request: ${path}`);
+  };
+
+  sqlite.exec("DELETE FROM repo_stats");
+  const repos = [
+    { id: 1, owner: "o", name: "a", full_name: "o/a" },
+    { id: 2, owner: "o", name: "b", full_name: "o/b" },
+    { id: 3, owner: "o", name: "c", full_name: "o/c" },
+  ];
+  const progress = [];
+  const result = await presync.runPreSync({
+    db,
+    token: "t",
+    repos,
+    sinceDays: 365,
+    onProgress: (p) => progress.push({ ...p }),
+  });
+
+  T(
+    "the Link rel=last page number is the commit count",
+    result.stats.get(1).commits === 1204 && result.stats.get(1).recentCommits === 12,
+    JSON.stringify(result.stats.get(1)),
+  );
+  T(
+    "a readable repository with no commits counts zero",
+    result.stats.get(2).commits === 0 && result.stats.get(2).recentCommits === 0,
+    JSON.stringify(result.stats.get(2)),
+  );
+  T("an inaccessible repository is reported unreadable", result.unreadable.includes(3));
+
+  // Two per countable repository, one for the unreadable one: asking it again for a
+  // window it cannot show us would be a wasted request.
+  T(
+    "an unreadable repository costs one request, not two",
+    result.requestsMade === 5,
+    `${result.requestsMade} requests for ${repos.length} repositories`,
+  );
+  T(
+    "the window is applied to the recent count only",
+    requests.filter((r) => r.includes("since=")).length === 2,
+    requests.filter((r) => r.includes("since=")).length + " windowed requests",
+  );
+  T("every request asks for a single item", requests.every((r) => r.includes("per_page=1")));
+
+  const persisted = await q.getRepoStats(db);
+  T(
+    "the sweep persists what it found, unreadable rows included",
+    persisted.length === 3 &&
+      Number(persisted.find((r) => r.repo_id === 1).commits) === 1204 &&
+      persisted.find((r) => r.repo_id === 3).readable === 0,
+    JSON.stringify(persisted.map((r) => [r.repo_id, r.commits, r.readable])),
+  );
+  T("progress is reported for every repository", progress.at(-1).done === 3);
+
+  // A sweep stopped part way must still leave behind what it managed to learn.
+  sqlite.exec("DELETE FROM repo_stats");
+  const controller = new AbortController();
+  const partial = await presync.runPreSync({
+    db,
+    token: "t",
+    repos,
+    onProgress: (p) => {
+      if (p.done >= 1) controller.abort();
+    },
+    signal: controller.signal,
+  });
+  T("a cancelled sweep says so", partial.cancelled === true);
+  T(
+    "a cancelled sweep still persists its partial results",
+    (await q.getRepoStats(db)).length >= 1,
+    `${(await q.getRepoStats(db)).length} rows`,
+  );
+
+  delete globalThis.__ghFetch;
+}
+
 /* ── Clearing the cache must not lose user-authored content ───────────────── */
 
 {
@@ -654,6 +1237,12 @@ T(
   T(
     "clearAnalytics does wipe the analytics it is meant to",
     sqlite.prepare("SELECT count(*) n FROM contributor_weeks").get().n === 0,
+  );
+  // Wiping the cache is how you decide to re-sync, and these counts are what that
+  // decision is made from — losing them would mean re-spending the requests first.
+  T(
+    "clearAnalytics keeps the pre-sync counts",
+    sqlite.prepare("SELECT count(*) n FROM repo_stats").get().n === 3,
   );
 }
 

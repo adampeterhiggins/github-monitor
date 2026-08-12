@@ -257,6 +257,118 @@ export async function saveAuthorProbe(
   );
 }
 
+export interface ContributorBoundsRow {
+  login: string;
+  first_week: number;
+  last_week: number;
+}
+
+/**
+ * First and last week with commits, per contributor, across the selected repos.
+ *
+ * Deliberately unbounded by period: it exists to answer "what period would cover
+ * everything this person did", so restricting it to the period on screen would
+ * make it answer with the period it was given. One query for every card rather
+ * than one per card, since two dozen are on screen at once.
+ *
+ * Casings are merged the way the rest of the read layer merges them — the cache's
+ * key is case-sensitive and GitHub is not.
+ */
+export async function contributorWeekBounds(
+  db: Database,
+  repoIds: readonly number[],
+): Promise<ContributorBoundsRow[]> {
+  if (repoIds.length === 0) return [];
+  const p = new Params();
+  const ids = p.in(repoIds);
+  return db.select<ContributorBoundsRow[]>(
+    `SELECT MIN(login) AS login, MIN(week) AS first_week, MAX(week) AS last_week
+     FROM contributor_weeks
+     WHERE commits > 0 AND repo_id IN ${ids}
+     GROUP BY LOWER(login)`,
+    p.values,
+  );
+}
+
+export interface ContributorRepoRow {
+  login: string;
+  repo_id: number;
+}
+
+/**
+ * Which repositories each contributor has commits in, across the whole cache.
+ *
+ * Deliberately *not* scoped to the selected repositories, unlike almost everything
+ * else here: it exists to set that selection, and a query that could only see the
+ * current selection could only ever narrow it. Joined to `repos` so the ids it
+ * returns are ones that still exist and can be selected.
+ *
+ * One row per contributor and repository, grouped by the caller — a few hundred
+ * rows for an org of this size, and one query rather than one per card.
+ */
+export async function contributorRepoIds(db: Database): Promise<ContributorRepoRow[]> {
+  return db.select<ContributorRepoRow[]>(
+    `SELECT MIN(cw.login) AS login, cw.repo_id AS repo_id
+     FROM contributor_weeks cw
+     JOIN repos r ON r.id = cw.repo_id
+     WHERE cw.commits > 0
+     GROUP BY LOWER(cw.login), cw.repo_id`,
+  );
+}
+
+export interface RepoStatsRow {
+  repo_id: number;
+  /** Null when the repository could not be read, as against read-and-empty. */
+  commits: number | null;
+  recent_commits: number | null;
+  since: string | null;
+  readable: number;
+  checked_at: string | null;
+}
+
+/**
+ * Pre-sync commit counts per repository.
+ *
+ * The counterpart to `repoActivity`, which reads what a sync has already landed.
+ * This one is populated by `runPreSync` from two cheap requests per repository, so
+ * it is available while deciding what to sync — which is exactly when
+ * `repoActivity` is still empty.
+ */
+export async function getRepoStats(db: Database): Promise<RepoStatsRow[]> {
+  return db.select<RepoStatsRow[]>(
+    `SELECT repo_id, commits, recent_commits, since, readable, checked_at FROM repo_stats`,
+  );
+}
+
+export async function saveRepoStats(
+  db: Database,
+  results: Array<{
+    repoId: number;
+    commits: number | null;
+    recentCommits: number | null;
+    since: string | null;
+    readable: boolean;
+  }>,
+): Promise<void> {
+  if (!results.length) return;
+  const checkedAt = new Date().toISOString();
+  await withWriteLock(() =>
+    bulkInsert(db, {
+      table: "repo_stats",
+      columns: ["repo_id", "commits", "recent_commits", "since", "readable", "checked_at"],
+      conflictColumns: ["repo_id"],
+      rows: results.map((r) => [
+        r.repoId,
+        r.commits,
+        r.recentCommits,
+        r.since,
+        r.readable ? 1 : 0,
+        checkedAt,
+      ]),
+    }),
+  );
+}
+
 /** Total commits and latest activity per repository, for the selection list. */
 export async function repoActivity(db: Database): Promise<RepoActivityRow[]> {
   return db.select<RepoActivityRow[]>(
@@ -370,6 +482,35 @@ export async function contributorWeeklyTotals(
      ORDER BY week`,
     p.values,
   );
+}
+
+/**
+ * The first and last week with any commits in the current selection, so a period
+ * can be set to the data itself rather than to a guess.
+ *
+ * Weeks with no commits are ignored rather than counted as coverage: a repository
+ * row can exist with zeroes, and a range that opened on an empty week would claim
+ * history that is not there. Null when the selection has no commits at all.
+ */
+export async function commitWeekBounds(
+  db: Database,
+  repoIds: readonly number[],
+  logins: Logins = null,
+): Promise<{ firstWeek: number; lastWeek: number } | null> {
+  if (repoIds.length === 0) return null;
+  const p = new Params();
+  const ids = p.in(repoIds);
+  const loginClause = p.loginFilter("login", logins);
+  const rows = await db.select<Array<{ first_week: number | null; last_week: number | null }>>(
+    `SELECT MIN(week) AS first_week, MAX(week) AS last_week
+     FROM contributor_weeks
+     WHERE commits > 0 AND repo_id IN ${ids}${loginClause}`,
+    p.values,
+  );
+  const first = rows[0]?.first_week;
+  const last = rows[0]?.last_week;
+  if (first == null || last == null) return null;
+  return { firstWeek: Number(first), lastWeek: Number(last) };
 }
 
 export interface ContributorWeekRow extends WeekPoint {

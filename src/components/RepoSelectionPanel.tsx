@@ -3,6 +3,7 @@ import { useApp } from "../lib/state/app";
 import { activeRepoIds, useRepoSelectionData } from "../lib/repoSelection";
 import { useRepoSync, type RepoSyncSummary } from "../lib/state/repoSync";
 import { discoverAuthorRepos, type DiscoverProgress } from "../lib/ingest/discoverAuthorRepos";
+import { runPreSync, type PreSyncProgress } from "../lib/ingest/presync";
 import { GitHubClient } from "../lib/github/client";
 import { formatDate } from "../lib/agg/weeks";
 import type { RepoRow } from "../lib/db/queries";
@@ -18,6 +19,8 @@ import {
   full,
 } from "./ui";
 
+const repoCount = (n: number) => `${full(n)} ${n === 1 ? "repository" : "repositories"}`;
+
 /**
  * Repository selection, as a checkbox list rather than the compact dropdown in the
  * filter bar. This is the place to curate the set once; the dropdown is for quick
@@ -31,8 +34,17 @@ export function RepoSelectionPanel() {
   const login = useApp((s) => s.login);
   const setLogin = useApp((s) => s.setLogin);
 
-  const { activity, myCommits, probe, hasCommitData, loading, refetchProbe } =
-    useRepoSelectionData();
+  const {
+    activity,
+    myCommits,
+    probe,
+    preSync,
+    allCommits,
+    preSyncAt,
+    loading,
+    refetchProbe,
+    refetchPreSync,
+  } = useRepoSelectionData();
   const db = useApp((s) => s.db);
   const bumpProbeStamp = useApp((s) => s.bumpProbeStamp);
 
@@ -42,6 +54,8 @@ export function RepoSelectionPanel() {
   const [detecting, setDetecting] = useState(false);
   const [discovery, setDiscovery] = useState<DiscoverProgress | null>(null);
   const discoverAbort = useRef<AbortController | null>(null);
+  const [preSyncing, setPreSyncing] = useState<PreSyncProgress | null>(null);
+  const preSyncAbort = useRef<AbortController | null>(null);
 
   // Per-repository sync, so one failed or still-computing repository can be
   // fixed without re-running the whole organisation.
@@ -132,6 +146,50 @@ export function RepoSelectionPanel() {
     }
   };
 
+  /**
+   * Count commits per repository without syncing, so the sync targets can be chosen
+   * on what is actually in each repository rather than on `pushed_at` alone.
+   */
+  const fetchCommitCounts = async () => {
+    if (!token || !db) return;
+    const controller = new AbortController();
+    preSyncAbort.current = controller;
+    setNotice(null);
+
+    const candidates = repos.filter((r) => (showArchived ? true : r.archived === 0));
+
+    try {
+      const result = await runPreSync({
+        db,
+        token,
+        repos: candidates,
+        signal: controller.signal,
+        onProgress: setPreSyncing,
+      });
+
+      bumpProbeStamp();
+      refetchPreSync();
+
+      const counted = [...result.stats.values()];
+      const withCommits = counted.filter((s) => (s.commits ?? 0) > 0).length;
+      const recentlyActive = counted.filter((s) => (s.recentCommits ?? 0) > 0).length;
+      setNotice(
+        `Counted commits in ${full(counted.length)} repositories using ` +
+          `${full(result.requestsMade)} requests` +
+          (result.cancelled ? " (stopped early, partial result)" : "") +
+          `. ${full(withCommits)} have commits, ${full(recentlyActive)} in the last year` +
+          (result.unreadable.length
+            ? `; ${full(result.unreadable.length)} could not be read.`
+            : "."),
+      );
+    } catch (err) {
+      setNotice(`Could not count commits: ${(err as Error)?.message ?? String(err)}`);
+    } finally {
+      setPreSyncing(null);
+      preSyncAbort.current = null;
+    }
+  };
+
   const myWithCommits = useMemo(
     () => [...myCommits.values()].filter((n) => n > 0).length,
     [myCommits],
@@ -166,37 +224,25 @@ export function RepoSelectionPanel() {
       ) : null}
 
       {discovery ? (
-        <div className="mb-3">
-          <div className="mb-1.5 flex items-center justify-between gap-3 text-[12px]">
-            <span className="flex items-center gap-2 text-ink">
-              <Spinner /> Checking repositories for your commits
-              {discovery.found > 0 ? ` — ${full(discovery.found)} found` : ""}
-            </span>
-            <span className="flex items-center gap-2">
-              <span className="tabular text-ink-secondary">
-                {full(discovery.done)} / {full(discovery.total)}
-              </span>
-              <Button variant="ghost" onClick={() => discoverAbort.current?.abort()}>
-                Stop
-              </Button>
-            </span>
-          </div>
-          <div
-            className="h-1.5 w-full overflow-hidden rounded-full"
-            style={{ background: "var(--wash-strong)" }}
-          >
-            <div
-              className="h-full rounded-full transition-[width]"
-              style={{
-                width: `${discovery.total ? Math.round((discovery.done / discovery.total) * 100) : 0}%`,
-                background: "var(--accent)",
-              }}
-            />
-          </div>
-          {discovery.current ? (
-            <p className="mt-1.5 truncate text-[11px] text-ink-muted">{discovery.current}</p>
-          ) : null}
-        </div>
+        <SweepProgress
+          label="Checking repositories for your commits"
+          found={discovery.found > 0 ? `${full(discovery.found)} found` : null}
+          done={discovery.done}
+          total={discovery.total}
+          current={discovery.current}
+          onStop={() => discoverAbort.current?.abort()}
+        />
+      ) : null}
+
+      {preSyncing ? (
+        <SweepProgress
+          label="Counting commits per repository"
+          found={preSyncing.active > 0 ? `${full(preSyncing.active)} active` : null}
+          done={preSyncing.done}
+          total={preSyncing.total}
+          current={preSyncing.current}
+          onStop={() => preSyncAbort.current?.abort()}
+        />
       ) : null}
 
       {/* The requested auto-populate action, plus the other useful presets. */}
@@ -215,6 +261,13 @@ export function RepoSelectionPanel() {
             {detecting ? <Spinner /> : null} Detect my GitHub account
           </Button>
         )}
+        <Button
+          onClick={fetchCommitCounts}
+          disabled={preSyncing != null || !token}
+          title="Ask GitHub how many commits each repository has, and how many in the last year — two requests per repository, no sync needed"
+        >
+          Count commits
+        </Button>
         <Button onClick={() => apply(repos.map((r) => r.id), "Selected every repository.")}>
           Select all
         </Button>
@@ -229,14 +282,24 @@ export function RepoSelectionPanel() {
           Active in last 12 months
         </Button>
         <Button
-          title="Repositories with any cached commit activity"
-          disabled={!hasCommitData}
+          title="Repositories with any commits, counted or synced"
+          disabled={allCommits.size === 0}
           onClick={() => {
-            const ids = repos.filter((r) => (activity.get(r.id)?.commits ?? 0) > 0).map((r) => r.id);
-            apply(ids, `Selected ${full(ids.length)} repositories with commit activity.`);
+            const ids = repos.filter((r) => (allCommits.get(r.id) ?? 0) > 0).map((r) => r.id);
+            apply(ids, `Selected ${repoCount(ids.length)} with commits.`);
           }}
         >
-          Has any activity
+          Has any commits
+        </Button>
+        <Button
+          title="Repositories with commits in the last year, from the counted figures"
+          disabled={preSync.size === 0}
+          onClick={() => {
+            const ids = repos.filter((r) => (preSync.get(r.id)?.recentCommits ?? 0) > 0).map((r) => r.id);
+            apply(ids, `Selected ${repoCount(ids.length)} with commits in the last year.`);
+          }}
+        >
+          Committed to in last year
         </Button>
       </div>
 
@@ -341,10 +404,40 @@ export function RepoSelectionPanel() {
             header: "All commits",
             align: "right",
             render: (r: RepoRow) => {
-              const n = Number(activity.get(r.id)?.commits ?? 0);
-              return n > 0 ? compact(n) : <span className="text-ink-muted">—</span>;
+              const n = allCommits.get(r.id) ?? 0;
+              if (n > 0) {
+                // Counted figures are the whole default branch; synced ones are what
+                // the stats endpoints attribute. Mark which one is on screen.
+                const counted = !activity.has(r.id) && preSync.has(r.id);
+                return (
+                  <span className={counted ? "text-ink-secondary" : "text-ink"}>
+                    {compact(n)}
+                    {counted ? "*" : ""}
+                  </span>
+                );
+              }
+              return preSync.has(r.id) ? (
+                <span className="text-ink-muted">0</span>
+              ) : (
+                <span className="text-ink-muted">—</span>
+              );
             },
-            sortValue: (r: RepoRow) => Number(activity.get(r.id)?.commits ?? 0),
+            sortValue: (r: RepoRow) => allCommits.get(r.id) ?? -1,
+          },
+          {
+            key: "recent",
+            header: "Last year",
+            align: "right",
+            render: (r: RepoRow) => {
+              const stats = preSync.get(r.id);
+              if (!stats) return <span className="text-ink-muted">—</span>;
+              return stats.recentCommits > 0 ? (
+                <span className="text-ink">{compact(stats.recentCommits)}</span>
+              ) : (
+                <span className="text-ink-muted">0</span>
+              );
+            },
+            sortValue: (r: RepoRow) => preSync.get(r.id)?.recentCommits ?? -1,
           },
           {
             key: "pushed",
@@ -378,10 +471,70 @@ export function RepoSelectionPanel() {
         <strong className="text-ink">My commits</strong> comes from GitHub directly when you use
         “Repositories I've committed in”, so it works before any sync; a dash means not yet
         checked, and 0 means checked with none found. <strong className="text-ink">All commits</strong>{" "}
-        needs a sync, since GitHub only exposes full contributor statistics through its lazily
-        computed endpoints.
+        and <strong className="text-ink">Last year</strong> come from “Count commits”, which is two
+        requests per repository and needs no sync — figures from it are marked with an asterisk and
+        count the whole default branch. Once a repository is synced its own contributor statistics
+        replace the counted total, which can differ: those attribute commits per author and exclude
+        merges.
+        {preSyncAt ? ` Counted ${formatDate(new Date(preSyncAt))}.` : ""}
       </p>
     </Card>
+  );
+}
+
+/**
+ * Progress for a per-repository sweep, with a way out of it.
+ *
+ * Shared by both pre-sync passes: they cost one or two requests per repository
+ * across a few hundred of them, which is long enough that a silent wait would look
+ * like a hang and long enough to want to stop it.
+ */
+function SweepProgress({
+  label,
+  found,
+  done,
+  total,
+  current,
+  onStop,
+}: {
+  label: string;
+  /** A running tally worth showing beside the label, if there is one. */
+  found: string | null;
+  done: number;
+  total: number;
+  current: string | null;
+  onStop: () => void;
+}) {
+  return (
+    <div className="mb-3">
+      <div className="mb-1.5 flex items-center justify-between gap-3 text-[12px]">
+        <span className="flex items-center gap-2 text-ink">
+          <Spinner /> {label}
+          {found ? ` — ${found}` : ""}
+        </span>
+        <span className="flex items-center gap-2">
+          <span className="tabular text-ink-secondary">
+            {full(done)} / {full(total)}
+          </span>
+          <Button variant="ghost" onClick={onStop}>
+            Stop
+          </Button>
+        </span>
+      </div>
+      <div
+        className="h-1.5 w-full overflow-hidden rounded-full"
+        style={{ background: "var(--wash-strong)" }}
+      >
+        <div
+          className="h-full rounded-full transition-[width]"
+          style={{
+            width: `${total ? Math.round((done / total) * 100) : 0}%`,
+            background: "var(--accent)",
+          }}
+        />
+      </div>
+      {current ? <p className="mt-1.5 truncate text-[11px] text-ink-muted">{current}</p> : null}
+    </div>
   );
 }
 

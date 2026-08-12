@@ -15,9 +15,18 @@ import {
 } from "recharts";
 import { useMemo } from "react";
 import { useVizPalette } from "../lib/viz/useVizPalette";
-import { sequentialStep, type VizPalette } from "../lib/viz/palette";
+import { sequentialStep, seriesColorCycled, type VizPalette } from "../lib/viz/palette";
 import { formatShort, formatDate, weekTickFormatter } from "../lib/agg/weeks";
-import { compact, full } from "./ui";
+import { toShares } from "../lib/agg/series";
+import { compact, full, useChartHeight } from "./ui";
+
+/**
+ * The height a chart was authored at, unless something above it — an expanded
+ * view — asked for a different one. See `ChartHeight` in ui.tsx.
+ */
+function useHeight(authored: number): number {
+  return useChartHeight() ?? authored;
+}
 
 /* ── Shared chart chrome ────────────────────────────────────────────────────
    Mark specs are fixed: bars <= 24px with a 4px rounded data-end square at the
@@ -27,6 +36,16 @@ import { compact, full } from "./ui";
 const BAR_MAX = 24;
 const BAR_RADIUS: [number, number, number, number] = [4, 4, 0, 0];
 const AXIS_FONT = 11;
+
+/**
+ * A proportion as a percentage. One decimal below 10% so a small series is not
+ * flattened to "0%" while visibly occupying part of the band.
+ */
+function share(value: number): string {
+  const pct = value * 100;
+  if (pct > 0 && pct < 10) return `${pct.toFixed(1)}%`;
+  return `${Math.round(pct)}%`;
+}
 
 function axisProps(palette: VizPalette) {
   return {
@@ -157,15 +176,16 @@ export function WeeklyColumns({
   onBrushChange?: (range: { startIndex: number; endIndex: number }) => void;
 }) {
   const palette = useVizPalette();
+  const h = useHeight(height);
   // One series: no legend box — the card title already names what is plotted.
   const color = palette.series[0];
   const tick = weekTickFormatter(data.map((d) => d.week));
   const geom = barGeometry(data.length, BAR_RADIUS);
 
-  if (data.length === 0) return <NoData height={height} />;
+  if (data.length === 0) return <NoData height={h} />;
 
   return (
-    <ResponsiveContainer width="100%" height={height}>
+    <ResponsiveContainer width="100%" height={h}>
       <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} barCategoryGap={geom.gap}>
         <CartesianGrid {...gridProps(palette)} />
         <XAxis
@@ -239,19 +259,27 @@ export function TimelineArea({
   series,
   height = 260,
   shape = "area",
-  stacked = true,
+  stackMode = "stacked",
   valueLabel,
   labelOf,
   activeKeys,
   onToggleKey,
   withBrush = false,
   onBrushChange,
+  yMax,
+  yMin = 0,
 }: {
   data: Array<Record<string, number>>;
   series: StackSeriesSpec[];
   height?: number;
   shape?: TimelineShape;
-  stacked?: boolean;
+  /**
+   * `normalised` is `stacked` with the total at each point read as 100%: the axis
+   * becomes a share, which answers "who made up this week" rather than "how much
+   * was there". It stacks like the others — plotting raw values against a 0–1 axis
+   * would draw everything clipped along the top.
+   */
+  stackMode?: "stacked" | "overlaid" | "normalised";
   valueLabel: string;
   /** Formats the x value for the tooltip heading. */
   labelOf: (week: number) => string;
@@ -260,26 +288,80 @@ export function TimelineArea({
   onToggleKey?: (key: string) => void;
   withBrush?: boolean;
   onBrushChange?: (range: { startIndex: number; endIndex: number }) => void;
+  /**
+   * Shared upper bound across a set of small multiples. Without it each chart
+   * self-scales and two very different contributors draw the same picture.
+   */
+  yMax?: number;
+  /** Shared lower bound, for a metric that goes below zero. Ignored without yMax. */
+  yMin?: number;
 }) {
   const palette = useVizPalette();
+  const h = useHeight(height);
   const tick = weekTickFormatter(data.map((d) => d.week));
   const geom = barGeometry(data.length, BAR_RADIUS);
+  const stacked = stackMode !== "overlaid";
+  const normalised = stackMode === "normalised";
+  /* Shares are computed rather than left to `stackOffset="expand"` (see toShares),
+     so the stack only needs to know which way each one points: "sign" grows the
+     positives up from zero and the negatives down. Lines do not stack at all —
+     each is its own share, which reads better than stacked boundaries would. */
+  const stackOffset = normalised && shape !== "line" ? "sign" : undefined;
 
   const colored = series.map((s) => ({
     ...s,
-    color: s.slot == null ? palette.inkMuted : (palette.series[s.slot] ?? palette.inkMuted),
+    /* "Other" is muted ink; a real series takes its slot, and past the eighth the
+       hues repeat — see seriesColorCycled for why that is the lesser evil. */
+    color: s.slot == null ? palette.inkMuted : seriesColorCycled(palette, s.slot),
   }));
 
-  const isActive = (key: string) => !activeKeys || activeKeys.size === 0 || activeKeys.has(key);
-  const shown = colored.filter((s) => isActive(s.key));
+  /**
+   * Selecting from the legend dims the rest rather than removing it.
+   *
+   * Removing a band re-scales the whole chart, so isolating one series changes
+   * every other number on screen and you lose the thing you were comparing it
+   * against. Dimming keeps the stack, the axis and the proportions exactly where
+   * they were and only changes what your eye is drawn to. An empty selection means
+   * everything is at full strength, which keeps "nothing selected" and "all
+   * selected" from being two states that look different.
+   */
+  const filtered = activeKeys != null && activeKeys.size > 0;
+  const isActive = (key: string) => !filtered || activeKeys!.has(key);
+  const dim = (key: string) => (isActive(key) ? 1 : 0.18);
 
-  if (data.length === 0 || series.length === 0) return <NoData height={height} />;
+  if (data.length === 0 || series.length === 0) return <NoData height={h} />;
+
+  // Shares are of everything, so isolating a band does not re-base the axis.
+  const plotted = normalised ? toShares(data, colored.map((s) => s.key)) : data;
+  /* Room under the baseline only when something goes there, so a share chart of
+     commits still fills the plot rather than giving half of it to an empty half. */
+  const shareFloor =
+    normalised && plotted.some((row) => colored.some((s) => (row[s.key] ?? 0) < 0)) ? -1 : 0;
+  /* The tooltip always reports the real numbers, so it reads off the untouched
+     rows rather than whatever was plotted. */
+  const rawByWeek =
+    plotted === data ? null : new Map(data.map((row) => [row.week, row] as const));
 
   const axes = (
     <>
       <CartesianGrid {...gridProps(palette)} />
       <XAxis dataKey="week" {...axisProps(palette)} tickFormatter={tick} minTickGap={28} />
-      <YAxis {...axisProps(palette)} width={48} tickFormatter={compact} allowDecimals={false} />
+      <YAxis
+        {...axisProps(palette)}
+        width={48}
+        tickFormatter={normalised ? share : compact}
+        // Quarter ticks are decimals; the default integer-only axis would leave a
+        // share chart with nothing between 0% and 100%.
+        allowDecimals={normalised}
+        ticks={
+          normalised
+            ? shareFloor < 0
+              ? [-1, -0.5, 0, 0.5, 1]
+              : [0, 0.25, 0.5, 0.75, 1]
+            : undefined
+        }
+        domain={normalised ? [shareFloor, 1] : yMax != null ? [yMin, yMax] : undefined}
+      />
       <Tooltip
         // A crosshair on continuous forms so the reader aims at a date rather than
         // at a 2px line; bars keep the per-mark highlight.
@@ -290,12 +372,15 @@ export function TimelineArea({
         }
         content={({ active, payload }) => {
           if (!active || !payload?.length) return null;
-          const row = payload[0].payload as Record<string, number>;
-          const rows = shown
+          const plottedRow = payload[0].payload as Record<string, number>;
+          const row = rawByWeek?.get(Number(plottedRow.week)) ?? plottedRow;
+          const rows = colored
+            .filter((s) => isActive(s.key))
             .map((s) => ({ label: s.label, raw: Number(row[s.key] ?? 0), color: s.color }))
-            .filter((r) => r.raw > 0)
-            .sort((a, b) => b.raw - a.raw);
+            .filter((r) => r.raw !== 0)
+            .sort((a, b) => Math.abs(b.raw) - Math.abs(a.raw));
           const total = rows.reduce((a, r) => a + r.raw, 0);
+          const churn = rows.reduce((a, r) => a + Math.abs(r.raw), 0);
           const capped = rows.slice(0, 10);
           return (
             <TooltipShell
@@ -304,7 +389,11 @@ export function TimelineArea({
                 rows.length > 1 ? ` · ${full(total)} ${valueLabel}` : ""
               }`}
               rows={[
-                ...capped.map((r) => ({ label: r.label, value: full(r.raw), color: r.color })),
+                ...capped.map((r) => ({
+                  label: normalised ? `${r.label} · ${full(r.raw)}` : r.label,
+                  value: normalised ? share(churn === 0 ? 0 : r.raw / churn) : full(r.raw),
+                  color: r.color,
+                })),
                 ...(rows.length > capped.length
                   ? [{ label: `and ${rows.length - capped.length} more`, value: "" }]
                   : []),
@@ -335,31 +424,42 @@ export function TimelineArea({
 
   return (
     <div>
-      <ResponsiveContainer width="100%" height={height}>
+      <ResponsiveContainer width="100%" height={h}>
         {shape === "bar" ? (
-          <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} barCategoryGap={geom.gap}>
+          <BarChart
+            data={plotted}
+            margin={{ top: 8, right: 8, bottom: 0, left: 0 }}
+            barCategoryGap={geom.gap}
+            stackOffset={stackOffset}
+          >
             {axes}
-            {shown.map((s, i) => (
+            {colored.map((s, i) => (
               <Bar
                 key={s.key}
                 dataKey={s.key}
                 stackId={stacked ? "stack" : undefined}
                 fill={s.color}
+                fillOpacity={dim(s.key)}
                 maxBarSize={BAR_MAX}
-                radius={!stacked || i === shown.length - 1 ? geom.radius : [0, 0, 0, 0]}
+                radius={!stacked || i === colored.length - 1 ? geom.radius : [0, 0, 0, 0]}
               />
             ))}
             {brush}
           </BarChart>
         ) : shape === "line" ? (
-          <LineChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
+          <LineChart
+            data={plotted}
+            margin={{ top: 8, right: 12, bottom: 0, left: 0 }}
+            stackOffset={stackOffset}
+          >
             {axes}
-            {shown.map((s) => (
+            {colored.map((s) => (
               <Line
                 key={s.key}
                 type="monotone"
                 dataKey={s.key}
                 stroke={s.color}
+                strokeOpacity={dim(s.key)}
                 strokeWidth={2}
                 strokeLinecap="round"
                 strokeLinejoin="round"
@@ -370,18 +470,23 @@ export function TimelineArea({
             {brush}
           </LineChart>
         ) : (
-          <AreaChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
+          <AreaChart
+            data={plotted}
+            margin={{ top: 8, right: 12, bottom: 0, left: 0 }}
+            stackOffset={stackOffset}
+          >
             {axes}
-            {shown.map((s) => (
+            {colored.map((s) => (
               <Area
                 key={s.key}
                 type="monotone"
                 dataKey={s.key}
                 stackId={stacked ? "stack" : undefined}
                 stroke={s.color}
+                strokeOpacity={dim(s.key)}
                 strokeWidth={2}
                 fill={s.color}
-                fillOpacity={stacked ? 0.75 : 0.12}
+                fillOpacity={(stacked ? 0.75 : 0.12) * dim(s.key)}
                 dot={false}
                 activeDot={{ r: 4, strokeWidth: 2, stroke: palette.surface }}
               />
@@ -397,6 +502,7 @@ export function TimelineArea({
             items={colored.map((s) => ({ key: s.key, label: s.label, color: s.color }))}
             isActive={isActive}
             onToggle={onToggleKey}
+            filtered={filtered}
             shape={shape === "line" ? "line" : "rect"}
           />
         </div>
@@ -416,11 +522,14 @@ export function ClickableLegend({
   items,
   isActive,
   onToggle,
+  filtered = false,
   shape = "rect",
 }: {
   items: Array<{ key: string; label: string; color: string }>;
   isActive: (key: string) => boolean;
   onToggle?: (key: string) => void;
+  /** Whether anything is selected, which decides what a click will do. */
+  filtered?: boolean;
   shape?: "line" | "rect";
 }) {
   return (
@@ -433,8 +542,18 @@ export function ClickableLegend({
               type="button"
               onClick={() => onToggle?.(it.key)}
               disabled={!onToggle}
-              aria-pressed={active}
-              title={onToggle ? (active ? `Hide ${it.label}` : `Show ${it.label}`) : it.label}
+              // Nothing selected is not the same as everything selected, even
+              // though both draw at full strength.
+              aria-pressed={filtered && active}
+              title={
+                !onToggle
+                  ? it.label
+                  : !filtered
+                    ? `Show only ${it.label}`
+                    : active
+                      ? `Remove ${it.label} from the selection`
+                      : `Add ${it.label} to the selection`
+              }
               className="flex items-center gap-1.5 rounded px-1 py-0.5 text-[11px] text-ink-secondary transition-opacity hover:bg-wash disabled:cursor-default"
               style={{ opacity: active ? 1 : 0.35 }}
             >
@@ -471,6 +590,7 @@ export function Sparkline({
   colorIndex = 0,
   metricLabel,
   yMax,
+  yMin = 0,
 }: {
   data: WeekDatum[];
   height?: number;
@@ -481,18 +601,21 @@ export function Sparkline({
    * self-scales and two very different contributors draw identical-looking charts.
    */
   yMax?: number;
+  /** Shared lower bound, for a metric that goes below zero. Ignored without yMax. */
+  yMin?: number;
 }) {
   const palette = useVizPalette();
+  const h = useHeight(height);
   // Small multiples all carry the same single series, so the all-pairs series cap
   // does not bite here — every card is slot 1.
   const color = palette.series[colorIndex] ?? palette.series[0];
   const tick = weekTickFormatter(data.map((d) => d.week));
   const geom = barGeometry(data.length, [2, 2, 0, 0]);
 
-  if (data.length === 0) return <NoData height={height} compactMessage />;
+  if (data.length === 0) return <NoData height={h} compactMessage />;
 
   return (
-    <ResponsiveContainer width="100%" height={height}>
+    <ResponsiveContainer width="100%" height={h}>
       <BarChart
         data={data}
         margin={{ top: 4, right: 4, bottom: 0, left: 0 }}
@@ -515,7 +638,7 @@ export function Sparkline({
           tick={{ fill: palette.inkMuted, fontSize: 9 }}
           tickCount={3}
           allowDecimals={false}
-          domain={yMax != null ? [0, yMax] : undefined}
+          domain={yMax != null ? [yMin, yMax] : undefined}
           tickFormatter={compact}
         />
         <Tooltip
@@ -556,6 +679,7 @@ export function DivergingWeekly({
   height?: number;
 }) {
   const palette = useVizPalette();
+  const h = useHeight(height);
   // Genuine polarity around zero, so this takes the diverging pair rather than
   // two categorical slots.
   const pos = palette.diverging.positive;
@@ -568,11 +692,11 @@ export function DivergingWeekly({
   const tick = weekTickFormatter(data.map((d) => d.week));
   const geom = barGeometry(data.length, BAR_RADIUS);
 
-  if (data.length === 0) return <NoData height={height} />;
+  if (data.length === 0) return <NoData height={h} />;
 
   return (
     <div>
-      <ResponsiveContainer width="100%" height={height}>
+      <ResponsiveContainer width="100%" height={h}>
         <BarChart data={shaped} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} barCategoryGap={geom.gap} stackOffset="sign">
           <CartesianGrid {...gridProps(palette)} />
           <XAxis
@@ -642,13 +766,14 @@ export function DailyLines({
   valueFormatter?: (n: number) => string;
 }) {
   const palette = useVizPalette();
+  const h = useHeight(height);
   const colored = series.map((s) => ({ ...s, color: palette.series[s.slot] ?? palette.inkMuted }));
 
-  if (data.length === 0) return <NoData height={height} />;
+  if (data.length === 0) return <NoData height={h} />;
 
   return (
     <div>
-      <ResponsiveContainer width="100%" height={height}>
+      <ResponsiveContainer width="100%" height={h}>
         <LineChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
           <CartesianGrid {...gridProps(palette)} />
           <XAxis
@@ -714,13 +839,14 @@ export function DailyArea({
   height?: number;
 }) {
   const palette = useVizPalette();
+  const h = useHeight(height);
   const colored = series.map((s) => ({ ...s, color: palette.series[s.slot] ?? palette.inkMuted }));
 
-  if (data.length === 0) return <NoData height={height} />;
+  if (data.length === 0) return <NoData height={h} />;
 
   return (
     <div>
-      <ResponsiveContainer width="100%" height={height}>
+      <ResponsiveContainer width="100%" height={h}>
         <AreaChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
           <CartesianGrid {...gridProps(palette)} />
           <XAxis
@@ -787,7 +913,7 @@ export function RankedBars({
   // Nominal categories: one hue for every bar. Coloring them by value would spend
   // the identity channel re-encoding what bar length already shows.
   const color = palette.series[0];
-  const h = height ?? Math.max(120, data.length * 26 + 24);
+  const h = useHeight(height ?? Math.max(120, data.length * 26 + 24));
 
   if (data.length === 0) return <NoData height={h} />;
 
@@ -982,13 +1108,14 @@ export function GroupedColumns({
   xKey?: string;
 }) {
   const palette = useVizPalette();
+  const h = useHeight(height);
   const colored = series.map((s) => ({ ...s, color: palette.series[s.slot] ?? palette.inkMuted }));
 
-  if (data.length === 0) return <NoData height={height} />;
+  if (data.length === 0) return <NoData height={h} />;
 
   return (
     <div>
-      <ResponsiveContainer width="100%" height={height}>
+      <ResponsiveContainer width="100%" height={h}>
         {/* barGap 2 is the surface gap that separates touching bars. */}
         <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} barGap={2}>
           <CartesianGrid {...gridProps(palette)} />

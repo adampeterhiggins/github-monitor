@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { FilterBar } from "./FilterBar";
-import { Callout, EmptyState } from "./ui";
+import { Callout, EmptyState, PageFilters } from "./ui";
 import { useApp } from "../lib/state/app";
 import { useScope, type UserFilterSupport } from "../lib/hooks";
 
@@ -37,14 +37,18 @@ export function PageShell({
   const showPartialNote =
     scope.filteredByUser && userFilter === "partial" && partialUserNote != null;
 
+  // One description of the row, mounted here and again by anything that covers the
+  // page with a chart — an expanded one keeps the filters it was scoped by.
+  const filterBar = filters ? <FilterBar extra={filterExtra} userFilter={userFilter} /> : null;
+
   return (
-    <>
+    <PageFilters value={filterBar}>
       <header className="border-b border-hairline bg-plane px-5 pt-4 pb-3">
         <h1 className="text-[20px] font-semibold leading-tight text-ink">{title}</h1>
         {subtitle ? <p className="mt-0.5 text-[12.5px] text-ink-secondary">{subtitle}</p> : null}
       </header>
 
-      {filters ? <FilterBar extra={filterExtra} userFilter={userFilter} /> : null}
+      {filterBar}
 
       <div className="min-h-0 flex-1 overflow-y-auto p-5">
         {blocked ? (
@@ -65,6 +69,6 @@ export function PageShell({
           </div>
         )}
       </div>
-    </>
+    </PageFilters>
   );
 }

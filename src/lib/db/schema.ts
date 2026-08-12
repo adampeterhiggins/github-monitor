@@ -13,7 +13,7 @@
  * series with empty weeks and keeping them would multiply row counts for nothing.
  */
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 export const SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS meta (
@@ -81,6 +81,27 @@ CREATE TABLE IF NOT EXISTS author_repo_probe (
   PRIMARY KEY (login, repo_id)
 );
 CREATE INDEX IF NOT EXISTS idx_probe_login ON author_repo_probe (login);
+
+-- Cheap per-repository commit counts, fetched before any full sync.
+--
+-- Two requests per repository against GitHub's commits endpoint answer the only
+-- question that matters when choosing what to sync — how much history is there,
+-- and is any of it recent — without touching the lazily-computed stats/* caches a
+-- full sync depends on. Kept out of clearAnalytics for the same reason as
+-- author_repo_probe: it is what you reason about before deciding to fetch, so
+-- wiping it would leave you unable to choose what to fetch again.
+--
+-- commits is NULL when the repository could not be read, which is distinct from a
+-- repository that read fine and has none.
+CREATE TABLE IF NOT EXISTS repo_stats (
+  repo_id        INTEGER PRIMARY KEY REFERENCES repos (id) ON DELETE CASCADE,
+  commits        INTEGER,
+  recent_commits INTEGER,
+  -- ISO timestamp recent_commits counts from, so a stale window is recognisable.
+  since          TEXT,
+  readable       INTEGER NOT NULL DEFAULT 1,
+  checked_at     TEXT
+);
 
 -- Named selections of repositories or contributors.
 --

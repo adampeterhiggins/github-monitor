@@ -136,6 +136,26 @@ export function seriesColor(palette: VizPalette, index: number): string | null {
   return index < palette.series.length ? palette.series[index] : null;
 }
 
+/**
+ * Slot colour with the hues reused past the eighth.
+ *
+ * The rule above holds for anything drawn by default, and this does not replace
+ * it: folding the tail into "Other" is still what the charts do unless asked
+ * otherwise. But "show every repository separately" is a legitimate thing to want
+ * from a chart of forty repositories, and there is no ninth hue to give it —
+ * inventing one would break the validated adjacency, and greying the tail would
+ * make forty series indistinguishable rather than merely repeated.
+ *
+ * So the caller can opt into repetition, on the understanding that colour stops
+ * being unique: identity then comes from the legend, which is ordered and
+ * clickable, from the tooltip, which names every band, and from the table view
+ * that every chart ships. Repetition is at least honest about being repetition;
+ * a fabricated hue would not be.
+ */
+export function seriesColorCycled(palette: VizPalette, index: number): string {
+  return palette.series[index % palette.series.length];
+}
+
 export const OTHER_COLOR = { light: "#898781", dark: "#898781" } as const;
 
 /** Max slots a scatter/small-multiple form may carry (all-pairs gate). */

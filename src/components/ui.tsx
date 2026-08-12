@@ -1,6 +1,7 @@
 import clsx from "clsx";
 import {
   createContext,
+  useCallback,
   useContext,
   useEffect,
   useId,
@@ -61,16 +62,24 @@ export function Card({
 export function CardHeader({
   title,
   subtitle,
+  titleAfter,
   actions,
 }: {
   title: ReactNode;
   subtitle?: ReactNode;
+  /** Controls that read as part of the title, on the title's own line. */
+  titleAfter?: ReactNode;
   actions?: ReactNode;
 }) {
   return (
     <header className="mb-3 flex items-start justify-between gap-4">
       <div className="min-w-0">
-        <h2 className="text-[15px] font-semibold leading-tight text-ink">{title}</h2>
+        <div className="flex min-w-0 items-center gap-2">
+          <h2 className="truncate text-[15px] font-semibold leading-tight text-ink">{title}</h2>
+          {titleAfter ? (
+            <div className="flex shrink-0 items-center gap-1">{titleAfter}</div>
+          ) : null}
+        </div>
         {subtitle ? <p className="mt-0.5 text-[12px] text-ink-secondary">{subtitle}</p> : null}
       </div>
       {actions ? <div className="flex shrink-0 items-center gap-1.5">{actions}</div> : null}
@@ -132,29 +141,47 @@ export function Segmented<T extends string>({
   options,
   onChange,
   ariaLabel,
+  disabled,
+  /** Fill the available width, splitting it evenly — for stacked popover rows. */
+  stretch,
+  /** `bare` drops the border, for use inside an already-bordered row. */
+  variant = "outlined",
 }: {
   value: T;
-  options: Array<{ value: T; label: string }>;
+  /** An option can be disabled on its own, for a choice that does not apply. */
+  options: Array<{ value: T; label: string; disabled?: boolean }>;
   onChange: (value: T) => void;
   ariaLabel: string;
+  disabled?: boolean;
+  stretch?: boolean;
+  variant?: "outlined" | "bare";
 }) {
   return (
     <div
       role="tablist"
       aria-label={ariaLabel}
-      className="inline-flex rounded-md border border-hairline-strong p-0.5"
+      className={clsx(
+        "rounded-md p-0.5",
+        stretch ? "flex w-full" : "inline-flex",
+        variant === "outlined" && "border border-hairline-strong",
+        disabled && "opacity-50",
+      )}
     >
       {options.map((opt) => (
         <button
           key={opt.value}
           role="tab"
           aria-selected={value === opt.value}
+          disabled={disabled || opt.disabled}
           onClick={() => onChange(opt.value)}
           className={clsx(
             "rounded px-2 py-1 text-[12px] font-medium transition-colors",
+            "disabled:cursor-not-allowed",
+            stretch && "min-w-0 flex-1 truncate",
+            opt.disabled && "opacity-50",
             value === opt.value
               ? "bg-wash-strong text-ink"
-              : "text-ink-secondary hover:text-ink",
+              : "text-ink-secondary enabled:hover:text-ink",
           )}
         >
           {opt.label}
@@ -164,7 +191,51 @@ export function Segmented<T extends string>({
   );
 }
 
+/** Label chip plus a control, so stacked rows in a popover line up. */
+export function LabeledControl({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="flex h-8 items-stretch overflow-hidden rounded-md border border-hairline-strong">
+      <span className="flex w-[68px] shrink-0 items-center bg-wash px-2 text-[12px] font-medium text-ink-secondary">
+        {label}
+      </span>
+      <div className="flex min-w-0 flex-1 items-center px-0.5">{children}</div>
+    </div>
+  );
+}
+
 /* ── Dropdown (presets as rows, selection marked with a check) ───────────── */
+
+const PANEL =
+  "absolute z-50 mt-1 rounded-lg border border-hairline-strong bg-surface shadow-lg";
+
+/** Closes on a click outside or on Escape. Returns the ref to put on the root. */
+function useDismissable(open: boolean, close: () => void) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) close();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") close();
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, close]);
+
+  return ref;
+}
 
 export function Dropdown({
   label,
@@ -178,25 +249,8 @@ export function Dropdown({
   width?: number;
 }) {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
-
-  const close = () => setOpen(false);
+  const close = useCallback(() => setOpen(false), []);
+  const ref = useDismissable(open, close);
 
   return (
     <div className="relative" ref={ref}>
@@ -218,10 +272,7 @@ export function Dropdown({
       {open ? (
         <div
           style={{ width }}
-          className={clsx(
-            "absolute z-50 mt-1 overflow-hidden rounded-lg border border-hairline-strong bg-surface shadow-lg",
-            align === "right" ? "right-0" : "left-0",
-          )}
+          className={clsx(PANEL, "overflow-hidden", align === "right" ? "right-0" : "left-0")}
         >
           {typeof children === "function" ? children(close) : children}
         </div>
@@ -233,22 +284,254 @@ export function Dropdown({
 export function DropdownRow({
   selected,
   onClick,
+  disabled,
   children,
 }: {
   selected?: boolean;
   onClick?: () => void;
+  disabled?: boolean;
   children: ReactNode;
 }) {
   return (
     <button
       onClick={onClick}
-      className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[12px] text-ink hover:bg-wash"
+      disabled={disabled}
+      className={clsx(
+        "flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[12px] text-ink",
+        disabled ? "cursor-not-allowed opacity-50" : "hover:bg-wash",
+      )}
     >
       <span className="w-4 shrink-0 text-[16px] font-bold leading-none text-ink">
         {selected ? "✓" : ""}
       </span>
       <span className="min-w-0 flex-1 truncate">{children}</span>
     </button>
+  );
+}
+
+/* ── View selector ──────────────────────────────────────────────────────────
+   One control for the primary way of reading a chart: step through views with
+   the arrows, or pick one from the dropdown. Sits beside the chart title so the
+   heading says what is on screen, and keeps the header down to two controls
+   rather than a row of five.                                                 */
+
+export function ViewSelector<T extends string>({
+  value,
+  options,
+  onChange,
+  ariaLabel,
+  /** Noun for the "2 of 4" dropdown header. Left off by default. */
+  countLabel,
+  /** Left/right arrow keys step the view, for charts that own the page. */
+  keyboardNav = false,
+}: {
+  value: T;
+  options: Array<{ value: T; label: string }>;
+  onChange: (value: T) => void;
+  ariaLabel: string;
+  countLabel?: string;
+  keyboardNav?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const close = useCallback(() => setOpen(false), []);
+  const ref = useDismissable(open, close);
+
+  const index = options.findIndex((o) => o.value === value);
+  const hasPrev = index > 0;
+  const hasNext = index >= 0 && index < options.length - 1;
+
+  useEffect(() => {
+    if (!keyboardNav) return;
+    const onKey = (e: KeyboardEvent) => {
+      // Never steal the arrow keys from something being typed in.
+      const target = e.target;
+      if (
+        target instanceof HTMLElement &&
+        (target.closest("input, textarea, select") !== null || target.isContentEditable)
+      ) {
+        return;
+      }
+      if (e.key === "ArrowLeft" && hasPrev) {
+        e.preventDefault();
+        onChange(options[index - 1].value);
+      } else if (e.key === "ArrowRight" && hasNext) {
+        e.preventDefault();
+        onChange(options[index + 1].value);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [keyboardNav, options, index, hasPrev, hasNext, onChange]);
+
+  // Nothing to switch between.
+  if (options.length <= 1) return null;
+
+  return (
+    <div className="flex items-center gap-0.5" ref={ref}>
+      <Arrow
+        dir="left"
+        label={`Previous ${ariaLabel}`}
+        disabled={!hasPrev}
+        onClick={() => onChange(options[index - 1].value)}
+      />
+      <div className="relative">
+        <button
+          onClick={() => setOpen((v) => !v)}
+          aria-expanded={open}
+          aria-haspopup="true"
+          aria-label={ariaLabel}
+          className={clsx(
+            "rounded-md bg-wash px-2.5 py-1 text-[11px] font-medium text-ink hover:bg-wash-strong",
+            "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+          )}
+        >
+          {/* All labels stacked in one cell, so the pill is as wide as the
+              longest of them and does not resize as views change. */}
+          <span className="grid place-items-center">
+            {options.map((o) => (
+              <span
+                key={o.value}
+                aria-hidden={o.value !== value}
+                className={clsx(
+                  "col-start-1 row-start-1 whitespace-nowrap",
+                  o.value !== value && "invisible",
+                )}
+              >
+                {o.label}
+              </span>
+            ))}
+          </span>
+        </button>
+        {open ? (
+          <div className={clsx(PANEL, "left-0 w-auto min-w-[160px] overflow-hidden")}>
+            <div className="px-2.5 pt-1.5 text-[11px] font-medium text-ink-muted">
+              {index + 1} of {options.length}
+              {countLabel ? ` ${countLabel}` : ""}
+            </div>
+            <div className="py-1">
+              {options.map((o) => (
+                <DropdownRow
+                  key={o.value}
+                  selected={o.value === value}
+                  onClick={() => {
+                    onChange(o.value);
+                    close();
+                  }}
+                >
+                  {o.label}
+                </DropdownRow>
+              ))}
+            </div>
+          </div>
+        ) : null}
+      </div>
+      <Arrow
+        dir="right"
+        label={`Next ${ariaLabel}`}
+        disabled={!hasNext}
+        onClick={() => onChange(options[index + 1].value)}
+      />
+    </div>
+  );
+}
+
+function Arrow({
+  dir,
+  label,
+  disabled,
+  onClick,
+}: {
+  dir: "left" | "right";
+  label: string;
+  disabled: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      disabled={disabled}
+      onClick={onClick}
+      className={clsx(
+        "flex h-5 w-5 items-center justify-center rounded text-ink-muted",
+        disabled ? "cursor-not-allowed opacity-30" : "hover:text-ink",
+      )}
+    >
+      <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true">
+        <path
+          d={dir === "left" ? "M7.5 2 4 6l3.5 4" : "M4.5 2 8 6l-3.5 4"}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    </button>
+  );
+}
+
+/* ── Filter popover ─────────────────────────────────────────────────────────
+   The rest of the chart's controls, behind one icon. The dot marks a view that
+   differs from the default, so a filtered chart never looks like a plain one. */
+
+export function FilterPopover({
+  children,
+  active,
+  label = "Chart options",
+  align = "left",
+  width = 300,
+}: {
+  children: ReactNode | ((close: () => void) => ReactNode);
+  /** Shows the marker dot — set when anything is off its default. */
+  active?: boolean;
+  label?: string;
+  align?: "left" | "right";
+  width?: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const close = useCallback(() => setOpen(false), []);
+  const ref = useDismissable(open, close);
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        aria-haspopup="true"
+        aria-label={label}
+        title={label}
+        className={clsx(
+          "relative flex h-7 w-7 items-center justify-center rounded-md hover:bg-wash",
+          "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+          active ? "text-accent" : "text-ink-secondary hover:text-ink",
+        )}
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true">
+          <g fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+            <path d="M3 6h18" />
+            <path d="M7 12h10" />
+            <path d="M10 18h4" />
+          </g>
+        </svg>
+        {active ? (
+          <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-accent" />
+        ) : null}
+      </button>
+      {open ? (
+        <div
+          style={{ width }}
+          className={clsx(
+            PANEL,
+            "flex flex-col gap-2 p-2",
+            align === "right" ? "right-0" : "left-0",
+          )}
+        >
+          {typeof children === "function" ? children(close) : children}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -493,6 +776,216 @@ export function Callout({
   );
 }
 
+/**
+ * Icon-only trigger for a menu of actions.
+ *
+ * Distinct from `Dropdown`, which names its current value on the button — there is
+ * nothing to name here, only things to do, so the trigger is the conventional
+ * kebab and the panel holds `DropdownRow` actions.
+ */
+export function MenuButton({
+  children,
+  label = "More",
+  align = "right",
+  width = 240,
+}: {
+  children: ReactNode | ((close: () => void) => ReactNode);
+  label?: string;
+  align?: "left" | "right";
+  width?: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const close = useCallback(() => setOpen(false), []);
+  const ref = useDismissable(open, close);
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-label={label}
+        title={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        className={clsx(
+          "flex h-7 w-7 shrink-0 items-center justify-center rounded-md",
+          "text-ink-secondary hover:bg-wash hover:text-ink",
+          "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+          open && "bg-wash text-ink",
+        )}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" fill="currentColor">
+          <circle cx="12" cy="5" r="1.8" />
+          <circle cx="12" cy="12" r="1.8" />
+          <circle cx="12" cy="19" r="1.8" />
+        </svg>
+      </button>
+      {open ? (
+        <div
+          style={{ width }}
+          className={clsx(PANEL, "overflow-hidden", align === "right" ? "right-0" : "left-0")}
+        >
+          {typeof children === "function" ? children(close) : children}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/* ── Expanding a chart ──────────────────────────────────────────────────────
+   A card is a good size for scanning and a poor one for reading a dense weekly
+   series, so any chart can be opened over the whole window.
+
+   Charts are authored at the height that suits their card, and the pages placing
+   them have no idea when one is being shown expanded. Rather than thread a height
+   through every call site, a chart rendered inside `ChartHeight` takes its height
+   from there — which is what lets the expanded view fill the window without any
+   page knowing about it.                                                       */
+
+const HeightContext = createContext<number | null>(null);
+
+export function ChartHeight({ value, children }: { value: number; children: ReactNode }) {
+  return <HeightContext.Provider value={value}>{children}</HeightContext.Provider>;
+}
+
+/** Null unless a `ChartHeight` above asked for a specific height. */
+export const useChartHeight = () => useContext(HeightContext);
+
+/**
+ * The page's filter row, offered to whatever might want to repeat it.
+ *
+ * An expanded chart covers the page, filters included, and the scope those
+ * filters set is most of what the chart means — so it carries a copy rather than
+ * making you close the chart to change the period. Passed as an element through
+ * context so no page has to know that expanding exists.
+ */
+const PageFiltersContext = createContext<ReactNode>(null);
+
+export function PageFilters({ value, children }: { value: ReactNode; children: ReactNode }) {
+  return <PageFiltersContext.Provider value={value}>{children}</PageFiltersContext.Provider>;
+}
+
+export function ExpandButton({
+  onClick,
+  label = "Expand",
+}: {
+  onClick: () => void;
+  label?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={label}
+      className={clsx(
+        "flex h-7 w-7 shrink-0 items-center justify-center rounded-md",
+        "text-ink-secondary hover:bg-wash hover:text-ink",
+        "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+      )}
+    >
+      <svg width="14" height="14" viewBox="0 0 24 24" aria-hidden="true">
+        <g fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M15 3h6v6" />
+          <path d="M9 21H3v-6" />
+          <path d="M21 3l-7 7" />
+          <path d="M3 21l7-7" />
+        </g>
+      </svg>
+    </button>
+  );
+}
+
+/**
+ * A chart shown over the whole window.
+ *
+ * `children` is called with the height left for the body, so the chart inside can
+ * take the room rather than staying at its card size. Escape and a click on the
+ * backdrop both close it, since a full-screen view with one way out is a trap.
+ */
+export function Modal({
+  title,
+  subtitle,
+  titleAfter,
+  actions,
+  onClose,
+  children,
+}: {
+  title: ReactNode;
+  subtitle?: ReactNode;
+  titleAfter?: ReactNode;
+  actions?: ReactNode;
+  onClose: () => void;
+  children: (bodyHeight: number) => ReactNode;
+}) {
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const [bodyHeight, setBodyHeight] = useState(0);
+  const filters = useContext(PageFiltersContext);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  // Measured rather than derived from the viewport, so the chart still fits when
+  // the header wraps to two lines or the window is resized under it.
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (!el) return;
+    const measure = () => setBodyHeight(el.clientHeight);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      className="fixed inset-0 z-[100] flex flex-col backdrop-blur-sm"
+      // The plane the cards sit on, held back so the page reads as still there.
+      style={{ background: "color-mix(in srgb, var(--page-plane) 75%, transparent)" }}
+    >
+      {/* Full bleed across the top, where it sits on the page itself. */}
+      {filters}
+
+      {/* The click-to-close target is the margin around the card, so a stray click
+          in the filter row above changes nothing. */}
+      <div
+        className="flex min-h-0 flex-1 flex-col p-4"
+        onMouseDown={(e) => {
+          if (e.target === e.currentTarget) onClose();
+        }}
+      >
+        <Card className="flex min-h-0 flex-1 flex-col shadow-lg">
+          <CardHeader
+            title={title}
+            subtitle={subtitle}
+            titleAfter={titleAfter}
+            actions={
+              <>
+                {actions}
+                <Button variant="ghost" onClick={onClose} title="Close (Esc)">
+                  Close
+                </Button>
+              </>
+            }
+          />
+          {/* Charts carry a legend under them, so the height offered leaves room
+              for one; a legend long enough to need more than that scrolls. */}
+          <div ref={bodyRef} className="min-h-0 flex-1 overflow-auto overscroll-contain">
+            {bodyHeight > 0 ? children(Math.max(200, bodyHeight - 52)) : null}
+          </div>
+        </Card>
+      </div>
+    </div>
+  );
+}
+
 /* ── Chart / table view toggle ──────────────────────────────────────────────
    The light palette has three slots below 3:1 contrast, which the validator
    flags as requiring a relief channel. Every chart therefore ships a table view
@@ -504,6 +997,7 @@ export const useChartView = () => useContext(ViewContext);
 export function ChartCard({
   title,
   subtitle,
+  titleAfter,
   actions,
   children,
   table,
@@ -513,6 +1007,7 @@ export function ChartCard({
 }: {
   title: ReactNode;
   subtitle?: ReactNode;
+  titleAfter?: ReactNode;
   actions?: ReactNode;
   children: ReactNode;
   table?: ReactNode;
@@ -520,34 +1015,67 @@ export function ChartCard({
   loading?: boolean;
 }) {
   const [view, setView] = useState<"chart" | "table">("chart");
+  const [expanded, setExpanded] = useState(false);
+
+  // The same controls in both places, so expanding does not take anything away.
+  const controls = (
+    <>
+      {actions}
+      {table ? (
+        <Segmented
+          ariaLabel="View as"
+          value={view}
+          onChange={setView}
+          options={[
+            { value: "chart", label: "Chart" },
+            { value: "table", label: "Table" },
+          ]}
+        />
+      ) : null}
+    </>
+  );
+
+  const body = view === "chart" || !table ? children : table;
 
   return (
-    <Card className={className}>
-      <CardHeader
-        title={title}
-        subtitle={subtitle}
-        actions={
-          <>
-            {actions}
-            {table ? (
-              <Segmented
-                ariaLabel="View as"
-                value={view}
-                onChange={setView}
-                options={[
-                  { value: "chart", label: "Chart" },
-                  { value: "table", label: "Table" },
-                ]}
-              />
-            ) : null}
-          </>
-        }
-      />
-      <ViewContext.Provider value={view}>
-        <div className={clsx("transition-opacity", loading && "opacity-60")}>
-          {view === "chart" || !table ? children : table}
-        </div>
-      </ViewContext.Provider>
-    </Card>
+    <>
+      <Card className={className}>
+        <CardHeader
+          title={title}
+          subtitle={subtitle}
+          titleAfter={titleAfter}
+          actions={
+            <>
+              {controls}
+              <ExpandButton onClick={() => setExpanded(true)} />
+            </>
+          }
+        />
+        <ViewContext.Provider value={view}>
+          <div className={clsx("transition-opacity", loading && "opacity-60")}>{body}</div>
+        </ViewContext.Provider>
+      </Card>
+
+      {/* Outside the card, so the dimming during a refetch does not apply to it. */}
+      {expanded ? (
+        <Modal
+          title={title}
+          subtitle={subtitle}
+          titleAfter={titleAfter}
+          actions={controls}
+          onClose={() => setExpanded(false)}
+        >
+          {(height) => (
+            <ViewContext.Provider value={view}>
+              {view === "chart" || !table ? (
+                <ChartHeight value={height}>{children}</ChartHeight>
+              ) : (
+                <div className="h-full overflow-auto">{table}</div>
+              )}
+            </ViewContext.Provider>
+          )}
+        </Modal>
+      ) : null}
+    </>
   );
 }

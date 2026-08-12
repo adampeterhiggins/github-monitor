@@ -1,6 +1,6 @@
 import type Database from "@tauri-apps/plugin-sql";
 import { GitHubClient } from "../github/client";
-import { commitCountByAuthor } from "../github/endpoints";
+import { commitCount } from "../github/endpoints";
 import { saveAuthorProbe } from "../db/queries";
 import type { RepoRow } from "../db/queries";
 
@@ -81,11 +81,10 @@ export async function discoverAuthorRepos(options: DiscoverOptions): Promise<Dis
       const repo = repos[index];
       current = repo.full_name;
       try {
-        const count = await commitCountByAuthor(
+        const count = await commitCount(
           client,
           { owner: repo.owner, name: repo.name },
-          login,
-          { signal, since },
+          { author: login, signal, since },
         );
         requestsMade++;
         if (count == null) {

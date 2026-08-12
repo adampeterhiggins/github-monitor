@@ -46,7 +46,11 @@ export function Settings() {
       filters={false}
       requiresData={false}
     >
-      <div className="mx-auto flex max-w-3xl flex-col gap-4">
+      {/* Wide enough for the repository table to lay out rather than scroll inside
+          its card — it carries seven columns, and at 3xl the dates wrapped over
+          three lines. Still capped, so prose lines stay readable on a wide display,
+          but the cap is now above any window this is used on rather than below. */}
+      <div className="mx-auto flex w-full max-w-[1600px] flex-col gap-4">
         <UpdatePanel />
 
         <RepoSelectionPanel />
