@@ -322,6 +322,29 @@ T(
   (await q.contributorWeeklyByRepo(db, "CLAUDE", IDS, 0, W2 + 1)).length === 2,
 );
 
+// One query serves every contributor card's repository split, so it must return
+// the same totals as the per-contributor query it replaced.
+const allRepoWeeks = await q.contributorRepoWeeklyAll(db, IDS, 0, W2 + 1);
+T(
+  "contributorRepoWeeklyAll totals match the whole dataset",
+  sum(allRepoWeeks) === 28,
+  `commits=${sum(allRepoWeeks)}`,
+);
+T(
+  "contributorRepoWeeklyAll agrees with the single-contributor query",
+  sum(allRepoWeeks.filter((r) => r.login.toLowerCase() === "claude")) ===
+    sum(await q.contributorWeeklyByRepo(db, "claude", IDS, 0, W2 + 1)),
+);
+T(
+  "contributorRepoWeeklyAll merges login casings",
+  new Set(allRepoWeeks.map((r) => r.login.toLowerCase())).size === 3 &&
+    allRepoWeeks.filter((r) => r.login.toLowerCase() === "claude").length === 2,
+);
+T(
+  "contributorRepoWeeklyAll honours the contributor filter",
+  sum(await q.contributorRepoWeeklyAll(db, IDS, 0, W2 + 1, ["claude"])) === 17,
+);
+
 /* ── Stacked breakdowns ───────────────────────────────────────────────────── */
 
 // The palette has eight categorical slots assigned in fixed order and never

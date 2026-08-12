@@ -170,9 +170,14 @@ means: a scheduled trigger, a second `nightly.json`, and that Rust command.
 ## Breakdowns
 
 The org-wide chart on Contributors can be split **by contributor** or **by
-repository**, and each contributor's card can be split **by repository** via
-*Split by repo*. Both are stacked columns over the same weekly buckets, and both
-follow the range slider, so zooming rescopes the split too.
+repository** via *Break down*, and **all** contributor cards can be split **by
+repository** at once via the *Total / By repository* control above the grid. Both
+are stacked columns over the same weekly buckets, and both follow the range
+slider, so zooming rescopes the split too.
+
+The card split is one control rather than one per card, and it is served by a
+single query grouped by (contributor, repository, week) — per-card fetching would
+mean a couple of dozen round trips to answer one question.
 
 The palette has eight categorical slots, assigned in fixed order and never
 cycled — a ninth colour would either repeat one already in use or be invented, and

@@ -4,7 +4,7 @@ import { useScope, useScopedQuery } from "../lib/hooks";
 import {
   contributorRepoBreakdown,
   contributorWeeklyByLogin,
-  contributorWeeklyByRepo,
+  contributorRepoWeeklyAll,
   contributorWeeklyTotals,
   listContributorMeta,
   weeklyByRepo,
@@ -22,6 +22,7 @@ import {
   Dropdown,
   DropdownRow,
   EmptyState,
+  Segmented,
   compact,
   full,
 } from "../components/ui";
@@ -51,6 +52,15 @@ export function Contributors() {
   /** How the org-wide chart is split. */
   const [breakdown, setBreakdown] = useState<"none" | "contributor" | "repository">("none");
 
+  /** How every contributor card is split. One control for all of them. */
+  const [cardSplit, setCardSplit] = useState<"none" | "repository">(
+    () => (localStorage.getItem("github-monitor.cardSplit") as "none" | "repository") || "none",
+  );
+  const setSplit = (mode: "none" | "repository") => {
+    localStorage.setItem("github-monitor.cardSplit", mode);
+    setCardSplit(mode);
+  };
+
   const totals = useScopedQuery("contrib-totals", scope, (db) =>
     contributorWeeklyTotals(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek, scope.logins),
   );
@@ -68,6 +78,21 @@ export function Contributors() {
   const meta = useScopedQuery("contrib-meta", scope, (db) => listContributorMeta(db), {
     staleTime: 10 * 60_000,
   });
+
+  // One query for every card's repository split, fetched only when it is on.
+  const cardRepoWeekly = useScopedQuery(
+    "contrib-card-repo-weekly",
+    scope,
+    (db) =>
+      contributorRepoWeeklyAll(
+        db,
+        scope.repoIds,
+        scope.range.fromWeek,
+        scope.range.toWeek,
+        scope.logins,
+      ),
+    { enabled: scope.ready && cardSplit === "repository" },
+  );
 
   // Only fetched when the repository breakdown is on — it is a bigger result than
   // the plain totals and most views never need it.
@@ -217,6 +242,36 @@ export function Contributors() {
     }
     return null;
   }, [breakdown, perLogin.data, byRepoWeekly.data, visibleWeeks, metric]);
+
+  /**
+   * login -> stacked-by-repository series, built once for every card rather than
+   * per card. Keyed lowercase to match the merged identities.
+   */
+  const cardStacks = useMemo(() => {
+    if (cardSplit !== "repository") return null;
+    const rowsByLogin = new Map<string, typeof cardRepoWeekly.data>();
+    for (const row of cardRepoWeekly.data ?? []) {
+      const key = row.login.toLowerCase();
+      const list = rowsByLogin.get(key);
+      if (list) list.push(row);
+      else rowsByLogin.set(key, [row]);
+    }
+    const out = new Map<string, ReturnType<typeof buildStacks>>();
+    for (const [login, rows] of rowsByLogin) {
+      out.set(
+        login,
+        buildStacks({
+          rows: rows ?? [],
+          weeks: visibleWeeks,
+          weekOf: (r) => r.week,
+          keyOf: (r) => String(r.repo_id),
+          labelOf: (r) => r.full_name.split("/").pop() ?? r.full_name,
+          valueOf: (r) => Number(r[metric] ?? 0),
+        }),
+      );
+    }
+    return out;
+  }, [cardSplit, cardRepoWeekly.data, visibleWeeks, metric]);
 
   /** One shared scale across the cards — self-scaled small multiples mislead. */
   const cardYMax = useMemo(
@@ -380,12 +435,25 @@ export function Contributors() {
           />
         ) : (
           <>
-            {zoomed ? (
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <p className="text-[12px] text-ink-secondary">
-                Cards below cover the selected window ({full(visibleWeeks.length)} week
-                {visibleWeeks.length === 1 ? "" : "s"}), so totals and ranking change with it.
+                {zoomed
+                  ? `Cards cover the selected window (${full(visibleWeeks.length)} week${
+                      visibleWeeks.length === 1 ? "" : "s"
+                    }), so totals and ranking change with it.`
+                  : "Cards cover the whole period."}
+                {cardSplit === "repository" && cardRepoWeekly.isFetching ? " Loading splits…" : ""}
               </p>
-            ) : null}
+              <Segmented
+                ariaLabel="Split contributor charts"
+                value={cardSplit}
+                onChange={setSplit}
+                options={[
+                  { value: "none", label: "Total" },
+                  { value: "repository", label: "By repository" },
+                ]}
+              />
+            </div>
 
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
               {cards.slice(0, limit).map((c, i) => (
@@ -396,7 +464,7 @@ export function Contributors() {
                   metric={metric}
                   yMax={cardYMax}
                   repoCount={repos.length}
-                  weeks={visibleWeeks}
+                  repoStack={cardStacks?.get(c.login.toLowerCase()) ?? null}
                 />
               ))}
             </div>
@@ -464,38 +532,18 @@ function ContributorCardView({
   metric,
   yMax,
   repoCount,
-  weeks,
+  repoStack,
 }: {
   card: ContributorCard;
   rank: number;
   metric: ContributionMetric;
   yMax: number;
   repoCount: number;
-  /** The window the card covers, so its stack lines up with the sparkline. */
-  weeks: number[];
+  /** Prepared by the page so one query serves every card, not one query each. */
+  repoStack: ReturnType<typeof buildStacks> | null;
 }) {
   const scope = useScope();
   const [expanded, setExpanded] = useState(false);
-
-  const repoWeekly = useScopedQuery(
-    `contrib-repo-weekly-${card.login}`,
-    scope,
-    (db) =>
-      contributorWeeklyByRepo(db, card.login, scope.repoIds, scope.range.fromWeek, scope.range.toWeek),
-    { enabled: scope.ready && expanded },
-  );
-
-  const repoStack = useMemo(() => {
-    if (!expanded || !repoWeekly.data) return null;
-    return buildStacks({
-      rows: repoWeekly.data,
-      weeks,
-      weekOf: (r) => r.week,
-      keyOf: (r) => String(r.repo_id),
-      labelOf: (r) => r.full_name.split("/").pop() ?? r.full_name,
-      valueOf: (r) => Number(r[metric] ?? 0),
-    });
-  }, [expanded, repoWeekly.data, weeks, metric]);
 
   const breakdown = useScopedQuery(
     `contrib-repos-${card.login}`,
@@ -548,7 +596,7 @@ function ContributorCardView({
           className="shrink-0 rounded px-1.5 py-0.5 text-[11px] text-ink-secondary hover:bg-wash hover:text-ink"
           aria-expanded={expanded}
         >
-          {expanded ? "Hide repos" : "Split by repo"}
+          {expanded ? "Hide numbers" : "Numbers"}
         </button>
       </div>
 

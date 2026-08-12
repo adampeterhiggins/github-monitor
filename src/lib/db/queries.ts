@@ -309,6 +309,46 @@ export async function weeklyByRepo(
   );
 }
 
+export interface LoginRepoWeekRow extends RepoWeekRow {
+  login: string;
+}
+
+/**
+ * Weekly totals per contributor **and** repository, in one query.
+ *
+ * Backs the repository split across every contributor card at once. Doing it per
+ * card would mean one query per visible contributor — two dozen round trips to
+ * answer a single question — and the underlying table is already keyed by
+ * (repo, login, week), so this is close to reading it directly.
+ *
+ * Login casings are merged here for the same reason as elsewhere: two casings of
+ * one account would otherwise split into two sets of cards.
+ */
+export async function contributorRepoWeeklyAll(
+  db: Database,
+  repoIds: readonly number[],
+  fromWeek: number,
+  toWeek: number,
+  logins: Logins = null,
+): Promise<LoginRepoWeekRow[]> {
+  const p = new Params();
+  const from = p.add(fromWeek);
+  const to = p.add(toWeek);
+  const ids = p.in(repoIds);
+  const loginClause = p.loginFilter("cw.login", logins);
+  return db.select<LoginRepoWeekRow[]>(
+    `SELECT MIN(cw.login) AS login, cw.repo_id, r.full_name, cw.week,
+            SUM(cw.commits)   AS commits,
+            SUM(cw.additions) AS additions,
+            SUM(cw.deletions) AS deletions
+     FROM contributor_weeks cw
+     JOIN repos r ON r.id = cw.repo_id
+     WHERE cw.week >= ${from} AND cw.week <= ${to} AND cw.repo_id IN ${ids}${loginClause}
+     GROUP BY LOWER(cw.login), cw.repo_id, r.full_name, cw.week`,
+    p.values,
+  );
+}
+
 /**
  * Weekly totals per repository for one contributor — the repository breakdown of
  * an individual's card.
