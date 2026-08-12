@@ -65,11 +65,9 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
     const q = query.trim().toLowerCase();
     const rows = all
       .filter((c) => (q ? c.login.toLowerCase().includes(q) : true))
-      // A selected contributor is never hidden — otherwise the page would be
-      // scoped by someone invisible in the control that scopes it.
-      .filter(
-        (c) => !hideInactive || Number(c.commits) > 0 || selectedSet.has(c.login.toLowerCase()),
-      );
+      // Hides on activity alone; see the note in RepoFilter. Exempting selected
+      // contributors made the control a no-op whenever most people were selected.
+      .filter((c) => !hideInactive || Number(c.commits) > 0);
 
     return [...rows].sort((a, b) => {
       if (sort === "name") return a.login.localeCompare(b.login);
@@ -82,14 +80,15 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
     });
   }, [all, query, hideInactive, selectedSet, sort]);
 
-  const hiddenCount = useMemo(
-    () =>
-      hideInactive
-        ? all.filter(
-            (c) => Number(c.commits) === 0 && !selectedSet.has(c.login.toLowerCase()),
-          ).length
-        : 0,
-    [all, hideInactive, selectedSet],
+  const hidden = useMemo(
+    () => (hideInactive ? all.filter((c) => Number(c.commits) === 0) : []),
+    [all, hideInactive],
+  );
+
+  /** Hidden but still selected, so still scoping every page. */
+  const hiddenSelected = useMemo(
+    () => hidden.filter((c) => selectedSet.has(c.login.toLowerCase())),
+    [hidden, selectedSet],
   );
 
   if (support === "none") {
@@ -183,12 +182,31 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
               onChange={applyHide}
               label={
                 <span className="text-ink-secondary">
-                  Hide inactive{hiddenCount > 0 ? ` (${full(hiddenCount)})` : ""}
+                  Hide inactive{hidden.length > 0 ? ` (${full(hidden.length)})` : ""}
                 </span>
               }
             />
           </div>
         </div>
+
+        {hiddenSelected.length > 0 ? (
+          <div className="flex items-center justify-between gap-2 border-b border-hairline bg-wash px-2 py-1.5">
+            <span className="text-[11px] text-ink-secondary">
+              {full(hiddenSelected.length)} selected {hiddenSelected.length === 1 ? "contributor is" : "contributors are"}{" "}
+              hidden here but still included.
+            </span>
+            <Button
+              variant="ghost"
+              title="Narrow the selection to contributors with commits in this period"
+              onClick={() => {
+                const drop = new Set(hiddenSelected.map((c) => c.login.toLowerCase()));
+                apply(selected.filter((l) => !drop.has(l.toLowerCase())));
+              }}
+            >
+              Deselect them
+            </Button>
+          </div>
+        ) : null}
 
         <SavedSelections
           kind="contributors"

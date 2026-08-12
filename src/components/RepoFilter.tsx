@@ -77,9 +77,12 @@ export function RepoFilter() {
     const rows = repos
       .filter((r) => (showArchived ? true : r.archived === 0))
       .filter((r) => (q ? r.name.toLowerCase().includes(q) : true))
-      // A selected repository is never hidden, or it would be silently scoping the
-      // page with no way to see or undo it from here.
-      .filter((r) => !hideInactive || (commitsById.get(r.id) ?? 0) > 0 || selectedSet.has(r.id));
+      // Hides on activity alone. Exempting selected repositories was the first
+      // attempt, on the grounds that a hidden one still scopes the page — but with
+      // everything selected by default that exempted almost everything, and the
+      // control appeared broken. The count below reports selected-but-hidden
+      // instead, which addresses the same concern without gutting the feature.
+      .filter((r) => !hideInactive || (commitsById.get(r.id) ?? 0) > 0);
 
     return rows.sort((a, b) => {
       if (sort === "name") return a.name.localeCompare(b.name);
@@ -89,15 +92,19 @@ export function RepoFilter() {
     });
   }, [repos, query, showArchived, hideInactive, commitsById, selectedSet, sort]);
 
-  const hiddenCount = useMemo(() => {
-    if (!hideInactive) return 0;
+  /** Everything the activity rule is currently withholding. */
+  const hidden = useMemo(() => {
+    if (!hideInactive) return [] as RepoRow[];
     return repos.filter(
-      (r) =>
-        (showArchived ? true : r.archived === 0) &&
-        (commitsById.get(r.id) ?? 0) === 0 &&
-        !selectedSet.has(r.id),
-    ).length;
-  }, [repos, showArchived, hideInactive, commitsById, selectedSet]);
+      (r) => (showArchived ? true : r.archived === 0) && (commitsById.get(r.id) ?? 0) === 0,
+    );
+  }, [repos, showArchived, hideInactive, commitsById]);
+
+  /** Hidden but still selected, so still scoping every page. */
+  const hiddenSelected = useMemo(
+    () => hidden.filter((r) => selectedSet.has(r.id)),
+    [hidden, selectedSet],
+  );
 
   const label = (() => {
     if (repos.length === 0) return "Repositories";
@@ -189,12 +196,31 @@ export function RepoFilter() {
               onChange={applyHide}
               label={
                 <span className="text-ink-secondary">
-                  Hide inactive{hiddenCount > 0 ? ` (${full(hiddenCount)})` : ""}
+                  Hide inactive{hidden.length > 0 ? ` (${full(hidden.length)})` : ""}
                 </span>
               }
             />
           </div>
         </div>
+
+        {hiddenSelected.length > 0 ? (
+          <div className="flex items-center justify-between gap-2 border-b border-hairline bg-wash px-2 py-1.5">
+            <span className="text-[11px] text-ink-secondary">
+              {full(hiddenSelected.length)} selected {hiddenSelected.length === 1 ? "repository is" : "repositories are"}{" "}
+              hidden here but still included.
+            </span>
+            <Button
+              variant="ghost"
+              title="Narrow the selection to repositories with commits in this period"
+              onClick={() => {
+                const drop = new Set(hiddenSelected.map((r) => r.id));
+                apply(selected.filter((id) => !drop.has(id)));
+              }}
+            >
+              Deselect them
+            </Button>
+          </div>
+        ) : null}
 
         <SavedSelections
           kind="repos"
