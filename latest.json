@@ -1,15 +1,15 @@
 {
-  "version": "0.1.2",
-  "notes": "**Full Changelog**: https://github.com/adampeterhiggins/github-monitor/compare/v0.1.1...v0.1.2",
-  "pub_date": "2026-08-12T07:05:46Z",
+  "version": "0.1.3",
+  "notes": "## What's Changed\n* Add VS Code theme import by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/1\n\n## New Contributors\n* @adampeterhiggins made their first contribution in https://github.com/adampeterhiggins/github-monitor/pull/1\n\n**Full Changelog**: https://github.com/adampeterhiggins/github-monitor/compare/v0.1.2...v0.1.3",
+  "pub_date": "2026-08-13T15:21:31Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUJXQ1h5NjkvTS81blZld1Y0bW5Md1BFaUloUzhoQklMS1RuYkluVWNxZXhoWmpCMmttTEpHQzZVZm5RRDlzNzI3YmlTVU0ybkt5U0FwMHhJZWhWYmdVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NTE4MjgwCWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negpYMElvZTRtc2o1MTBMblJWbWRpZk1oaElENEE5NGxuNWRrbyt2N0ZlZVZHeUtkVHUxd0c2UkdOREQxQXdpNGd5MzVldE5tVWYyWEdVS08yQThMeFBEUT09Cg==",
-      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/511214894"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUEzcFdhRU9uV1dDTGRBZHFKdDZ5STdwdUp2S29jekg2a1ZRSGdmS1NHNTE3L1NWRmZEb0ZlbVdPSC84Y1NVVmk0cWVKM2xJTm1waG13SG9ZcUtDZHdBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NjM0NDM5CWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negpiSUlzTkp1NTNpYUVXNE55bTdaM25BaVdxdGQxV3NOU0UvOC9CMG1QajhYT2Ezdkpac0JZWk5NS0JGdUVYWDJ0SUF4aFdXZkpReVpmUlJzZUEvYm9CUT09Cg==",
+      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/513144105"
     },
     "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUJXQ1h5NjkvTS81blZld1Y0bW5Md1BFaUloUzhoQklMS1RuYkluVWNxZXhoWmpCMmttTEpHQzZVZm5RRDlzNzI3YmlTVU0ybkt5U0FwMHhJZWhWYmdVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NTE4MjgwCWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negpYMElvZTRtc2o1MTBMblJWbWRpZk1oaElENEE5NGxuNWRrbyt2N0ZlZVZHeUtkVHUxd0c2UkdOREQxQXdpNGd5MzVldE5tVWYyWEdVS08yQThMeFBEUT09Cg==",
-      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/511214894"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUEzcFdhRU9uV1dDTGRBZHFKdDZ5STdwdUp2S29jekg2a1ZRSGdmS1NHNTE3L1NWRmZEb0ZlbVdPSC84Y1NVVmk0cWVKM2xJTm1waG13SG9ZcUtDZHdBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NjM0NDM5CWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negpiSUlzTkp1NTNpYUVXNE55bTdaM25BaVdxdGQxV3NOU0UvOC9CMG1QajhYT2Ezdkpac0JZWk5NS0JGdUVYWDJ0SUF4aFdXZkpReVpmUlJzZUEvYm9CUT09Cg==",
+      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/513144105"
     }
   }
 }
