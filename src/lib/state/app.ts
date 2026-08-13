@@ -19,6 +19,7 @@ import {
   getThemeDefinition,
   subscribeToCustomThemes,
 } from "../theme/palette";
+import { readBotPatterns, writeBotPatterns } from "../bots";
 
 export type ThemeMode = "system" | "light" | "dark";
 
@@ -50,6 +51,8 @@ interface AppState {
   customFrom: number | null;
   customTo: number | null;
   metric: ContributionMetric;
+  /** User-added patterns for logins to treat as bots, on top of the built-ins. */
+  botPatterns: string[];
 
   theme: ThemeMode;
   /** Named palette. `default` is this app's built-in light/dark tokens. */
@@ -73,6 +76,7 @@ interface AppState {
   clearLogins: () => void;
   setPeriod: (period: PeriodId, custom?: { from: number; to: number }) => void;
   setMetric: (metric: ContributionMetric) => void;
+  setBotPatterns: (patterns: string[]) => void;
   setTheme: (theme: ThemeMode) => void;
   setThemeId: (themeId: string) => void;
   setSync: (progress: SyncProgress | null) => void;
@@ -182,6 +186,7 @@ export const useApp = create<AppState>((set, get) => ({
   customFrom: readStoredCustomRange()?.from ?? null,
   customTo: readStoredCustomRange()?.to ?? null,
   metric: "commits",
+  botPatterns: readBotPatterns(),
 
   theme: readStoredTheme(),
   themeId: readStoredThemeId(),
@@ -284,6 +289,12 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   setMetric: (metric) => set({ metric }),
+
+  setBotPatterns: (patterns) => {
+    const cleaned = [...new Set(patterns.map((p) => p.trim()).filter(Boolean))];
+    writeBotPatterns(cleaned);
+    set({ botPatterns: cleaned });
+  },
 
   setTheme: (theme) => {
     localStorage.setItem(THEME_KEY, theme);

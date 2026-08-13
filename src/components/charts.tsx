@@ -260,6 +260,7 @@ export function TimelineArea({
   height = 260,
   shape = "area",
   stackMode = "stacked",
+  values = "total",
   valueLabel,
   labelOf,
   activeKeys,
@@ -273,13 +274,18 @@ export function TimelineArea({
   series: StackSeriesSpec[];
   height?: number;
   shape?: TimelineShape;
+  stackMode?: "stacked" | "overlaid";
   /**
-   * `normalised` is `stacked` with the total at each point read as 100%: the axis
-   * becomes a share, which answers "who made up this week" rather than "how much
-   * was there". It stacks like the others — plotting raw values against a 0–1 axis
-   * would draw everything clipped along the top.
+   * What the y axis measures. `share` reads the total at each point as 100% and
+   * plots each series' part of it, which answers "who made up this week" rather
+   * than "how much was there".
+   *
+   * Independent of stacking, because the two answer different questions. Stacked
+   * shares fill the band and show composition; overlaid shares put each series on
+   * the same 0–100% axis, which is how you see whose share is largest at a given
+   * point without adding bands up by eye.
    */
-  stackMode?: "stacked" | "overlaid" | "normalised";
+  values?: "total" | "share";
   valueLabel: string;
   /** Formats the x value for the tooltip heading. */
   labelOf: (week: number) => string;
@@ -300,13 +306,14 @@ export function TimelineArea({
   const h = useHeight(height);
   const tick = weekTickFormatter(data.map((d) => d.week));
   const geom = barGeometry(data.length, BAR_RADIUS);
-  const stacked = stackMode !== "overlaid";
-  const normalised = stackMode === "normalised";
+  const stacked = stackMode === "stacked";
+  const normalised = values === "share";
   /* Shares are computed rather than left to `stackOffset="expand"` (see toShares),
-     so the stack only needs to know which way each one points: "sign" grows the
-     positives up from zero and the negatives down. Lines do not stack at all —
-     each is its own share, which reads better than stacked boundaries would. */
-  const stackOffset = normalised && shape !== "line" ? "sign" : undefined;
+     so a stack only needs to know which way each one points: "sign" grows the
+     positives up from zero and the negatives down. Overlaid shares are not stacked
+     at all, and lines never stack — recharts dropped that, and each line being its
+     own share reads better than stacked boundaries anyway. */
+  const stackOffset = normalised && stacked && shape !== "line" ? "sign" : undefined;
 
   const colored = series.map((s) => ({
     ...s,
@@ -325,7 +332,10 @@ export function TimelineArea({
    * everything is at full strength, which keeps "nothing selected" and "all
    * selected" from being two states that look different.
    */
-  const filtered = activeKeys != null && activeKeys.size > 0;
+  /* A selection that nothing on screen matches is no selection at all. Without
+     this the chart dims every band and the legend offers nothing to click, because
+     the series that would clear the filter is not there to be clicked. */
+  const filtered = activeKeys != null && colored.some((s) => activeKeys.has(s.key));
   const isActive = (key: string) => !filtered || activeKeys!.has(key);
   const dim = (key: string) => (isActive(key) ? 1 : 0.18);
 

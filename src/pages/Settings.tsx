@@ -10,6 +10,7 @@ import { Button, Callout, Card, CardHeader, DataTable, Spinner, full } from "../
 import { SyncPanel } from "../components/SyncPanel";
 import { RepoSelectionPanel } from "../components/RepoSelectionPanel";
 import { SavedSelectionsPanel } from "../components/SavedSelectionsPanel";
+import { BotPatternsPanel } from "../components/BotPatternsPanel";
 import { UpdatePanel } from "../components/UpdatePanel";
 import { ThemeSettings } from "../components/ThemeSettings";
 import { PageShell } from "../components/PageShell";
@@ -57,6 +58,8 @@ export function Settings() {
         <RepoSelectionPanel />
 
         <SavedSelectionsPanel />
+
+        <BotPatternsPanel />
 
         <SyncPanel />
 

@@ -81,12 +81,22 @@ const BREAKDOWNS: Array<{ value: Breakdown; label: string }> = [
   { value: "repository", label: "Repository" },
 ];
 
-type StackMode = "stacked" | "overlaid" | "normalised";
+type StackMode = "stacked" | "overlaid";
+type ValueMode = "total" | "share";
 
 const STACKINGS: Array<{ value: StackMode; label: string }> = [
   { value: "stacked", label: "Stacked" },
   { value: "overlaid", label: "Overlaid" },
-  { value: "normalised", label: "Share" },
+];
+
+/**
+ * What the axis measures, which is a separate question from how the series share
+ * the plot: stacked shares show composition, overlaid shares show whose share is
+ * largest at a given point without adding bands up by eye.
+ */
+const VALUE_MODES: Array<{ value: ValueMode; label: string }> = [
+  { value: "total", label: "Totals" },
+  { value: "share", label: "Share" },
 ];
 
 const SCALES: Array<{ value: "shared" | "own"; label: string }> = [
@@ -190,13 +200,27 @@ export function Contributors() {
     () => (localStorage.getItem("github-monitor.shape") as TimelineShape) || "bar",
   );
   /**
-   * How several series share the plot. Read from the older boolean when that is
-   * all there is, so an existing preference survives the third option arriving.
+   * How several series share the plot, and what the axis measures.
+   *
+   * Both read through the settings they replaced, so an existing preference
+   * survives: "normalised" used to be a third stacking option, and before that
+   * stacking was a boolean.
    */
   const [stackMode, setStackMode] = useState<StackMode>(() => {
-    const stored = localStorage.getItem("github-monitor.stackMode") as StackMode | null;
-    if (stored) return stored;
+    const stored = localStorage.getItem("github-monitor.stackMode");
+    if (stored === "overlaid") return "overlaid";
+    if (stored === "stacked" || stored === "normalised") return "stacked";
     return localStorage.getItem("github-monitor.stacked") === "false" ? "overlaid" : "stacked";
+  });
+  const [valueMode, setValueMode] = useState<ValueMode>(() => {
+    const stored = localStorage.getItem("github-monitor.valueMode") as ValueMode | null;
+    if (stored) return stored;
+    // The old three-way control called stacked shares "normalised". Written through
+    // straight away: changing the stacking overwrites the key this reads, so a
+    // migration left until later would lose the preference it was migrating.
+    const migrated = localStorage.getItem("github-monitor.stackMode") === "normalised";
+    localStorage.setItem("github-monitor.valueMode", migrated ? "share" : "total");
+    return migrated ? "share" : "total";
   });
   const [view, setView] = useState<TimelineView>(() =>
     localStorage.getItem("github-monitor.cumulative") === "true"
@@ -520,9 +544,31 @@ export function Contributors() {
     [orgChart.data, axisWeeks],
   );
 
-  // A breakdown change invalidates which series exist, so a stale legend filter
-  // would silently hide everything.
-  useEffect(() => setActiveKeys(new Set()), [breakdown, metric, maxSeries]);
+  /**
+   * Keep the legend selection to series that still exist.
+   *
+   * A selection is a set of keys, and every control on the page can change which
+   * keys there are — a different breakdown, a lower limit folding the tail into
+   * "Other", a narrower repository or period selection dropping someone from the
+   * data entirely. A key left behind is unreachable: it is not in the legend, so
+   * there is nothing to click to remove it, and until it goes the chart counts
+   * itself filtered and dims everything that is still there.
+   *
+   * Pruning is enough on its own — no separate reset. Emptying the set is exactly
+   * what "the thing you had selected is gone" should mean, and a metric change,
+   * which leaves the keys alone, now keeps your selection rather than dropping it.
+   */
+  const seriesKeys = useMemo(() => orgChart.series.map((sr) => sr.key), [orgChart.series]);
+
+  useEffect(() => {
+    setActiveKeys((prev) => {
+      if (prev.size === 0) return prev;
+      const present = new Set(seriesKeys);
+      const next = new Set([...prev].filter((k) => present.has(k)));
+      // Same identity when nothing was stale, or this would re-render forever.
+      return next.size === prev.size ? prev : next;
+    });
+  }, [seriesKeys]);
 
   /**
    * Legend selection: the first click isolates, later clicks build a set.
@@ -670,6 +716,15 @@ export function Contributors() {
           onChange={(v) => persist("github-monitor.stackMode", v, setStackMode)}
           options={STACKINGS}
         />
+        <Segmented<ValueMode>
+          ariaLabel="Values"
+          stretch
+          // A share of one series is always 100%, so this needs something to split.
+          disabled={cardSplit === "none"}
+          value={valueMode}
+          onChange={(v) => persist("github-monitor.valueMode", v, setValueMode)}
+          options={VALUE_MODES}
+        />
         <LabeledControl label="Scale">
           <Segmented
             ariaLabel="Card y-axis scale"
@@ -791,6 +846,15 @@ export function Contributors() {
                   onChange={(v) => persist("github-monitor.stackMode", v, setStackMode)}
                   options={STACKINGS}
                 />
+                <Segmented<ValueMode>
+                  ariaLabel="Values"
+                  stretch
+                  // A share of one series is always 100%, so this needs a breakdown.
+                  disabled={breakdown === "none"}
+                  value={valueMode}
+                  onChange={(v) => persist("github-monitor.valueMode", v, setValueMode)}
+                  options={VALUE_MODES}
+                />
               </FilterPopover>
             </>
           }
@@ -845,6 +909,7 @@ export function Contributors() {
             series={orgChart.series}
             shape={shape}
             stackMode={stackMode}
+            values={valueMode}
             height={260}
             valueLabel={valueLabel}
             labelOf={(week) => bucketLabel(week, granularity)}
@@ -910,7 +975,7 @@ export function Contributors() {
                   yMax={sharedScale ? cardCharts.ceiling : undefined}
                   yMin={sharedScale ? cardCharts.floor : undefined}
                   repoCount={repos.length}
-                  view={{ shape, stackMode, granularity }}
+                  view={{ shape, stackMode, valueMode, granularity }}
                   controls={cardControls}
                   showNumbers={showNumbers}
                   span={spanByLogin.get(c.login.toLowerCase()) ?? null}
@@ -1026,6 +1091,7 @@ function ContributorCardView({
   view: {
     shape: TimelineShape;
     stackMode: StackMode;
+    valueMode: ValueMode;
     granularity: Granularity;
   };
   /** Shown when the card is opened full screen, where the page's own are hidden. */
@@ -1109,6 +1175,7 @@ function ContributorCardView({
         series={chart.series}
         shape={view.shape}
         stackMode={view.stackMode}
+        values={view.valueMode}
         height={96}
         valueLabel={metric}
         labelOf={(week) => bucketLabel(week, view.granularity)}
