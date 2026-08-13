@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useApp } from "../lib/state/app";
 import { useScope, useScopedQuery, type UserFilterSupport } from "../lib/hooks";
 import { listContributors } from "../lib/db/queries";
+import { isBot } from "../lib/bots";
 import { Button, Checkbox, Dropdown, DropdownRow, compact, full } from "./ui";
 import { SavedSelections } from "./SavedSelections";
 
@@ -60,6 +61,23 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
 
   const all = contributors.data ?? [];
   const selectedSet = useMemo(() => new Set(selected.map((l) => l.toLowerCase())), [selected]);
+
+  const botPatterns = useApp((s) => s.botPatterns);
+  const bots = useMemo(
+    () => all.filter((c) => isBot(c.login, botPatterns)),
+    [all, botPatterns],
+  );
+  const botSet = useMemo(() => new Set(bots.map((c) => c.login.toLowerCase())), [bots]);
+
+  /**
+   * Bots currently in scope, which is not the same as bots in the selection: an
+   * empty selection means everyone, so the detected bots are in scope precisely
+   * when nothing is selected too.
+   */
+  const botsInScope = useMemo(
+    () => (selected.length === 0 ? bots : bots.filter((c) => selectedSet.has(c.login.toLowerCase()))),
+    [bots, selected.length, selectedSet],
+  );
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -151,6 +169,24 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
               onClick={() => apply(visible.slice(0, 10).map((c) => c.login))}
             >
               Top 10
+            </Button>
+            <Button
+              variant="ghost"
+              disabled={botsInScope.length === 0}
+              title={
+                botsInScope.length === 0
+                  ? "No bots or agents detected among these contributors"
+                  : `Exclude ${botsInScope.map((c) => c.login).join(", ")}. Add your own patterns in Settings & sync.`
+              }
+              onClick={() => {
+                /* From "everyone", excluding bots means naming the people instead:
+                   an empty selection means unfiltered, so there is no state that
+                   says "all but these". */
+                const base = selected.length === 0 ? all.map((c) => c.login) : selected;
+                apply(base.filter((l) => !botSet.has(l.toLowerCase())));
+              }}
+            >
+              Deselect bots{botsInScope.length > 0 ? ` (${full(botsInScope.length)})` : ""}
             </Button>
           </div>
 
@@ -246,6 +282,14 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
                           <span className="truncate">{c.login}</span>
                           {myLogin && c.login.toLowerCase() === myLogin.toLowerCase() ? (
                             <span className="shrink-0 text-[9px] uppercase text-ink-muted">you</span>
+                          ) : null}
+                          {botSet.has(c.login.toLowerCase()) ? (
+                            <span
+                              className="shrink-0 rounded border border-hairline-strong px-1 text-[9px] uppercase text-ink-muted"
+                              title="Detected as a bot or agent by name. Patterns live in Settings & sync."
+                            >
+                              bot
+                            </span>
                           ) : null}
                         </span>
                       }

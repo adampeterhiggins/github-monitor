@@ -799,6 +799,67 @@ T(
   T("an empty chart yields no window", weekWindow([], weeks, 0, 0) === null);
 }
 
+/* ── Bot detection ─────────────────────────────────────────────────────────── */
+
+// A false positive here removes a colleague from every chart on every page, so the
+// built-ins are pinned against names that only look like automation.
+{
+  const bots = await bundle("src/lib/bots.ts", "bots.cjs");
+  const { isBot, botLogins, matchesPattern } = bots;
+
+  for (const login of [
+    "dependabot[bot]",
+    "github-actions[bot]",
+    "renovate[bot]",
+    "my-release-bot",
+    "some_bot",
+    "bot-runner",
+    "dependabot-preview",
+    "snyk-bot",
+    "imgbot",
+    "web-flow",
+  ]) {
+    T(`${login} is detected`, isBot(login) === true);
+  }
+
+  // Real logins that share a substring with automation, or are simply people.
+  for (const login of [
+    "adampeterhiggins",
+    "botticelli",
+    "abbott",
+    "robotnik",
+    "elliot",
+    "sbotond",
+  ]) {
+    T(`${login} is left alone`, isBot(login) === false);
+  }
+
+  T("detection ignores casing", isBot("Dependabot[BOT]") === true);
+
+  // AI agents are deliberately not built in: every one of those names is also a
+  // person's username, and the user's list is where that judgement belongs.
+  T("agents are not guessed at", isBot("claude") === false && isBot("codex") === false);
+  T("a user pattern picks them up", isBot("claude", ["claude"]) === true);
+  T("a user glob works too", isBot("claude-code-agent", ["claude*"]) === true);
+  T(
+    "a user pattern does not widen the built-ins",
+    isBot("abbott", ["claude"]) === false,
+  );
+
+  T(
+    "botLogins returns just the automation",
+    botLogins(["adampeterhiggins", "dependabot[bot]", "claude"], ["claude"]).join(",") ===
+      "dependabot[bot],claude",
+  );
+
+  // The pattern language: `*` spans anything, everything else is literal.
+  T("a bare pattern is an exact match", matchesPattern("claude", "claude") === true);
+  T("a bare pattern is not a substring match", matchesPattern("claudette", "claude") === false);
+  T("a trailing star matches a prefix", matchesPattern("claudette", "claude*") === true);
+  T("regex characters in a pattern are literal", matchesPattern("a+b", "a+b") === true);
+  T("an empty pattern matches nothing", matchesPattern("anyone", "  ") === false);
+}
+
 /* ── Contribution metrics ─────────────────────────────────────────────────── */
 
 {
