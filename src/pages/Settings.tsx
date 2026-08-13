@@ -1,20 +1,21 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { useApp, type ThemeMode } from "../lib/state/app";
+import { useApp } from "../lib/state/app";
 import { clearAnalytics } from "../lib/db";
 import { syncProblems, type SyncProblem } from "../lib/db/queries";
 import { useRepoSync } from "../lib/state/repoSync";
 import { clearToken } from "../lib/auth";
 import { ENDPOINT_LABELS, type EndpointId } from "../lib/ingest/sync";
-import { Button, Callout, Card, CardHeader, DataTable, Segmented, Spinner, full } from "../components/ui";
+import { Button, Callout, Card, CardHeader, DataTable, Spinner, full } from "../components/ui";
 import { SyncPanel } from "../components/SyncPanel";
 import { RepoSelectionPanel } from "../components/RepoSelectionPanel";
 import { SavedSelectionsPanel } from "../components/SavedSelectionsPanel";
 import { UpdatePanel } from "../components/UpdatePanel";
+import { ThemeSettings } from "../components/ThemeSettings";
 import { PageShell } from "../components/PageShell";
 
 export function Settings() {
-  const { db, org, theme, setTheme, setOrg, refreshRepos } = useApp();
+  const { db, org, setOrg, refreshRepos } = useApp();
   const queryClient = useQueryClient();
   const [orgInput, setOrgInput] = useState(org ?? "");
   const [notice, setNotice] = useState<string | null>(null);
@@ -81,19 +82,7 @@ export function Settings() {
           </div>
         </Card>
 
-        <Card>
-          <CardHeader title="Appearance" subtitle="Dark mode uses a separately validated palette" />
-          <Segmented<ThemeMode>
-            ariaLabel="Theme"
-            value={theme}
-            onChange={setTheme}
-            options={[
-              { value: "system", label: "System" },
-              { value: "light", label: "Light" },
-              { value: "dark", label: "Dark" },
-            ]}
-          />
-        </Card>
+        <ThemeSettings />
 
         <Card>
           <CardHeader

@@ -13,6 +13,12 @@ import {
 import type { PeriodId } from "../agg/weeks";
 import type { ContributionMetric } from "../agg/metrics";
 import type { SyncProgress } from "../ingest/sync";
+import {
+  applyDocumentTheme,
+  DEFAULT_THEME_ID,
+  getThemeDefinition,
+  subscribeToCustomThemes,
+} from "../theme/palette";
 
 export type ThemeMode = "system" | "light" | "dark";
 
@@ -46,6 +52,8 @@ interface AppState {
   metric: ContributionMetric;
 
   theme: ThemeMode;
+  /** Named palette. `default` is this app's built-in light/dark tokens. */
+  themeId: string;
   sync: SyncProgress | null;
   syncing: boolean;
   /** Bumped after a contributor probe so cached probe reads re-run. */
@@ -66,12 +74,14 @@ interface AppState {
   setPeriod: (period: PeriodId, custom?: { from: number; to: number }) => void;
   setMetric: (metric: ContributionMetric) => void;
   setTheme: (theme: ThemeMode) => void;
+  setThemeId: (themeId: string) => void;
   setSync: (progress: SyncProgress | null) => void;
   setSyncing: (syncing: boolean) => void;
   reloadSyncTime: () => Promise<void>;
 }
 
 const THEME_KEY = "github-monitor.theme";
+const THEME_ID_KEY = "github-monitor.theme-id";
 const PERIOD_KEY = "github-monitor.period";
 const CUSTOM_RANGE_KEY = "github-monitor.customRange";
 const LOGINS_KEY = "github-monitor.logins";
@@ -113,10 +123,45 @@ function readStoredTheme(): ThemeMode {
   return raw === "light" || raw === "dark" || raw === "system" ? raw : "system";
 }
 
+function readStoredThemeId(): string {
+  const raw = localStorage.getItem(THEME_ID_KEY);
+  if (raw && (raw === DEFAULT_THEME_ID || getThemeDefinition(raw))) return raw;
+  return DEFAULT_THEME_ID;
+}
+
+function systemDark(): boolean {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches;
+}
+
+export function applyCurrentTheme(): void {
+  const { theme, themeId } = useApp.getState();
+  applyDocumentTheme(themeId, theme, systemDark());
+}
+
 export function applyTheme(theme: ThemeMode): void {
-  const root = document.documentElement;
-  if (theme === "system") root.removeAttribute("data-theme");
-  else root.setAttribute("data-theme", theme);
+  applyDocumentTheme(useApp.getState().themeId, theme, systemDark());
+}
+
+let themeSyncStarted = false;
+
+/** Keep the document in sync with OS appearance and the theme library. */
+export function startThemeSync(): () => void {
+  if (themeSyncStarted) return () => {};
+  themeSyncStarted = true;
+  applyCurrentTheme();
+  const media = window.matchMedia("(prefers-color-scheme: dark)");
+  const onChange = () => applyCurrentTheme();
+  media.addEventListener("change", onChange);
+  const unsubscribe = subscribeToCustomThemes(() => {
+    const { themeId } = useApp.getState();
+    if (!getThemeDefinition(themeId)) useApp.getState().setThemeId(DEFAULT_THEME_ID);
+    else applyCurrentTheme();
+  });
+  return () => {
+    themeSyncStarted = false;
+    media.removeEventListener("change", onChange);
+    unsubscribe();
+  };
 }
 
 export const useApp = create<AppState>((set, get) => ({
@@ -139,13 +184,14 @@ export const useApp = create<AppState>((set, get) => ({
   metric: "commits",
 
   theme: readStoredTheme(),
+  themeId: readStoredThemeId(),
   sync: null,
   syncing: false,
   probeStamp: 0,
 
   boot: async () => {
     try {
-      applyTheme(get().theme);
+      applyCurrentTheme();
       const db = await getDb();
       const [token, org, login, lastSyncAt] = await Promise.all([
         getToken(),
@@ -241,8 +287,14 @@ export const useApp = create<AppState>((set, get) => ({
 
   setTheme: (theme) => {
     localStorage.setItem(THEME_KEY, theme);
-    applyTheme(theme);
     set({ theme });
+    applyCurrentTheme();
+  },
+
+  setThemeId: (themeId) => {
+    localStorage.setItem(THEME_ID_KEY, themeId);
+    set({ themeId });
+    applyCurrentTheme();
   },
 
   setSync: (sync) => set({ sync }),

@@ -31,6 +31,7 @@
 
   --accent: #2a78d6;
   --accent-ink: #ffffff;
+  --sidebar: var(--page-plane);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -91,6 +92,7 @@
   --color-wash-strong: var(--wash-strong);
   --color-accent: var(--accent);
   --color-accent-ink: var(--accent-ink);
+  --color-sidebar: var(--sidebar);
   --color-delta-up: var(--delta-up);
   --color-delta-down: var(--delta-down);
   --color-good: var(--status-good);
