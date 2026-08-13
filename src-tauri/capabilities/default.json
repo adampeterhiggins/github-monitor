@@ -18,7 +18,8 @@
       "identifier": "http:default",
       "allow": [
         { "url": "https://api.github.com/*" },
-        { "url": "https://raw.githubusercontent.com/*" }
+        { "url": "https://raw.githubusercontent.com/*" },
+        { "url": "https://open-vsx.org/*" }
       ]
     },
     {

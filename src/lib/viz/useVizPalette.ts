@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useApp } from "../state/app";
+import { resolveThemeAppearance } from "../theme/palette";
 import { paletteFor, type VizMode, type VizPalette } from "./palette";
 
 /**
@@ -12,6 +13,7 @@ import { paletteFor, type VizMode, type VizPalette } from "./palette";
  */
 export function useVizMode(): VizMode {
   const theme = useApp((s) => s.theme);
+  const themeId = useApp((s) => s.themeId);
   const [systemDark, setSystemDark] = useState(
     () => window.matchMedia("(prefers-color-scheme: dark)").matches,
   );
@@ -23,9 +25,7 @@ export function useVizMode(): VizMode {
     return () => mq.removeEventListener("change", onChange);
   }, []);
 
-  if (theme === "light") return "light";
-  if (theme === "dark") return "dark";
-  return systemDark ? "dark" : "light";
+  return resolveThemeAppearance(themeId, theme, systemDark);
 }
 
 export function useVizPalette(): VizPalette {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { useApp } from "./lib/state/app";
+import { useApp, startThemeSync } from "./lib/state/app";
 import { useUpdates } from "./lib/state/updates";
 import { provideUpdateToken } from "./lib/state/updates";
 import { UpdateBadge } from "./components/UpdatePanel";
@@ -58,6 +58,8 @@ function Shell() {
     void boot();
   }, [boot]);
 
+  useEffect(() => startThemeSync(), []);
+
   // One updater poller for the whole app, so the sidebar badge and the Settings
   // card never issue competing checks. The token is read lazily so one added
   // after launch is picked up.
@@ -106,7 +108,7 @@ function Sidebar({ page, onNavigate }: { page: PageId; onNavigate: (p: PageId) =
   const selected = useApp((s) => s.selectedRepoIds);
 
   return (
-    <nav className="flex w-[212px] shrink-0 flex-col border-r border-hairline bg-plane">
+    <nav className="flex w-[212px] shrink-0 flex-col border-r border-hairline bg-sidebar">
       <div className="px-4 pt-4 pb-3">
         <div className="text-[11px] uppercase tracking-wide text-ink-muted">Organisation</div>
         <div className="mt-0.5 truncate text-[14px] font-semibold text-ink">{org}</div>

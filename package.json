@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "verify:aggregation": "node scripts/verify-aggregation.mjs",
     "test:queries": "node scripts/test-queries.mjs",
-    "check": "npm run typecheck && npm run test:queries && npm run check:workflows",
+    "test:themes": "node scripts/test-themes.mjs",
+    "check": "npm run typecheck && npm run test:queries && npm run test:themes && npm run check:workflows",
     "release:prepare": "node scripts/set-version.mjs",
     "release:manifest": "node scripts/build-update-manifest.mjs",
     "check:workflows": "node scripts/lint-workflows.mjs"
@@ -27,7 +28,10 @@
     "@tauri-apps/plugin-store": "^2.4.4",
     "@tauri-apps/plugin-updater": "^2.10.1",
     "clsx": "^2.1.1",
+    "culori": "^4.0.2",
     "date-fns": "^4.4.0",
+    "jsonc-parser": "^3.3.1",
+    "jszip": "^3.10.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "recharts": "^3.10.1",
@@ -36,6 +40,7 @@
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@tauri-apps/cli": "^2",
+    "@types/culori": "^4.0.1",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.6.0",
