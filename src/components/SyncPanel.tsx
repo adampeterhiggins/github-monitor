@@ -10,7 +10,7 @@ import {
   type SyncMode,
 } from "../lib/ingest/sync";
 import { outstandingWork } from "../lib/db/queries";
-import { Button, Callout, Card, CardHeader, DataTable, Spinner, full } from "./ui";
+import { Button, Callout, Card, CardHeader, Checkbox, DataTable, Spinner, full } from "./ui";
 
 /**
  * Sync control. The progress detail matters more here than in a typical app: the
@@ -23,16 +23,28 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
   const abortRef = useRef<AbortController | null>(null);
   const queryClient = useQueryClient();
   const [selectedEndpoints, setSelectedEndpoints] = useState<EndpointId[]>(ALL_ENDPOINTS);
+  const [includeArchived, setIncludeArchived] = useState(false);
   const [fatal, setFatal] = useState<string | null>(null);
 
+  const repos = useApp((s) => s.repos);
   const selectedRepoIds = useApp((s) => s.selectedRepoIds);
+  const archivedCount = useMemo(() => repos.filter((r) => r.archived).length, [repos]);
+
+  // Resume counts must match what this run will actually fetch. The bulk sync
+  // skips archived repositories unless the user opts them in, so leave them out
+  // of the outstanding total when the box is unchecked.
+  const workRepoIds = useMemo(() => {
+    if (includeArchived) return selectedRepoIds;
+    const archived = new Set(repos.filter((r) => r.archived).map((r) => r.id));
+    return selectedRepoIds.filter((id) => !archived.has(id));
+  }, [selectedRepoIds, repos, includeArchived]);
 
   // What a resume would actually do, so the offer can be specific rather than
   // asking the user to run a sync to find out.
   const work = useQuery({
-    queryKey: ["outstanding-work", selectedRepoIds.join(","), selectedEndpoints.join(","), syncing],
-    enabled: db != null && selectedRepoIds.length > 0,
-    queryFn: () => outstandingWork(db!, selectedRepoIds, selectedEndpoints),
+    queryKey: ["outstanding-work", workRepoIds.join(","), selectedEndpoints.join(","), syncing],
+    enabled: db != null && workRepoIds.length > 0,
+    queryFn: () => outstandingWork(db!, workRepoIds, selectedEndpoints),
     staleTime: 5_000,
   });
 
@@ -49,6 +61,7 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
         org,
         mode,
         endpoints: selectedEndpoints,
+        includeArchived,
         signal: controller.signal,
         onProgress: setSync,
       });
@@ -63,7 +76,7 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
       setSyncing(false);
       abortRef.current = null;
     }
-  }, [db, token, org, selectedEndpoints, setSync, setSyncing, refreshRepos, reloadSyncTime, queryClient, work]);
+  }, [db, token, org, selectedEndpoints, includeArchived, setSync, setSyncing, refreshRepos, reloadSyncTime, queryClient, work]);
 
   const cancel = () => abortRef.current?.abort();
 
@@ -182,6 +195,22 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
         <>
           <div className="mt-3 border-t border-hairline pt-3">
             <p className="mb-2 text-[12px] font-medium text-ink">What to sync</p>
+            <div className="mb-3">
+              <Checkbox
+                checked={includeArchived}
+                onChange={setIncludeArchived}
+                label={
+                  <span className="text-ink-secondary">
+                    Include archived
+                    {archivedCount > 0 ? ` (${full(archivedCount)})` : ""}
+                  </span>
+                }
+              />
+              <p className="mt-1 ml-[22px] text-[11px] leading-relaxed text-ink-muted">
+                A bulk sync skips archived repositories to save API quota. Turn this on to
+                resume or re-sync them in the same run.
+              </p>
+            </div>
             <div className="grid grid-cols-2 gap-x-4 gap-y-1">
               {ALL_ENDPOINTS.map((e) => (
                 <label key={e} className="flex cursor-pointer items-center gap-2 text-[12px] text-ink">
