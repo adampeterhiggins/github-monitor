@@ -469,6 +469,26 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     });
   }
 
+  /* ── 4b. Org-level Dependabot alerts (one request, not per repository) ─── */
+
+  if (endpoints.includes("dependencies") && !cancelled()) {
+    try {
+      const alerts = await api.dependabotAlerts(client, org, signal);
+      // null means the token cannot read them; leave whatever we already have.
+      if (alerts) {
+        await write.writeDependabotAlerts(
+          db,
+          alerts,
+          repos.map((r) => r.id),
+        );
+      }
+    } catch (err) {
+      if (!cancelled()) {
+        noteError(org, "dependencies", err);
+      }
+    }
+  }
+
   /* ── 5. Pulse (PRs and issues, via GraphQL) ────────────────────────────── */
 
   if (endpoints.includes("pulse") && !cancelled()) {

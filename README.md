@@ -35,18 +35,20 @@ and the app says so rather than rendering blank charts.
 
 | Page | Source | Notes |
 |---|---|---|
-| Pulse | GraphQL PRs + issues | Derived — GitHub has no Pulse API |
+| Pulse | GraphQL PRs + issues | Derived — GitHub has no Pulse API. Adds size vs time-to-merge. |
 | Contributors | `stats/contributors` | Exact parity, plus stacked breakdowns |
-| Community | `community/profile` | Health score + checklist coverage |
-| Traffic | `traffic/*` | 14-day GitHub limit; accumulates locally |
+| Community | `community/profile` | Health score + checklist coverage matrix |
+| Traffic | `traffic/*` | 14-day GitHub limit; accumulates locally, including referrer share |
 | Commits | `stats/commit_activity`, `stats/contributors` | Day-level detail covers 52 weeks |
 | Code frequency | `stats/code_frequency` | Additions/deletions around a zero baseline |
 | Punch card | `stats/punch_card` | **All-time only** — no date dimension exists |
-| Dependency graph | `dependency-graph/sbom` | Adds cross-repo sharing + version drift |
+| Dependency graph | `dependency-graph/sbom` + Dependabot alerts | Sharing, version drift, and open alerts joined to drift |
 | Network | `branches`, `forks` | Branch/fork topology, not a commit graph |
 | Forks | `forks` | |
 | Actions usage | `actions/runs` | Wall-clock elapsed, not billable minutes |
 | Actions performance | `actions/runs` | p50/p90/p99 duration, failure rates |
+| Ownership | `contributor_weeks` | Bus factor + people × repositories matrix — no GitHub equivalent |
+| People | `contributor_weeks` + PRs | One person across the org, not across all of GitHub |
 
 ## Releasing and updating
 
@@ -252,7 +254,7 @@ varies, each page declares what it can honour rather than pretending:
 
 | Support | Pages | Why |
 |---|---|---|
-| Full | Contributors, Code frequency, Pulse | Per-contributor data exists |
+| Full | Contributors, Code frequency, Pulse, Ownership, People | Per-contributor data exists |
 | Partial | Commits, Forks | See below |
 | Not available | Punch card, Traffic, Community, Dependency graph, Network, Actions × 2 | GitHub supplies no per-contributor breakdown |
 
@@ -436,7 +438,7 @@ src/
     charts.tsx           chart primitives with fixed mark specs
     ui.tsx               surfaces, tables, stat tiles, chart/table toggle
     RepoFilter.tsx       the multi-select that makes this org-wide
-  pages/                 one per Insights page
+  pages/                 one per Insights page, plus Ownership and People
 ```
 
 Aggregation happens in SQL, not JavaScript — summing ~300k weekly rows in the

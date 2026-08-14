@@ -2,6 +2,7 @@ import { useMemo } from "react";
 import { useScope, useScopedQuery } from "../lib/hooks";
 import {
   mergedPrDurations,
+  mergedPrScatter,
   pulseAuthors,
   pulseByRepo,
   pulseDaily,
@@ -10,7 +11,7 @@ import {
 import { PERIODS, formatDate } from "../lib/agg/weeks";
 import { useApp } from "../lib/state/app";
 import { PageShell } from "../components/PageShell";
-import { DailyLines, RankedBars, StatusBar } from "../components/charts";
+import { DailyLines, MergeScatter, RankedBars, StatusBar } from "../components/charts";
 import { Callout, Card, CardHeader, ChartCard, DataTable, StatTile, full } from "../components/ui";
 
 /** Percentile from an unsorted sample; p in [0,1]. */
@@ -59,6 +60,10 @@ export function Pulse() {
 
   const durations = useScopedQuery("pulse-durations", scope, (db) =>
     mergedPrDurations(db, scope.repoIds, scope.fromIso, scope.toIso, scope.logins),
+  );
+
+  const scatter = useScopedQuery("pulse-scatter", scope, (db) =>
+    mergedPrScatter(db, scope.repoIds, scope.fromIso, scope.toIso, scope.logins),
   );
 
   const s = summary.data;
@@ -287,6 +292,76 @@ export function Pulse() {
             />
           </ChartCard>
         </div>
+
+        <ChartCard
+          title="Size versus time to merge"
+          subtitle="Each point is a pull request merged in the period. Dot size is comments plus reviews."
+          loading={scatter.isFetching}
+          table={
+            <DataTable
+              rows={scatter.data ?? []}
+              maxHeight={360}
+              empty="No merged pull requests in this selection"
+              rowKey={(r) => `${r.full_name}#${r.number}`}
+              initialSort={{ key: "hours", dir: "desc" }}
+              columns={[
+                {
+                  key: "pr",
+                  header: "Pull request",
+                  render: (r) => (
+                    <span>
+                      {r.full_name}#{r.number}
+                      {r.title ? (
+                        <span className="text-ink-secondary"> — {r.title}</span>
+                      ) : null}
+                    </span>
+                  ),
+                  sortValue: (r) => `${r.full_name}#${r.number}`,
+                },
+                {
+                  key: "author",
+                  header: "Author",
+                  render: (r) => r.author ?? "—",
+                  sortValue: (r) => r.author ?? "",
+                },
+                {
+                  key: "size",
+                  header: "Lines",
+                  align: "right",
+                  render: (r) => full(Number(r.additions) + Number(r.deletions)),
+                  sortValue: (r) => Number(r.additions) + Number(r.deletions),
+                },
+                {
+                  key: "hours",
+                  header: "Hours to merge",
+                  align: "right",
+                  render: (r) => hoursLabel(Number(r.hours)),
+                  sortValue: (r) => Number(r.hours),
+                },
+                {
+                  key: "discussion",
+                  header: "Comments + reviews",
+                  align: "right",
+                  render: (r) => full(Number(r.comments) + Number(r.reviews)),
+                  sortValue: (r) => Number(r.comments) + Number(r.reviews),
+                },
+              ]}
+            />
+          }
+        >
+          <MergeScatter
+            points={(scatter.data ?? [])
+              .map((r) => ({
+                size: Number(r.additions) + Number(r.deletions),
+                hours: Number(r.hours),
+                discussion: Number(r.comments) + Number(r.reviews),
+                label: r.title || `${r.full_name}#${r.number}`,
+                detail: `${r.full_name}#${r.number}${r.author ? ` · ${r.author}` : ""}`,
+              }))
+              .filter((p) => Number.isFinite(p.size) && Number.isFinite(p.hours) && p.hours >= 0)}
+            height={300}
+          />
+        </ChartCard>
       </div>
     </PageShell>
   );

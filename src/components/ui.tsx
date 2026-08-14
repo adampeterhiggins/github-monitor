@@ -209,6 +209,46 @@ export function LabeledControl({
   );
 }
 
+/** Compact range control for a labelled popover row. */
+export function Slider({
+  value,
+  min,
+  max,
+  step = 1,
+  onChange,
+  ariaLabel,
+  format = String,
+}: {
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  onChange: (value: number) => void;
+  ariaLabel: string;
+  format?: (value: number) => string;
+}) {
+  return (
+    <div className="flex min-w-0 flex-1 items-center gap-2 px-1.5">
+      <input
+        type="range"
+        className="slider min-w-0 flex-1"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        aria-label={ariaLabel}
+        aria-valuemin={min}
+        aria-valuemax={max}
+        aria-valuenow={value}
+        onChange={(e) => onChange(Number(e.target.value))}
+      />
+      <span className="w-8 shrink-0 text-right text-[11px] tabular text-ink-secondary">
+        {format(value)}
+      </span>
+    </div>
+  );
+}
+
 /* ── Dropdown (presets as rows, selection marked with a check) ───────────── */
 
 const PANEL =

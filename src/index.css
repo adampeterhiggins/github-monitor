@@ -149,6 +149,41 @@ textarea,
   background: transparent;
 }
 
+/* Compact enough to sit in a 32px labelled control without clipping the thumb. */
+input[type="range"].slider {
+  appearance: none;
+  height: 16px;
+  background: transparent;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+input[type="range"].slider::-webkit-slider-runnable-track {
+  height: 3px;
+  border-radius: 999px;
+  background: var(--border-strong);
+}
+input[type="range"].slider::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  margin-top: -4.5px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+input[type="range"].slider::-moz-range-track {
+  height: 3px;
+  border: none;
+  border-radius: 999px;
+  background: var(--border-strong);
+}
+input[type="range"].slider::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border: none;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
 /* Recharts leaves a focus ring on its wrapper; we drive focus ourselves. */
 .recharts-wrapper:focus,
 .recharts-surface:focus {

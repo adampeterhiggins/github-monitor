@@ -59,6 +59,7 @@ const stacks = await bundle("src/lib/agg/stacks.ts", "stacks.cjs");
 const series = await bundle("src/lib/agg/series.ts", "series.cjs");
 const weeksLib = await bundle("src/lib/agg/weeks.ts", "weeks.cjs");
 const metrics = await bundle("src/lib/agg/metrics.ts", "metrics.cjs");
+const concentration = await bundle("src/lib/agg/concentration.ts", "concentration.cjs");
 const { splitStatements } = await bundle("src/lib/db/index.ts", "dbindex.cjs");
 const { SCHEMA_SQL } = await bundle("src/lib/db/schema.ts", "schema.cjs");
 
@@ -1280,6 +1281,130 @@ T(
   );
 
   delete globalThis.__ghFetch;
+}
+
+/* ── Concentration (bus factor) ───────────────────────────────────────────── */
+
+{
+  const empty = concentration.concentration([]);
+  T("an empty bag of counts is all zeroes", empty.total === 0 && empty.top1 === 0 && empty.contributors === 0);
+
+  const one = concentration.concentration([10]);
+  T("a single person holds the lot", one.top1 === 1 && one.top3 === 1 && one.contributors === 1);
+
+  const split = concentration.concentration([50, 30, 10, 10]);
+  T(
+    "top-K shares are of the positive total",
+    split.top1 === 0.5 && split.top3 === 0.9 && split.top5 === 1 && split.contributors === 4,
+    JSON.stringify(split),
+  );
+  T("zero counts do not count as people", concentration.concentration([8, 0, 2]).contributors === 2);
+
+  const units = concentration.allocateUnits([50, 30, 20], 100);
+  T("a clean split allocates exactly", units.join(",") === "50,30,20");
+  T(
+    "leftover cells go to the largest remainders and still sum",
+    concentration.allocateUnits([1, 1, 1], 10).reduce((a, n) => a + n, 0) === 10,
+  );
+  T("a zero total does not invent a uniform split", concentration.allocateUnits([0, 0], 100).join(",") === "0,0");
+  T("a zero weight stays zero", concentration.allocateUnits([10, 0], 7)[1] === 0);
+}
+
+/* ── Ownership matrix ─────────────────────────────────────────────────────── */
+
+{
+  const cells = await q.ownershipCells(db, IDS, 0, W2 + 1);
+  const claude = cells.filter((r) => r.login.toLowerCase() === "claude");
+  T(
+    "ownership merges login casings into one person per repository",
+    claude.length === 2 && claude.reduce((a, r) => a + Number(r.commits), 0) === 17,
+    claude.map((r) => `${r.full_name}:${r.commits}`).join(", "),
+  );
+  T(
+    "ownership honours the contributor filter, casing and all",
+    (await q.ownershipCells(db, IDS, 0, W2 + 1, ["CLAUDE"])).every(
+      (r) => r.login.toLowerCase() === "claude",
+    ),
+  );
+  T("no repositories selected yields no ownership cells", (await q.ownershipCells(db, [], 0, W2 + 1)).length === 0);
+  T(
+    "a week with no commits is dropped from the matrix",
+    (await q.ownershipCells(db, IDS, W2 + 604800, W2 + 604800 * 2)).length === 0,
+  );
+}
+
+/* ── PR scatter ───────────────────────────────────────────────────────────── */
+
+sqlite.exec(`UPDATE pull_requests SET additions = 40, deletions = 10, comments = 2, reviews = 1 WHERE number = 1`);
+sqlite.exec(`INSERT INTO pull_requests (repo_id,number,author,title,state,created_at,merged_at,additions,deletions,comments,reviews)
+  VALUES (2,3,'adampeterhiggins','z','MERGED','2026-05-02T00:00:00Z','2026-05-04T12:00:00Z',200,50,0,0)`);
+
+{
+  const points = await q.mergedPrScatter(db, IDS, "2026-05-01T00:00:00Z", "2026-05-10T00:00:00Z");
+  T("scatter includes every merged PR in the window", points.length === 2, `${points.length} points`);
+  const claude = points.find((p) => p.author === "claude");
+  T(
+    "scatter hours are created-to-merged, and size is stored not summed here",
+    claude && Number(claude.hours) === 24 && Number(claude.additions) === 40 && Number(claude.deletions) === 10,
+    JSON.stringify(claude),
+  );
+  T(
+    "scatter respects the contributor filter",
+    (await q.mergedPrScatter(db, IDS, "2026-05-01T00:00:00Z", "2026-05-10T00:00:00Z", ["claude"])).length === 1,
+  );
+  T(
+    "an open PR is not a scatter point",
+    points.every((p) => p.number !== 2),
+  );
+}
+
+/* ── Referrer history ─────────────────────────────────────────────────────── */
+
+sqlite.exec(`INSERT INTO traffic_referrers (repo_id,snapshot_day,referrer,count,uniques) VALUES
+  (1,'2026-05-01','github.com',10,4),
+  (1,'2026-05-08','github.com',6,3),
+  (1,'2026-05-08','google.com',4,2),
+  (2,'2026-05-08','github.com',5,2)`);
+
+{
+  const hist = await q.trafficReferrersOverTime(db, IDS, "2026-05-01", "2026-05-31");
+  const days = [...new Set(hist.map((r) => r.day))];
+  T("referrer history keeps every snapshot day, not just the latest", days.length === 2, days.join(","));
+  const eighth = hist.filter((r) => r.day === "2026-05-08" && r.referrer === "github.com");
+  T(
+    "the same referrer on one day is summed across repositories",
+    eighth.length === 1 && Number(eighth[0].count) === 11,
+    JSON.stringify(eighth),
+  );
+  T(
+    "a window that misses the snapshots is empty",
+    (await q.trafficReferrersOverTime(db, IDS, "2026-06-01", "2026-06-30")).length === 0,
+  );
+}
+
+/* ── Dependabot joined to drift ───────────────────────────────────────────── */
+
+sqlite.exec(`INSERT INTO dependencies (repo_id,ecosystem,package,version) VALUES
+  (1,'npm','lodash','4.17.20'),
+  (2,'npm','lodash','4.17.21'),
+  (1,'npm','left-pad','1.3.0')`);
+sqlite.exec(`INSERT INTO dependabot_alerts (repo_id,number,severity,ecosystem,package,ghsa_id,summary,state,created_at) VALUES
+  (1,1,'high','npm','lodash','GHSA-x','prototype pollution','open','2026-05-01'),
+  (2,2,'low','npm','left-pad','GHSA-y','whatever','open','2026-05-02'),
+  (3,3,'critical','npm','secret','GHSA-z','out of scope','open','2026-05-03')`);
+
+{
+  const rows = await q.dependabotAlertRows(db, [1, 2]);
+  T("alerts outside the selected repositories are dropped", rows.every((r) => r.repo_id !== 3), `${rows.length} rows`);
+  const lodash = rows.find((r) => r.package === "lodash");
+  const left = rows.find((r) => r.package === "left-pad");
+  T("a package pinned to two versions is marked drifting", Number(lodash?.drifting) === 1, JSON.stringify(lodash));
+  T("a package on one version is not drifting", Number(left?.drifting) === 0, JSON.stringify(left));
+  T(
+    "severity order puts high before low",
+    rows[0].package === "lodash" && rows[1].package === "left-pad",
+    rows.map((r) => r.package).join(","),
+  );
 }
 
 /* ── Clearing the cache must not lose user-authored content ───────────────── */

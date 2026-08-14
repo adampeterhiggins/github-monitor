@@ -7,6 +7,7 @@ import type {
   GhCommitActivity,
   GhCommunityProfile,
   GhContributorStats,
+  GhDependabotAlert,
   GhFork,
   GhParticipation,
   GhPunchCard,
@@ -371,6 +372,61 @@ export async function writeDependencies(
     columns: ["repo_id", "ecosystem", "package", "version"],
     conflictColumns: ["repo_id", "ecosystem", "package"],
     rows,
+  });
+}
+
+/**
+ * Replace open Dependabot alerts for the known repositories.
+ *
+ * The org-level endpoint only returns currently open alerts, so the table is
+ * restated wholesale for those repos rather than merged — a fixed alert would
+ * otherwise linger. Repositories the payload does not mention are cleared too,
+ * which is how "this repo now has none" is recorded.
+ */
+export async function writeDependabotAlerts(
+  db: Database,
+  alerts: GhDependabotAlert[],
+  knownRepoIds: readonly number[],
+): Promise<void> {
+  if (knownRepoIds.length === 0) return;
+  const known = new Set(knownRepoIds);
+  const rows: unknown[][] = [];
+  for (const a of alerts) {
+    const repoId = a.repository?.id;
+    if (repoId == null || !known.has(repoId)) continue;
+    rows.push([
+      repoId,
+      a.number,
+      a.security_advisory?.severity ?? null,
+      a.dependency?.package?.ecosystem ?? null,
+      a.dependency?.package?.name ?? null,
+      a.security_advisory?.ghsa_id ?? null,
+      a.security_advisory?.summary ?? null,
+      a.state ?? null,
+      a.created_at ?? null,
+    ]);
+  }
+  await withWriteLock(async () => {
+    const placeholders = knownRepoIds.map((_, i) => `$${i + 1}`).join(", ");
+    await db.execute(`DELETE FROM dependabot_alerts WHERE repo_id IN (${placeholders})`, [
+      ...knownRepoIds,
+    ]);
+    await bulkInsert(db, {
+      table: "dependabot_alerts",
+      columns: [
+        "repo_id",
+        "number",
+        "severity",
+        "ecosystem",
+        "package",
+        "ghsa_id",
+        "summary",
+        "state",
+        "created_at",
+      ],
+      conflictColumns: ["repo_id", "number"],
+      rows,
+    });
   });
 }
 

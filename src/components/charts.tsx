@@ -9,13 +9,16 @@ import {
   LineChart,
   ReferenceLine,
   ResponsiveContainer,
+  Scatter,
+  ScatterChart,
   Tooltip,
   XAxis,
   YAxis,
+  ZAxis,
 } from "recharts";
-import { useMemo } from "react";
+import { useMemo, useState, type FocusEvent, type MouseEvent } from "react";
 import { useVizPalette } from "../lib/viz/useVizPalette";
-import { sequentialStep, seriesColorCycled, type VizPalette } from "../lib/viz/palette";
+import { sequentialStep, seriesColorCycled, OTHER_COLOR, type VizPalette } from "../lib/viz/palette";
 import { formatShort, formatDate, weekTickFormatter } from "../lib/agg/weeks";
 import { toShares } from "../lib/agg/series";
 import { compact, full, useChartHeight } from "./ui";
@@ -1202,6 +1205,466 @@ export function StatusBar({
         ))}
       </ul>
     </div>
+  );
+}
+
+/* ── Heat matrix (ownership, community coverage) ──────────────────────────── */
+
+export interface HeatTooltipContent {
+  heading: string;
+  rows: Array<{ label: string; value: string }>;
+}
+
+/**
+ * A labelled grid of sequential or binary cells.
+ *
+ * Same encoding rules as the punch card: a true zero stays off the ramp so
+ * "none" never reads as "a little", and every cell has a text label. The first
+ * column and the header stick so a wide org still has somewhere to look.
+ *
+ * Native `title` is not enough here — repository names truncate, and a cell is
+ * more than one number — so hover opens the same tooltip shell the charts use.
+ */
+export function HeatMatrix({
+  rowLabels,
+  columnLabels,
+  values,
+  format,
+  mode = "sequential",
+  maxHeight = 480,
+  headerTooltip,
+  cellTooltip,
+  cellSize = 18,
+  gap = 2,
+  borders = true,
+}: {
+  rowLabels: string[];
+  columnLabels: string[];
+  /** Row-major, same shape as the label arrays. */
+  values: number[][];
+  format?: (value: number, row: number, col: number) => string;
+  mode?: "sequential" | "binary";
+  maxHeight?: number;
+  /** Richer hover for an axis label. Falls back to the visible label. */
+  headerTooltip?: (axis: "row" | "column", index: number) => HeatTooltipContent;
+  /** Richer hover for a cell. Falls back to `format` plus the two labels. */
+  cellTooltip?: (value: number, row: number, col: number) => HeatTooltipContent;
+  /** Square edge in CSS pixels. Headers stay the same width so gap can reach zero. */
+  cellSize?: number;
+  /** White space between squares in CSS pixels. 0 tiles them flush. */
+  gap?: number;
+  /** Outline on empty squares. Filled cells never stroke. */
+  borders?: boolean;
+}) {
+  const palette = useVizPalette();
+  const [tip, setTip] = useState<{
+    x: number;
+    y: number;
+    content: HeatTooltipContent;
+    flip: boolean;
+  } | null>(null);
+
+  const max = useMemo(() => {
+    let m = 0;
+    for (const row of values) for (const v of row) if (v > m) m = v;
+    return m;
+  }, [values]);
+
+  if (rowLabels.length === 0 || columnLabels.length === 0) {
+    return <NoData height={160} />;
+  }
+
+  const fillOf = (v: number) => {
+    if (mode === "binary") {
+      return v > 0 ? palette.status.good : null;
+    }
+    return sequentialStep(palette, max === 0 ? 0 : v / max, true);
+  };
+
+  const show = (
+    event: MouseEvent<HTMLElement> | FocusEvent<HTMLElement>,
+    content: HeatTooltipContent,
+  ) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const width = 240;
+    const x = Math.min(rect.left + rect.width / 2, window.innerWidth - width / 2 - 8);
+    const below = rect.bottom + 8;
+    const flip = below + 88 > window.innerHeight;
+    const y = flip ? rect.top - 8 : below;
+    setTip({
+      x: Math.max(width / 2 + 8, x),
+      y,
+      content,
+      flip,
+    });
+  };
+
+  const hide = () => setTip(null);
+  const offered = useChartHeight();
+  const radius = gap <= 0 ? 0 : Math.min(gap, cellSize >= 28 ? 3 : 2);
+
+  const headerContent = (axis: "row" | "column", index: number): HeatTooltipContent => {
+    if (headerTooltip) return headerTooltip(axis, index);
+    return { heading: axis === "row" ? rowLabels[index] : columnLabels[index], rows: [] };
+  };
+
+  const cellContent = (r: number, c: number, v: number): HeatTooltipContent => {
+    if (cellTooltip) return cellTooltip(v, r, c);
+    const text = format ? format(v, r, c) : String(v);
+    return { heading: `${rowLabels[r]} · ${columnLabels[c]}`, rows: [{ label: "value", value: text }] };
+  };
+
+  return (
+    <div
+      className={offered != null ? "flex flex-col" : undefined}
+      style={offered != null ? { height: offered } : undefined}
+    >
+      <div
+        className={offered != null ? "min-h-0 flex-1 overflow-auto" : "overflow-auto"}
+        style={offered == null ? { maxHeight } : undefined}
+        onMouseLeave={hide}
+      >
+        <table className="border-separate" style={{ borderSpacing: gap }}>
+          <thead>
+            <tr>
+              <th className="sticky left-0 top-0 z-20 bg-surface" />
+              {columnLabels.map((label, c) => (
+                <th
+                  key={c}
+                  className="sticky top-0 z-10 cursor-default bg-surface p-0 text-center text-[9px] font-normal"
+                  style={{ color: palette.inkMuted, width: cellSize, minWidth: cellSize, maxWidth: cellSize }}
+                  onMouseEnter={(e) => show(e, headerContent("column", c))}
+                  onFocus={(e) => show(e, headerContent("column", c))}
+                  onBlur={hide}
+                  tabIndex={0}
+                >
+                  <span className="block truncate" style={{ width: cellSize }}>
+                    {label}
+                  </span>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rowLabels.map((rowLabel, r) => (
+              <tr key={r}>
+                <th
+                  className="sticky left-0 z-10 cursor-default truncate bg-surface pr-1.5 text-right text-[10px] font-normal"
+                  style={{ color: palette.inkMuted, maxWidth: 140 }}
+                  onMouseEnter={(e) => show(e, headerContent("row", r))}
+                  onFocus={(e) => show(e, headerContent("row", r))}
+                  onBlur={hide}
+                  tabIndex={0}
+                >
+                  {rowLabel}
+                </th>
+                {columnLabels.map((_colLabel, c) => {
+                  const v = values[r]?.[c] ?? 0;
+                  const fill = fillOf(v);
+                  const content = cellContent(r, c, v);
+                  const aria = `${content.heading} — ${content.rows.map((row) => `${row.value} ${row.label}`).join(", ")}`;
+                  return (
+                    <td key={c} style={{ padding: 0 }}>
+                      <div
+                        tabIndex={0}
+                        role="img"
+                        aria-label={aria}
+                        onMouseEnter={(e) => show(e, content)}
+                        onFocus={(e) => show(e, content)}
+                        onBlur={hide}
+                        className="focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+                        style={{
+                          width: cellSize,
+                          height: cellSize,
+                          borderRadius: radius,
+                          background: fill ?? "transparent",
+                          border: fill || !borders ? "none" : `1px solid ${palette.gridline}`,
+                        }}
+                      />
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {mode === "sequential" ? (
+        <div className="mt-3 flex items-center justify-end gap-1.5">
+          <span className="text-[10px] text-ink-muted">0</span>
+          {[0.15, 0.35, 0.55, 0.75, 1].map((t) => (
+            <span
+              key={t}
+              aria-hidden="true"
+              className="rounded-sm"
+              style={{ width: 14, height: 14, background: sequentialStep(palette, t, false)! }}
+            />
+          ))}
+          <span className="text-[10px] text-ink-muted">{full(max)}</span>
+        </div>
+      ) : null}
+      {tip ? (
+        <div
+          className="pointer-events-none fixed z-50"
+          style={{
+            left: tip.x,
+            top: tip.y,
+            transform: tip.flip ? "translate(-50%, -100%)" : "translate(-50%, 0)",
+          }}
+        >
+          <TooltipShell palette={palette} heading={tip.content.heading} rows={tip.content.rows} />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/* ── Waffle (concentration as 100 squares) ────────────────────────────────── */
+
+export function Waffle({
+  cells,
+}: {
+  cells: Array<{ label: string; count: number; color: string }>;
+}) {
+  const palette = useVizPalette();
+  const squares: Array<{ label: string; color: string }> = [];
+  for (const c of cells) {
+    for (let i = 0; i < c.count; i++) squares.push({ label: c.label, color: c.color });
+  }
+  if (squares.length === 0) return <NoData height={120} />;
+
+  return (
+    <div>
+      <div
+        className="grid gap-0.5"
+        style={{ gridTemplateColumns: "repeat(20, minmax(0, 1fr))" }}
+        role="img"
+        aria-label={cells.map((c) => `${c.label}: ${c.count}`).join(", ")}
+      >
+        {squares.map((s, i) => (
+          <div
+            key={i}
+            title={s.label}
+            className="aspect-square rounded-[2px]"
+            style={{ background: s.color }}
+          />
+        ))}
+      </div>
+      <div className="mt-2">
+        <Legend
+          shape="rect"
+          items={cells
+            .filter((c) => c.count > 0)
+            .map((c) => ({ label: `${c.label} (${c.count})`, color: c.color }))}
+        />
+      </div>
+      <p className="mt-1 text-[10px] text-ink-muted" style={{ color: palette.inkMuted }}>
+        One square is one percent of commits in the selection.
+      </p>
+    </div>
+  );
+}
+
+export function otherColor(palette: VizPalette): string {
+  return OTHER_COLOR[palette.mode];
+}
+
+/* ── Stacked daily area (referrer share over time) ────────────────────────── */
+
+export function StackedDailyArea({
+  data,
+  series,
+  height = 240,
+  values = "share",
+  valueLabel,
+}: {
+  data: Array<Record<string, number | string>>;
+  series: StackSeriesSpec[];
+  height?: number;
+  values?: "total" | "share";
+  valueLabel: string;
+}) {
+  const palette = useVizPalette();
+  const h = useHeight(height);
+  const normalised = values === "share";
+  const colored = series.map((s) => ({
+    ...s,
+    color: s.slot == null ? palette.inkMuted : seriesColorCycled(palette, s.slot),
+  }));
+
+  if (data.length === 0 || series.length === 0) return <NoData height={h} />;
+
+  const keys = colored.map((s) => s.key);
+  const numeric = data.map((row) => {
+    const out: Record<string, number | string> = { ...row };
+    for (const k of keys) out[k] = Number(row[k] ?? 0);
+    return out;
+  });
+  const plotted = normalised
+    ? toShares(
+        numeric.map((row) => {
+          const wide: Record<string, number> = { week: 0 };
+          for (const k of keys) wide[k] = Number(row[k] ?? 0);
+          return wide;
+        }),
+        keys,
+      ).map((wide, i) => {
+        const out: Record<string, number | string> = { day: numeric[i].day };
+        for (const k of keys) out[k] = wide[k] ?? 0;
+        return out;
+      })
+    : numeric;
+
+  return (
+    <div>
+      <ResponsiveContainer width="100%" height={h}>
+        <AreaChart data={plotted} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
+          <CartesianGrid {...gridProps(palette)} />
+          <XAxis
+            dataKey="day"
+            {...axisProps(palette)}
+            tickFormatter={(d: string) => formatShort(new Date(`${d}T00:00:00Z`))}
+            minTickGap={28}
+          />
+          <YAxis
+            {...axisProps(palette)}
+            width={48}
+            tickFormatter={normalised ? share : compact}
+            allowDecimals={normalised}
+            ticks={normalised ? [0, 0.25, 0.5, 0.75, 1] : undefined}
+            domain={normalised ? [0, 1] : undefined}
+          />
+          <Tooltip
+            cursor={{ stroke: palette.baseline, strokeWidth: 1 }}
+            content={({ active, payload, label }) => {
+              if (!active || !payload?.length) return null;
+              const raw = numeric.find((r) => r.day === label);
+              const rows = colored
+                .map((s) => ({
+                  label: s.label,
+                  raw: Number(raw?.[s.key] ?? 0),
+                  color: s.color,
+                }))
+                .filter((r) => r.raw !== 0)
+                .sort((a, b) => b.raw - a.raw);
+              const total = rows.reduce((a, r) => a + r.raw, 0);
+              return (
+                <TooltipShell
+                  palette={palette}
+                  heading={formatDate(new Date(`${String(label)}T00:00:00Z`))}
+                  rows={rows.map((r) => ({
+                    label: r.label,
+                    value: normalised
+                      ? `${share(total === 0 ? 0 : r.raw / total)} · ${full(r.raw)}`
+                      : full(r.raw),
+                    color: r.color,
+                  }))}
+                />
+              );
+            }}
+          />
+          {colored.map((s) => (
+            <Area
+              key={s.key}
+              type="monotone"
+              dataKey={s.key}
+              stackId="referrers"
+              stroke={s.color}
+              strokeWidth={1.5}
+              fill={s.color}
+              fillOpacity={0.85}
+              dot={false}
+              activeDot={{ r: 3, strokeWidth: 2, stroke: palette.surface }}
+            />
+          ))}
+        </AreaChart>
+      </ResponsiveContainer>
+      <div className="mt-2">
+        <Legend items={colored.map((s) => ({ label: s.label, color: s.color }))} />
+      </div>
+      <span className="sr-only">{valueLabel}</span>
+    </div>
+  );
+}
+
+/* ── Scatter (PR size vs time-to-merge) ───────────────────────────────────── */
+
+export interface ScatterPoint {
+  size: number;
+  hours: number;
+  discussion: number;
+  label: string;
+  detail: string;
+}
+
+export function MergeScatter({
+  points,
+  height = 280,
+}: {
+  points: ScatterPoint[];
+  height?: number;
+}) {
+  const palette = useVizPalette();
+  const h = useHeight(height);
+  const color = palette.series[0];
+
+  if (points.length === 0) return <NoData height={h} />;
+
+  return (
+    <ResponsiveContainer width="100%" height={h}>
+      <ScatterChart margin={{ top: 8, right: 12, bottom: 8, left: 0 }}>
+        <CartesianGrid {...gridProps(palette)} />
+        <XAxis
+          type="number"
+          dataKey="size"
+          name="Lines"
+          {...axisProps(palette)}
+          tickFormatter={compact}
+          label={{
+            value: "Lines changed",
+            position: "insideBottom",
+            offset: -2,
+            fill: palette.inkMuted,
+            fontSize: AXIS_FONT,
+          }}
+        />
+        <YAxis
+          type="number"
+          dataKey="hours"
+          name="Hours"
+          {...axisProps(palette)}
+          width={48}
+          tickFormatter={compact}
+          label={{
+            value: "Hours to merge",
+            angle: -90,
+            position: "insideLeft",
+            fill: palette.inkMuted,
+            fontSize: AXIS_FONT,
+          }}
+        />
+        <ZAxis type="number" dataKey="discussion" range={[36, 160]} />
+        <Tooltip
+          cursor={{ stroke: palette.baseline, strokeWidth: 1 }}
+          content={({ active, payload }) => {
+            if (!active || !payload?.length) return null;
+            const d = payload[0].payload as ScatterPoint;
+            return (
+              <TooltipShell
+                palette={palette}
+                heading={`${d.label} · ${d.detail}`}
+                rows={[
+                  { label: "lines changed", value: full(d.size), color },
+                  { label: "hours to merge", value: compact(d.hours) },
+                  { label: "comments + reviews", value: full(d.discussion) },
+                ]}
+              />
+            );
+          }}
+        />
+        <Scatter data={points} fill={color} fillOpacity={0.7} />
+      </ScatterChart>
+    </ResponsiveContainer>
   );
 }
 

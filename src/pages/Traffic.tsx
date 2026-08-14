@@ -1,9 +1,16 @@
 import { useMemo } from "react";
 import { useScope, useScopedQuery } from "../lib/hooks";
-import { topTrafficPaths, topTrafficReferrers, trafficByRepo, trafficDaily } from "../lib/db/queries";
+import {
+  topTrafficPaths,
+  topTrafficReferrers,
+  trafficByRepo,
+  trafficDaily,
+  trafficReferrersOverTime,
+} from "../lib/db/queries";
+import { buildStacks } from "../lib/agg/stacks";
 import { useApp } from "../lib/state/app";
 import { PageShell } from "../components/PageShell";
-import { DailyArea, RankedBars } from "../components/charts";
+import { DailyArea, RankedBars, StackedDailyArea } from "../components/charts";
 import { Callout, Card, CardHeader, ChartCard, DataTable, StatTile, full } from "../components/ui";
 
 export function Traffic() {
@@ -20,6 +27,9 @@ export function Traffic() {
   const referrers = useScopedQuery("traffic-referrers", scope, (db) =>
     topTrafficReferrers(db, scope.repoIds),
   );
+  const referrerHistory = useScopedQuery("traffic-referrer-history", scope, (db) =>
+    trafficReferrersOverTime(db, scope.repoIds, scope.fromDay, scope.toDay),
+  );
 
   const series = useMemo(() => {
     const byDay = new Map<string, { day: string; views: number; clones: number }>();
@@ -31,6 +41,26 @@ export function Traffic() {
     }
     return [...byDay.values()].sort((a, b) => a.day.localeCompare(b.day));
   }, [daily.data]);
+
+  const referrerStacks = useMemo(() => {
+    const rows = referrerHistory.data ?? [];
+    const days = [...new Set(rows.map((r) => r.day))].sort();
+    const dayUnix = (day: string) => Math.floor(Date.parse(`${day}T00:00:00Z`) / 1000);
+    const stacked = buildStacks({
+      rows,
+      weeks: days.map(dayUnix),
+      weekOf: (r) => dayUnix(r.day),
+      keyOf: (r) => r.referrer,
+      labelOf: (r) => r.referrer,
+      valueOf: (r) => Number(r.count),
+    });
+    const data = stacked.data.map((row, i) => {
+      const out: Record<string, number | string> = { day: days[i] };
+      for (const s of stacked.series) out[s.key] = row[s.key] ?? 0;
+      return out;
+    });
+    return { data, series: stacked.series, days: days.length };
+  }, [referrerHistory.data]);
 
   const totals = (byRepo.data ?? []).reduce(
     (acc, r) => ({
@@ -107,6 +137,44 @@ export function Traffic() {
               { key: "views", label: "Views", slot: 0 },
               { key: "clones", label: "Clones", slot: 1 },
             ]}
+            height={260}
+          />
+        </ChartCard>
+
+        <ChartCard
+          title="Referrer share over time"
+          subtitle={
+            referrerStacks.days < 2
+              ? "Needs at least two sync snapshots in the selected period — GitHub only keeps 14 days, so this series is built locally"
+              : "Each sync writes a snapshot. The eight largest referrers take a colour; the rest fold into Other."
+          }
+          loading={referrerHistory.isFetching}
+          table={
+            <DataTable
+              rows={referrerHistory.data ?? []}
+              maxHeight={320}
+              empty="No referrer snapshots in this period"
+              rowKey={(r) => `${r.day}:${r.referrer}`}
+              initialSort={{ key: "day", dir: "desc" }}
+              columns={[
+                { key: "day", header: "Snapshot", render: (r) => r.day, sortValue: (r) => r.day },
+                { key: "referrer", header: "Referrer", render: (r) => r.referrer, sortValue: (r) => r.referrer },
+                {
+                  key: "count",
+                  header: "Views",
+                  align: "right",
+                  render: (r) => full(Number(r.count)),
+                  sortValue: (r) => Number(r.count),
+                },
+              ]}
+            />
+          }
+        >
+          <StackedDailyArea
+            data={referrerStacks.data}
+            series={referrerStacks.series}
+            values="share"
+            valueLabel="views"
             height={260}
           />
         </ChartCard>
