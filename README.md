@@ -35,7 +35,7 @@ and the app says so rather than rendering blank charts.
 
 | Page | Source | Notes |
 |---|---|---|
-| Pulse | GraphQL PRs + issues | Derived — GitHub has no Pulse API. Adds size vs time-to-merge. |
+| Pulse | GraphQL PRs + issues | Derived — GitHub has no Pulse API. Adds size vs time-to-merge and open-PR age. |
 | Contributors | `stats/contributors` | Exact parity, plus stacked breakdowns |
 | Community | `community/profile` | Health score + checklist coverage matrix |
 | Traffic | `traffic/*` | 14-day GitHub limit; accumulates locally, including referrer share |
@@ -47,8 +47,10 @@ and the app says so rather than rendering blank charts.
 | Forks | `forks` | |
 | Actions usage | `actions/runs` | Wall-clock elapsed, not billable minutes |
 | Actions performance | `actions/runs` | p50/p90/p99 duration, failure rates |
-| Ownership | `contributor_weeks` | Bus factor + people × repositories matrix — no GitHub equivalent |
+| Ownership | `contributor_weeks` | Bus factor, concentration over time, people × repositories matrix — no GitHub equivalent |
 | People | `contributor_weeks` + PRs | One person across the org, not across all of GitHub |
+| Roster | `contributor_weeks` | Arrivals, last-seen, and repositories left cold |
+| Scorecard | several | One ranked table joining concentration, health, alerts, open PRs, lead time, views |
 
 ## Releasing and updating
 
@@ -254,14 +256,15 @@ varies, each page declares what it can honour rather than pretending:
 
 | Support | Pages | Why |
 |---|---|---|
-| Full | Contributors, Code frequency, Pulse, Ownership, People | Per-contributor data exists |
+| Full | Contributors, Code frequency, Pulse, Ownership, People, Roster | Per-contributor data exists |
 | Partial | Commits, Forks | See below |
-| Not available | Punch card, Traffic, Community, Dependency graph, Network, Actions × 2 | GitHub supplies no per-contributor breakdown |
+| Not available | Punch card, Traffic, Community, Dependency graph, Network, Actions × 2, Scorecard | GitHub supplies no per-contributor breakdown |
 
 On **Commits**, everything respects the filter except *Commits by day of week*,
 which comes from `stats/commit_activity` — day totals with no contributor
 dimension. On **Forks**, a login matches the *fork owner*, which is a different
-notion from a contributor. Where the filter cannot apply, the control is visibly
+notion from a contributor. On **Scorecard**, the filter is off because the row
+joins traffic, community health and alerts, which have no person dimension. Where the filter cannot apply, the control is visibly
 disabled with the reason; a filter that silently changed nothing would be worse
 than none.
 
@@ -438,7 +441,7 @@ src/
     charts.tsx           chart primitives with fixed mark specs
     ui.tsx               surfaces, tables, stat tiles, chart/table toggle
     RepoFilter.tsx       the multi-select that makes this org-wide
-  pages/                 one per Insights page, plus Ownership and People
+  pages/                 one per Insights page, plus Ownership, People, Roster, Scorecard
 ```
 
 Aggregation happens in SQL, not JavaScript — summing ~300k weekly rows in the

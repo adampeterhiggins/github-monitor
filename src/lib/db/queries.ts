@@ -741,6 +741,95 @@ export async function ownershipCells(
   );
 }
 
+/**
+ * Org roster: first seen, last seen, and repositories left cold.
+ *
+ * `left_repos` is repositories whose most recent commit week is this person
+ * alone — they were the last (and only) committer in that week. That is the
+ * "who went quiet and took a repo with them" signal, not a count of every
+ * repository they ever touched. The last-week comparison is against every
+ * committer, even when a contributor filter narrows the rows.
+ */
+export interface RosterRow {
+  login: string;
+  avatar_url: string | null;
+  first_week: number;
+  last_week: number;
+  commits: number;
+  commits_all: number;
+  repos: number;
+  repos_all: number;
+  left_repos: number;
+}
+
+export async function rosterRows(
+  db: Database,
+  repoIds: readonly number[],
+  fromWeek: number,
+  toWeek: number,
+  logins: Logins = null,
+): Promise<RosterRow[]> {
+  if (repoIds.length === 0) return [];
+  const p = new Params();
+  const from = p.add(fromWeek);
+  const to = p.add(toWeek);
+  const ids = p.in(repoIds);
+  const loginClause = p.loginFilter("login", logins);
+  const ids2 = p.in(repoIds);
+  const loginClause2 = p.loginFilter("login", logins);
+  const ids3 = p.in(repoIds);
+  const ids4 = p.in(repoIds);
+  return db.select<RosterRow[]>(
+    `WITH bounds AS (
+       SELECT LOWER(login) AS key,
+              MIN(login)   AS login,
+              MIN(week)    AS first_week,
+              MAX(week)    AS last_week,
+              SUM(commits) AS commits_all,
+              SUM(CASE WHEN week >= ${from} AND week <= ${to} THEN commits ELSE 0 END) AS commits,
+              COUNT(DISTINCT repo_id) AS repos_all,
+              COUNT(DISTINCT CASE WHEN week >= ${from} AND week <= ${to} THEN repo_id END) AS repos
+       FROM contributor_weeks
+       WHERE commits > 0 AND repo_id IN ${ids}${loginClause}
+       GROUP BY LOWER(login)
+     ),
+     person_repo_last AS (
+       SELECT LOWER(login) AS key, repo_id, MAX(week) AS last_week
+       FROM contributor_weeks
+       WHERE commits > 0 AND repo_id IN ${ids2}${loginClause2}
+       GROUP BY LOWER(login), repo_id
+     ),
+     repo_last AS (
+       SELECT repo_id, MAX(week) AS last_week
+       FROM contributor_weeks
+       WHERE commits > 0 AND repo_id IN ${ids3}
+       GROUP BY repo_id
+     ),
+     sole AS (
+       SELECT pr.key, COUNT(*) AS left_repos
+       FROM person_repo_last pr
+       JOIN repo_last rl ON rl.repo_id = pr.repo_id AND rl.last_week = pr.last_week
+       WHERE NOT EXISTS (
+         SELECT 1 FROM contributor_weeks cw
+         WHERE cw.repo_id = pr.repo_id
+           AND cw.week = pr.last_week
+           AND cw.commits > 0
+           AND LOWER(cw.login) <> pr.key
+           AND cw.repo_id IN ${ids4}
+       )
+       GROUP BY pr.key
+     )
+     SELECT b.login,
+            (SELECT c.avatar_url FROM contributors c WHERE LOWER(c.login) = b.key LIMIT 1) AS avatar_url,
+            b.first_week, b.last_week, b.commits, b.commits_all, b.repos, b.repos_all,
+            COALESCE(s.left_repos, 0) AS left_repos
+     FROM bounds b
+     LEFT JOIN sole s ON s.key = b.key
+     ORDER BY b.last_week ASC, b.login`,
+    p.values,
+  );
+}
+
 /** Earliest week with any data, for resolving the "all time" period. */
 export async function earliestWeek(
   db: Database,
@@ -1117,6 +1206,54 @@ export async function mergedPrScatter(
      JOIN repos r ON r.id = pr.repo_id
      WHERE pr.merged_at >= ${f} AND pr.merged_at <= ${t} AND pr.repo_id IN ${ids}${author}
        AND pr.created_at IS NOT NULL`,
+    p.values,
+  );
+}
+
+/** Pull requests still open in the cache, with age measured to `asOfIso`. */
+export interface OpenPrRow {
+  full_name: string;
+  number: number;
+  author: string | null;
+  title: string | null;
+  created_at: string;
+  additions: number;
+  deletions: number;
+  comments: number;
+  reviews: number;
+  age_hours: number;
+}
+
+/**
+ * Currently open pull requests in the selected repositories.
+ *
+ * The cache stores present state, not a historical snapshot, so this is "still
+ * open as of the last sync" rather than "open at the end of the period". Age
+ * is measured to `asOfIso` so tests (and a period end) can pin the clock.
+ */
+export async function openPullRequests(
+  db: Database,
+  repoIds: readonly number[],
+  asOfIso: string,
+  logins: Logins = null,
+): Promise<OpenPrRow[]> {
+  if (repoIds.length === 0) return [];
+  const p = new Params();
+  const asOf = p.add(asOfIso);
+  const asOfCreated = p.add(asOfIso);
+  const ids = p.in(repoIds);
+  const author = p.loginFilter("pr.author", logins);
+  return db.select<OpenPrRow[]>(
+    `SELECT r.full_name, pr.number, pr.author, pr.title, pr.created_at,
+            pr.additions, pr.deletions, pr.comments, pr.reviews,
+            (julianday(${asOf}) - julianday(pr.created_at)) * 24.0 AS age_hours
+     FROM pull_requests pr
+     JOIN repos r ON r.id = pr.repo_id
+     WHERE pr.state = 'OPEN'
+       AND pr.created_at IS NOT NULL
+       AND pr.created_at <= ${asOfCreated}
+       AND pr.repo_id IN ${ids}${author}
+     ORDER BY age_hours DESC`,
     p.values,
   );
 }
