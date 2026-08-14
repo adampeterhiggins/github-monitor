@@ -92,7 +92,7 @@ export function People() {
         scope.range.toWeek,
         login ? [login] : null,
       ),
-    { enabled: login != null },
+    { enabled: login != null, key: login ?? "" },
   );
 
   const repos = useScopedQuery(
@@ -106,21 +106,21 @@ export function People() {
         scope.range.fromWeek,
         scope.range.toWeek,
       ),
-    { enabled: login != null },
+    { enabled: login != null, key: login ?? "" },
   );
 
   const durations = useScopedQuery(
     "people-durations",
     scope,
     (db) => mergedPrDurations(db, scope.repoIds, scope.fromIso, scope.toIso, login ? [login] : null),
-    { enabled: login != null },
+    { enabled: login != null, key: login ?? "" },
   );
 
   const authors = useScopedQuery(
     "people-prs",
     scope,
     (db) => pulseAuthors(db, scope.repoIds, scope.fromIso, scope.toIso, login ? [login] : null),
-    { enabled: login != null },
+    { enabled: login != null, key: login ?? "" },
   );
 
   const weekSeries = useMemo(

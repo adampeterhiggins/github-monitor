@@ -135,6 +135,15 @@ export function Community() {
             columnLabels={CHECKS.map((c) => c.short)}
             values={data.map((r) => CHECKS.map((c) => Number(r[c.key])))}
             format={(v, _r, c) => (v > 0 ? CHECKS[c].label : `Missing ${CHECKS[c].label}`)}
+            headerTooltip={(axis, index) =>
+              axis === "column"
+                ? { heading: CHECKS[index].label, rows: [] }
+                : { heading: data[index].full_name, rows: [{ label: "health", value: `${data[index].health}%` }] }
+            }
+            cellTooltip={(v, r, c) => ({
+              heading: data[r].full_name,
+              rows: [{ label: CHECKS[c].label, value: v > 0 ? "present" : "missing" }],
+            })}
           />
         </ChartCard>
       </div>

@@ -16,7 +16,7 @@ import {
   YAxis,
   ZAxis,
 } from "recharts";
-import { useMemo } from "react";
+import { useMemo, useState, type FocusEvent, type MouseEvent } from "react";
 import { useVizPalette } from "../lib/viz/useVizPalette";
 import { sequentialStep, seriesColorCycled, OTHER_COLOR, type VizPalette } from "../lib/viz/palette";
 import { formatShort, formatDate, weekTickFormatter } from "../lib/agg/weeks";
@@ -1210,12 +1210,20 @@ export function StatusBar({
 
 /* ── Heat matrix (ownership, community coverage) ──────────────────────────── */
 
+export interface HeatTooltipContent {
+  heading: string;
+  rows: Array<{ label: string; value: string }>;
+}
+
 /**
  * A labelled grid of sequential or binary cells.
  *
  * Same encoding rules as the punch card: a true zero stays off the ramp so
  * "none" never reads as "a little", and every cell has a text label. The first
  * column and the header stick so a wide org still has somewhere to look.
+ *
+ * Native `title` is not enough here — repository names truncate, and a cell is
+ * more than one number — so hover opens the same tooltip shell the charts use.
  */
 export function HeatMatrix({
   rowLabels,
@@ -1224,6 +1232,11 @@ export function HeatMatrix({
   format,
   mode = "sequential",
   maxHeight = 480,
+  headerTooltip,
+  cellTooltip,
+  cellSize = 18,
+  gap = 2,
+  borders = true,
 }: {
   rowLabels: string[];
   columnLabels: string[];
@@ -1232,8 +1245,25 @@ export function HeatMatrix({
   format?: (value: number, row: number, col: number) => string;
   mode?: "sequential" | "binary";
   maxHeight?: number;
+  /** Richer hover for an axis label. Falls back to the visible label. */
+  headerTooltip?: (axis: "row" | "column", index: number) => HeatTooltipContent;
+  /** Richer hover for a cell. Falls back to `format` plus the two labels. */
+  cellTooltip?: (value: number, row: number, col: number) => HeatTooltipContent;
+  /** Square edge in CSS pixels. Headers stay the same width so gap can reach zero. */
+  cellSize?: number;
+  /** White space between squares in CSS pixels. 0 tiles them flush. */
+  gap?: number;
+  /** Outline on empty squares. Filled cells never stroke. */
+  borders?: boolean;
 }) {
   const palette = useVizPalette();
+  const [tip, setTip] = useState<{
+    x: number;
+    y: number;
+    content: HeatTooltipContent;
+    flip: boolean;
+  } | null>(null);
+
   const max = useMemo(() => {
     let m = 0;
     for (const row of values) for (const v of row) if (v > m) m = v;
@@ -1251,21 +1281,66 @@ export function HeatMatrix({
     return sequentialStep(palette, max === 0 ? 0 : v / max, true);
   };
 
+  const show = (
+    event: MouseEvent<HTMLElement> | FocusEvent<HTMLElement>,
+    content: HeatTooltipContent,
+  ) => {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const width = 240;
+    const x = Math.min(rect.left + rect.width / 2, window.innerWidth - width / 2 - 8);
+    const below = rect.bottom + 8;
+    const flip = below + 88 > window.innerHeight;
+    const y = flip ? rect.top - 8 : below;
+    setTip({
+      x: Math.max(width / 2 + 8, x),
+      y,
+      content,
+      flip,
+    });
+  };
+
+  const hide = () => setTip(null);
+  const offered = useChartHeight();
+  const radius = gap <= 0 ? 0 : Math.min(gap, cellSize >= 28 ? 3 : 2);
+
+  const headerContent = (axis: "row" | "column", index: number): HeatTooltipContent => {
+    if (headerTooltip) return headerTooltip(axis, index);
+    return { heading: axis === "row" ? rowLabels[index] : columnLabels[index], rows: [] };
+  };
+
+  const cellContent = (r: number, c: number, v: number): HeatTooltipContent => {
+    if (cellTooltip) return cellTooltip(v, r, c);
+    const text = format ? format(v, r, c) : String(v);
+    return { heading: `${rowLabels[r]} · ${columnLabels[c]}`, rows: [{ label: "value", value: text }] };
+  };
+
   return (
-    <div>
-      <div className="overflow-auto" style={{ maxHeight }}>
-        <table className="border-separate" style={{ borderSpacing: 2 }}>
+    <div
+      className={offered != null ? "flex flex-col" : undefined}
+      style={offered != null ? { height: offered } : undefined}
+    >
+      <div
+        className={offered != null ? "min-h-0 flex-1 overflow-auto" : "overflow-auto"}
+        style={offered == null ? { maxHeight } : undefined}
+        onMouseLeave={hide}
+      >
+        <table className="border-separate" style={{ borderSpacing: gap }}>
           <thead>
             <tr>
               <th className="sticky left-0 top-0 z-20 bg-surface" />
               {columnLabels.map((label, c) => (
                 <th
                   key={c}
-                  className="sticky top-0 z-10 bg-surface px-0.5 text-center text-[9px] font-normal"
-                  style={{ color: palette.inkMuted, minWidth: 22 }}
-                  title={label}
+                  className="sticky top-0 z-10 cursor-default bg-surface p-0 text-center text-[9px] font-normal"
+                  style={{ color: palette.inkMuted, width: cellSize, minWidth: cellSize, maxWidth: cellSize }}
+                  onMouseEnter={(e) => show(e, headerContent("column", c))}
+                  onFocus={(e) => show(e, headerContent("column", c))}
+                  onBlur={hide}
+                  tabIndex={0}
                 >
-                  <span className="inline-block max-w-[52px] truncate align-bottom">{label}</span>
+                  <span className="block truncate" style={{ width: cellSize }}>
+                    {label}
+                  </span>
                 </th>
               ))}
             </tr>
@@ -1274,30 +1349,36 @@ export function HeatMatrix({
             {rowLabels.map((rowLabel, r) => (
               <tr key={r}>
                 <th
-                  className="sticky left-0 z-10 truncate bg-surface pr-1.5 text-right text-[10px] font-normal"
+                  className="sticky left-0 z-10 cursor-default truncate bg-surface pr-1.5 text-right text-[10px] font-normal"
                   style={{ color: palette.inkMuted, maxWidth: 140 }}
-                  title={rowLabel}
+                  onMouseEnter={(e) => show(e, headerContent("row", r))}
+                  onFocus={(e) => show(e, headerContent("row", r))}
+                  onBlur={hide}
+                  tabIndex={0}
                 >
                   {rowLabel}
                 </th>
-                {columnLabels.map((colLabel, c) => {
+                {columnLabels.map((_colLabel, c) => {
                   const v = values[r]?.[c] ?? 0;
                   const fill = fillOf(v);
-                  const text = format ? format(v, r, c) : String(v);
-                  const label = `${rowLabel} · ${colLabel} — ${text}`;
+                  const content = cellContent(r, c, v);
+                  const aria = `${content.heading} — ${content.rows.map((row) => `${row.value} ${row.label}`).join(", ")}`;
                   return (
                     <td key={c} style={{ padding: 0 }}>
                       <div
                         tabIndex={0}
                         role="img"
-                        aria-label={label}
-                        title={label}
-                        className="rounded-sm focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+                        aria-label={aria}
+                        onMouseEnter={(e) => show(e, content)}
+                        onFocus={(e) => show(e, content)}
+                        onBlur={hide}
+                        className="focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
                         style={{
-                          width: 18,
-                          height: 18,
+                          width: cellSize,
+                          height: cellSize,
+                          borderRadius: radius,
                           background: fill ?? "transparent",
-                          border: fill ? "none" : `1px solid ${palette.gridline}`,
+                          border: fill || !borders ? "none" : `1px solid ${palette.gridline}`,
                         }}
                       />
                     </td>
@@ -1320,6 +1401,18 @@ export function HeatMatrix({
             />
           ))}
           <span className="text-[10px] text-ink-muted">{full(max)}</span>
+        </div>
+      ) : null}
+      {tip ? (
+        <div
+          className="pointer-events-none fixed z-50"
+          style={{
+            left: tip.x,
+            top: tip.y,
+            transform: tip.flip ? "translate(-50%, -100%)" : "translate(-50%, 0)",
+          }}
+        >
+          <TooltipShell palette={palette} heading={tip.content.heading} rows={tip.content.rows} />
         </div>
       ) : null}
     </div>

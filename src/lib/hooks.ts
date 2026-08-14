@@ -80,10 +80,10 @@ export function useScopedQuery<T>(
   name: string,
   scope: Scope,
   fn: (db: Database) => Promise<T>,
-  options: { enabled?: boolean; staleTime?: number } = {},
+  options: { enabled?: boolean; staleTime?: number; /** Extra cache key when the query is not fully described by the page scope. */ key?: string } = {},
 ): UseQueryResult<T, Error> {
   return useQuery<T, Error, T, readonly unknown[]>({
-    queryKey: [name, scope.key],
+    queryKey: [name, scope.key, options.key ?? ""],
     enabled: (options.enabled ?? true) && scope.ready,
     queryFn: () => fn(scope.db!),
     staleTime: options.staleTime ?? 60_000,

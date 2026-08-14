@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useScope, useScopedQuery } from "../lib/hooks";
 import { ownershipCells } from "../lib/db/queries";
 import { allocateUnits, concentration } from "../lib/agg/concentration";
@@ -7,11 +7,38 @@ import { useApp } from "../lib/state/app";
 import { useVizPalette } from "../lib/viz/useVizPalette";
 import { seriesColorCycled } from "../lib/viz/palette";
 import { PageShell } from "../components/PageShell";
-import { HeatMatrix, Waffle, otherColor } from "../components/charts";
-import { Callout, Card, CardHeader, ChartCard, DataTable, StatTile, full } from "../components/ui";
+import { HeatMatrix, Waffle, otherColor, type HeatTooltipContent } from "../components/charts";
+import {
+  Callout,
+  Card,
+  CardHeader,
+  ChartCard,
+  DataTable,
+  FilterPopover,
+  LabeledControl,
+  Segmented,
+  Slider,
+  StatTile,
+  full,
+} from "../components/ui";
 
-const MATRIX_PEOPLE = 30;
-const MATRIX_REPOS = 24;
+const LIMITS = [12, 24, 40, 60] as const;
+type MatrixLimit = (typeof LIMITS)[number] | "all";
+type MatrixAxis = "people" | "repos";
+
+const DEFAULT_PEOPLE: MatrixLimit = 24;
+const DEFAULT_REPOS: MatrixLimit = 24;
+const DEFAULT_CELL = 18;
+const DEFAULT_GAP = 2;
+const DEFAULT_BORDERS = true;
+const CELL_MIN = 8;
+const CELL_MAX = 48;
+const GAP_MAX = 12;
+
+const LIMIT_OPTIONS: Array<{ value: MatrixLimit; label: string }> = [
+  ...LIMITS.map((n) => ({ value: n, label: String(n) })),
+  { value: "all", label: "All" },
+];
 
 function pct(share: number): string {
   if (share <= 0) return "0%";
@@ -24,11 +51,22 @@ function repoShort(fullName: string): string {
   return slash >= 0 ? fullName.slice(slash + 1) : fullName;
 }
 
+function take<T>(items: T[], limit: MatrixLimit): T[] {
+  return limit === "all" ? items : items.slice(0, limit);
+}
+
 export function Ownership() {
   const scope = useScope();
   const period = useApp((s) => s.period);
   const periodLabel = PERIODS.find((p) => p.id === period)?.label ?? "the selected period";
   const palette = useVizPalette();
+
+  const [peopleLimit, setPeopleLimit] = useState<MatrixLimit>(DEFAULT_PEOPLE);
+  const [repoLimit, setRepoLimit] = useState<MatrixLimit>(DEFAULT_REPOS);
+  const [rowsAre, setRowsAre] = useState<MatrixAxis>("people");
+  const [cellSize, setCellSize] = useState(DEFAULT_CELL);
+  const [gap, setGap] = useState(DEFAULT_GAP);
+  const [borders, setBorders] = useState(DEFAULT_BORDERS);
 
   const cells = useScopedQuery("ownership-cells", scope, (db) =>
     ownershipCells(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek, scope.logins),
@@ -95,21 +133,101 @@ export function Ownership() {
   }, [byPerson, palette]);
 
   const matrix = useMemo(() => {
-    const people = byPerson.slice(0, MATRIX_PEOPLE);
-    const repos = byRepo.slice(0, MATRIX_REPOS);
-    const lookup = new Map<string, number>();
-    for (const r of rows) lookup.set(`${r.login.toLowerCase()}|${r.repo_id}`, Number(r.commits));
-    const values = people.map((p) =>
-      repos.map((repo) => lookup.get(`${p.login.toLowerCase()}|${repo.repo_id}`) ?? 0),
-    );
+    const people = take(byPerson, peopleLimit);
+    const repos = take(byRepo, repoLimit);
+    const lookup = new Map<
+      string,
+      { commits: number; additions: number; deletions: number }
+    >();
+    for (const r of rows) {
+      lookup.set(`${r.login.toLowerCase()}|${r.repo_id}`, {
+        commits: Number(r.commits),
+        additions: Number(r.additions),
+        deletions: Number(r.deletions),
+      });
+    }
+
+    const peopleAsRows = rowsAre === "people";
+    const rowItems = peopleAsRows ? people : repos;
+    const colItems = peopleAsRows ? repos : people;
+
+    const cellAt = (r: number, c: number) => {
+      const person = peopleAsRows ? people[r] : people[c];
+      const repo = peopleAsRows ? repos[c] : repos[r];
+      return {
+        person,
+        repo,
+        cell: lookup.get(`${person.login.toLowerCase()}|${repo.repo_id}`) ?? {
+          commits: 0,
+          additions: 0,
+          deletions: 0,
+        },
+      };
+    };
+
+    const values = rowItems.map((_, r) => colItems.map((__, c) => cellAt(r, c).cell.commits));
+
+    const headerTooltip = (axis: "row" | "column", index: number): HeatTooltipContent => {
+      if ((axis === "row") === peopleAsRows) {
+        const p = people[index];
+        return {
+          heading: p.login,
+          rows: [
+            { label: "commits in range", value: full(p.commits) },
+            {
+              label: "of everyone",
+              value: pct(org.total === 0 ? 0 : p.commits / org.total),
+            },
+          ],
+        };
+      }
+      const repo = repos[index];
+      const c = concentration(repo.counts);
+      return {
+        heading: repo.full_name,
+        rows: [
+          { label: "commits in range", value: full(repo.commits) },
+          { label: "people", value: full(c.contributors) },
+          { label: "top person", value: repo.topLogin },
+          { label: "top 1 share", value: pct(c.top1) },
+        ],
+      };
+    };
+
+    const cellTooltip = (_value: number, r: number, c: number): HeatTooltipContent => {
+      const { person, repo, cell } = cellAt(r, c);
+      return {
+        heading: `${person.login} · ${repo.full_name}`,
+        rows: [
+          { label: "commits", value: cell.commits === 0 ? "none" : full(cell.commits) },
+          { label: "additions", value: full(cell.additions) },
+          { label: "deletions", value: full(cell.deletions) },
+          {
+            label: "of this person",
+            value: pct(person.commits === 0 ? 0 : cell.commits / person.commits),
+          },
+          {
+            label: "of this repository",
+            value: pct(repo.commits === 0 ? 0 : cell.commits / repo.commits),
+          },
+        ],
+      };
+    };
+
     return {
-      rowLabels: people.map((p) => p.login),
-      columnLabels: repos.map((r) => repoShort(r.full_name)),
+      rowLabels: peopleAsRows ? people.map((p) => p.login) : repos.map((r) => repoShort(r.full_name)),
+      columnLabels: peopleAsRows
+        ? repos.map((r) => repoShort(r.full_name))
+        : people.map((p) => p.login),
       values,
+      headerTooltip,
+      cellTooltip,
+      shownPeople: people.length,
+      shownRepos: repos.length,
       hiddenPeople: Math.max(0, byPerson.length - people.length),
       hiddenRepos: Math.max(0, byRepo.length - repos.length),
     };
-  }, [byPerson, byRepo, rows]);
+  }, [byPerson, byRepo, rows, peopleLimit, repoLimit, rowsAre, org.total]);
 
   const repoTable = useMemo(
     () =>
@@ -232,12 +350,10 @@ export function Ownership() {
       </div>
 
       <ChartCard
-        title="People × repositories"
+        title={rowsAre === "people" ? "People × repositories" : "Repositories × people"}
         subtitle={
           matrix.hiddenPeople || matrix.hiddenRepos
-            ? `Busiest ${full(Math.min(byPerson.length, MATRIX_PEOPLE))} people and ${full(
-                Math.min(byRepo.length, MATRIX_REPOS),
-              )} repositories — ${
+            ? `Busiest ${full(matrix.shownPeople)} people and ${full(matrix.shownRepos)} repositories — ${
                 matrix.hiddenPeople ? `${full(matrix.hiddenPeople)} more people` : ""
               }${matrix.hiddenPeople && matrix.hiddenRepos ? ", " : ""}${
                 matrix.hiddenRepos ? `${full(matrix.hiddenRepos)} more repositories` : ""
@@ -245,6 +361,87 @@ export function Ownership() {
             : `Every person and repository with commits in the period`
         }
         loading={cells.isFetching}
+        titleAfter={
+          <FilterPopover
+            label="Matrix options"
+            active={
+              peopleLimit !== DEFAULT_PEOPLE ||
+              repoLimit !== DEFAULT_REPOS ||
+              rowsAre !== "people" ||
+              cellSize !== DEFAULT_CELL ||
+              gap !== DEFAULT_GAP ||
+              borders !== DEFAULT_BORDERS
+            }
+            width={320}
+          >
+            <LabeledControl label="People">
+              <Segmented
+                ariaLabel="People to show"
+                stretch
+                variant="bare"
+                value={String(peopleLimit)}
+                options={LIMIT_OPTIONS.map((o) => ({ value: String(o.value), label: o.label }))}
+                onChange={(v) => setPeopleLimit(v === "all" ? "all" : (Number(v) as MatrixLimit))}
+              />
+            </LabeledControl>
+            <LabeledControl label="Repos">
+              <Segmented
+                ariaLabel="Repositories to show"
+                stretch
+                variant="bare"
+                value={String(repoLimit)}
+                options={LIMIT_OPTIONS.map((o) => ({ value: String(o.value), label: o.label }))}
+                onChange={(v) => setRepoLimit(v === "all" ? "all" : (Number(v) as MatrixLimit))}
+              />
+            </LabeledControl>
+            <LabeledControl label="Rows">
+              <Segmented
+                ariaLabel="Which axis is the rows"
+                stretch
+                variant="bare"
+                value={rowsAre}
+                options={[
+                  { value: "people", label: "People" },
+                  { value: "repos", label: "Repositories" },
+                ]}
+                onChange={setRowsAre}
+              />
+            </LabeledControl>
+            <LabeledControl label="Size">
+              <Slider
+                ariaLabel="Square size"
+                min={CELL_MIN}
+                max={CELL_MAX}
+                value={cellSize}
+                onChange={setCellSize}
+                format={(n) => `${n}px`}
+              />
+            </LabeledControl>
+            <LabeledControl label="Gap">
+              <Slider
+                ariaLabel="Space between squares"
+                min={0}
+                max={GAP_MAX}
+                value={gap}
+                onChange={setGap}
+                format={(n) => `${n}px`}
+              />
+            </LabeledControl>
+            <LabeledControl label="Border">
+              <Segmented
+                ariaLabel="Empty-square borders"
+                stretch
+                variant="bare"
+                value={borders ? "on" : "off"}
+                options={[
+                  { value: "on", label: "On" },
+                  { value: "off", label: "Off" },
+                ]}
+                onChange={(v) => setBorders(v === "on")}
+              />
+            </LabeledControl>
+          </FilterPopover>
+        }
         table={
           <DataTable
             rows={rows}
@@ -290,6 +487,11 @@ export function Ownership() {
           columnLabels={matrix.columnLabels}
           values={matrix.values}
           format={(v) => full(v)}
+          headerTooltip={matrix.headerTooltip}
+          cellTooltip={matrix.cellTooltip}
+          cellSize={cellSize}
+          gap={gap}
+          borders={borders}
         />
       </ChartCard>
 
