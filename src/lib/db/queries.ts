@@ -698,6 +698,49 @@ export async function contributorRepoBreakdown(
   );
 }
 
+/**
+ * Person × repository totals for the ownership matrix.
+ *
+ * One row per (login, repo) that had any commits in the window. Casings merge
+ * for the same reason as elsewhere: two spellings of one account would otherwise
+ * paint two rows that are the same person.
+ */
+export interface OwnershipCell {
+  login: string;
+  repo_id: number;
+  full_name: string;
+  commits: number;
+  additions: number;
+  deletions: number;
+}
+
+export async function ownershipCells(
+  db: Database,
+  repoIds: readonly number[],
+  fromWeek: number,
+  toWeek: number,
+  logins: Logins = null,
+): Promise<OwnershipCell[]> {
+  const p = new Params();
+  const from = p.add(fromWeek);
+  const to = p.add(toWeek);
+  const ids = p.in(repoIds);
+  const loginClause = p.loginFilter("cw.login", logins);
+  return db.select<OwnershipCell[]>(
+    `SELECT MIN(cw.login) AS login, cw.repo_id, r.full_name,
+            SUM(cw.commits)   AS commits,
+            SUM(cw.additions) AS additions,
+            SUM(cw.deletions) AS deletions
+     FROM contributor_weeks cw
+     JOIN repos r ON r.id = cw.repo_id
+     WHERE cw.week >= ${from} AND cw.week <= ${to} AND cw.repo_id IN ${ids}${loginClause}
+     GROUP BY LOWER(cw.login), cw.repo_id, r.full_name
+     HAVING commits > 0
+     ORDER BY commits DESC`,
+    p.values,
+  );
+}
+
 /** Earliest week with any data, for resolving the "all time" period. */
 export async function earliestWeek(
   db: Database,
@@ -1041,6 +1084,43 @@ export async function mergedPrDurations(
   );
 }
 
+/** Merged pull requests with size and cycle time, for the Pulse scatter. */
+export interface MergedPrPoint {
+  full_name: string;
+  number: number;
+  author: string | null;
+  title: string | null;
+  additions: number;
+  deletions: number;
+  comments: number;
+  reviews: number;
+  hours: number;
+}
+
+export async function mergedPrScatter(
+  db: Database,
+  repoIds: readonly number[],
+  fromIso: string,
+  toIso: string,
+  logins: Logins = null,
+): Promise<MergedPrPoint[]> {
+  const p = new Params();
+  const f = p.add(fromIso);
+  const t = p.add(toIso);
+  const ids = p.in(repoIds);
+  const author = p.loginFilter("pr.author", logins);
+  return db.select<MergedPrPoint[]>(
+    `SELECT r.full_name, pr.number, pr.author, pr.title,
+            pr.additions, pr.deletions, pr.comments, pr.reviews,
+            (julianday(pr.merged_at) - julianday(pr.created_at)) * 24.0 AS hours
+     FROM pull_requests pr
+     JOIN repos r ON r.id = pr.repo_id
+     WHERE pr.merged_at >= ${f} AND pr.merged_at <= ${t} AND pr.repo_id IN ${ids}${author}
+       AND pr.created_at IS NOT NULL`,
+    p.values,
+  );
+}
+
 /* ── Traffic (no contributor dimension exists) ──────────────────────────── */
 
 export async function trafficDaily(
@@ -1140,6 +1220,33 @@ export async function topTrafficReferrers(
      GROUP BY tr.referrer
      ORDER BY count DESC
      LIMIT ${lim}`,
+    p.values,
+  );
+}
+
+/**
+ * Referrer counts by snapshot day — the history GitHub discards after 14 days.
+ *
+ * Each sync writes one snapshot per repository, so this is a series of sync
+ * days rather than a true daily series. Still the only way to see share shift
+ * over months.
+ */
+export async function trafficReferrersOverTime(
+  db: Database,
+  repoIds: readonly number[],
+  fromDay: string,
+  toDay: string,
+): Promise<Array<{ day: string; referrer: string; count: number }>> {
+  const p = new Params();
+  const f = p.add(fromDay);
+  const t = p.add(toDay);
+  const ids = p.in(repoIds);
+  return db.select(
+    `SELECT snapshot_day AS day, referrer, SUM(count) AS count
+     FROM traffic_referrers
+     WHERE snapshot_day >= ${f} AND snapshot_day <= ${t} AND repo_id IN ${ids}
+     GROUP BY snapshot_day, referrer
+     ORDER BY snapshot_day, count DESC`,
     p.values,
   );
 }
@@ -1282,6 +1389,57 @@ export async function topDependencies(
      GROUP BY ecosystem, package
      ORDER BY repos DESC, package
      LIMIT ${lim}`,
+    p.values,
+  );
+}
+
+export interface DependabotAlertRow {
+  repo_id: number;
+  full_name: string;
+  number: number;
+  severity: string | null;
+  ecosystem: string | null;
+  package: string | null;
+  ghsa_id: string | null;
+  summary: string | null;
+  state: string | null;
+  created_at: string | null;
+  /** 1 when the same package is pinned to more than one version in-scope. */
+  drifting: number;
+}
+
+/**
+ * Open Dependabot alerts in the selected repositories, joined to SBOM drift
+ * so a vulnerable package that is also version-split across the org is visible.
+ */
+export async function dependabotAlertRows(
+  db: Database,
+  repoIds: readonly number[],
+): Promise<DependabotAlertRow[]> {
+  const p = new Params();
+  const ids = p.in(repoIds);
+  const ids2 = p.in(repoIds);
+  return db.select<DependabotAlertRow[]>(
+    `SELECT a.repo_id, r.full_name, a.number, a.severity, a.ecosystem, a.package,
+            a.ghsa_id, a.summary, a.state, a.created_at,
+            CASE WHEN d.versions > 1 THEN 1 ELSE 0 END AS drifting
+     FROM dependabot_alerts a
+     JOIN repos r ON r.id = a.repo_id
+     LEFT JOIN (
+       SELECT ecosystem, package, COUNT(DISTINCT version) AS versions
+       FROM dependencies
+       WHERE repo_id IN ${ids2} AND version IS NOT NULL
+       GROUP BY ecosystem, package
+     ) d ON d.ecosystem = a.ecosystem AND d.package = a.package
+     WHERE a.repo_id IN ${ids} AND (a.state IS NULL OR a.state = 'open')
+     ORDER BY CASE LOWER(COALESCE(a.severity, ''))
+                WHEN 'critical' THEN 0
+                WHEN 'high' THEN 1
+                WHEN 'medium' THEN 2
+                WHEN 'low' THEN 3
+                ELSE 4
+              END,
+              a.created_at DESC`,
     p.values,
   );
 }

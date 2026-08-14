@@ -137,6 +137,8 @@ export interface GhDependabotAlert {
   created_at: string;
   dismissed_at: string | null;
   fixed_at: string | null;
+  /** Present on the org-level alerts endpoint; absent on the per-repo one. */
+  repository?: { id: number; name: string; full_name: string } | null;
 }
 
 export interface GhSbomPackage {

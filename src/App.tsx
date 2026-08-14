@@ -19,13 +19,15 @@ import { Network } from "./pages/Network";
 import { Forks } from "./pages/Forks";
 import { ActionsUsage } from "./pages/ActionsUsage";
 import { ActionsPerformance } from "./pages/ActionsPerformance";
+import { Ownership } from "./pages/Ownership";
+import { People } from "./pages/People";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1 } },
 });
 
 /** Nav mirrors GitHub's Insights sidebar, in the same order. */
-const NAV = [
+const INSIGHTS = [
   { id: "pulse", label: "Pulse" },
   { id: "contributors", label: "Contributors" },
   { id: "community", label: "Community" },
@@ -39,6 +41,14 @@ const NAV = [
   { id: "actions-usage", label: "Actions usage metrics" },
   { id: "actions-performance", label: "Actions performance metrics" },
 ] as const;
+
+/** Views GitHub has no equivalent of — joins and history the website will not show. */
+const ORG_VIEWS = [
+  { id: "ownership", label: "Ownership" },
+  { id: "people", label: "People" },
+] as const;
+
+const NAV = [...INSIGHTS, ...ORG_VIEWS] as const;
 
 type PageId = (typeof NAV)[number]["id"] | "settings";
 
@@ -100,6 +110,44 @@ function Shell() {
   );
 }
 
+function NavGroup({
+  label,
+  items,
+  page,
+  onNavigate,
+}: {
+  label: string;
+  items: ReadonlyArray<{ id: PageId; label: string }>;
+  page: PageId;
+  onNavigate: (p: PageId) => void;
+}) {
+  return (
+    <li className="list-none">
+      <div className="px-2.5 pt-3 pb-1 text-[10px] font-medium uppercase tracking-wide text-ink-muted">
+        {label}
+      </div>
+      <ul>
+        {items.map((item) => (
+          <li key={item.id}>
+            <button
+              onClick={() => onNavigate(item.id)}
+              aria-current={page === item.id ? "page" : undefined}
+              className={
+                "mb-0.5 w-full rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors " +
+                (page === item.id
+                  ? "bg-wash-strong font-medium text-ink"
+                  : "text-ink-secondary hover:bg-wash hover:text-ink")
+              }
+            >
+              {item.label}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </li>
+  );
+}
+
 function Sidebar({ page, onNavigate }: { page: PageId; onNavigate: (p: PageId) => void }) {
   const org = useApp((s) => s.org);
   const lastSyncAt = useApp((s) => s.lastSyncAt);
@@ -118,22 +166,8 @@ function Sidebar({ page, onNavigate }: { page: PageId; onNavigate: (p: PageId) =
       </div>
 
       <ul className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-        {NAV.map((item) => (
-          <li key={item.id}>
-            <button
-              onClick={() => onNavigate(item.id)}
-              aria-current={page === item.id ? "page" : undefined}
-              className={
-                "mb-0.5 w-full rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors " +
-                (page === item.id
-                  ? "bg-wash-strong font-medium text-ink"
-                  : "text-ink-secondary hover:bg-wash hover:text-ink")
-              }
-            >
-              {item.label}
-            </button>
-          </li>
-        ))}
+        <NavGroup label="Insights" items={INSIGHTS} page={page} onNavigate={onNavigate} />
+        <NavGroup label="Org views" items={ORG_VIEWS} page={page} onNavigate={onNavigate} />
       </ul>
 
       <div className="border-t border-hairline p-2">
@@ -179,6 +213,10 @@ function Page({ page }: { page: PageId }) {
       return <ActionsUsage />;
     case "actions-performance":
       return <ActionsPerformance />;
+    case "ownership":
+      return <Ownership />;
+    case "people":
+      return <People />;
     case "settings":
       return <Settings />;
   }

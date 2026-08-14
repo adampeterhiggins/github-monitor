@@ -1,4 +1,4 @@
-import type { GitHubClient } from "./client";
+import { GitHubError, type GitHubClient } from "./client";
 import type {
   GhBranch,
   GhCodeFrequency,
@@ -253,19 +253,27 @@ export async function sbom(
   return res.data;
 }
 
+/**
+ * Open Dependabot alerts for the organisation.
+ *
+ * Returns `null` when the token cannot read them (missing `security_events`, or
+ * Dependabot is off) so a caller can leave the cache alone rather than wiping
+ * last-known alerts because this run was not allowed to see them. An empty
+ * array means the fetch succeeded and there are none.
+ */
 export async function dependabotAlerts(
   client: GitHubClient,
   org: string,
   signal?: AbortSignal,
-): Promise<GhDependabotAlert[]> {
+): Promise<GhDependabotAlert[] | null> {
   try {
     return await client.paginate<GhDependabotAlert>(
       `orgs/${enc(org)}/dependabot/alerts?per_page=100&state=open`,
-      { signal, allowForbidden: true, allowNotFound: true },
+      { signal },
     );
-  } catch {
-    // Needs security-events scope plus org-level Dependabot enabled.
-    return [];
+  } catch (err) {
+    if (err instanceof GitHubError && (err.status === 403 || err.status === 404)) return null;
+    return null;
   }
 }
 

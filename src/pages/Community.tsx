@@ -2,8 +2,8 @@ import { useMemo } from "react";
 import { useScope, useScopedQuery } from "../lib/hooks";
 import { communityRows, type CommunityRow } from "../lib/db/queries";
 import { PageShell } from "../components/PageShell";
-import { Meter, RankedBars } from "../components/charts";
-import { Card, CardHeader, ChartCard, DataTable, StatTile, full } from "../components/ui";
+import { HeatMatrix, Meter, RankedBars } from "../components/charts";
+import { ChartCard, DataTable, StatTile, full } from "../components/ui";
 
 const CHECKS: Array<{ key: keyof CommunityRow; label: string; short: string }> = [
   { key: "has_desc", label: "Description", short: "Desc" },
@@ -85,49 +85,58 @@ export function Community() {
           <RankedBars valueLabel="repositories" data={coverage} />
         </ChartCard>
 
-        <Card>
-          <CardHeader
-            title="Per-repository health"
-            subtitle="Sorted by GitHub's community health percentage"
+        <ChartCard
+          title="Coverage matrix"
+          subtitle="One row per repository, one column per checklist item — green is present"
+          loading={rows.isFetching}
+          table={
+            <DataTable
+              rows={data}
+              maxHeight={520}
+              rowKey={(r) => r.id}
+              initialSort={{ key: "health", dir: "desc" }}
+              columns={[
+                {
+                  key: "repo",
+                  header: "Repository",
+                  render: (r) => r.full_name,
+                  sortValue: (r) => r.full_name,
+                },
+                {
+                  key: "health",
+                  header: "Health",
+                  width: "150px",
+                  render: (r) => <Meter value={Number(r.health)} />,
+                  sortValue: (r) => Number(r.health),
+                },
+                ...CHECKS.map((c) => ({
+                  key: String(c.key),
+                  header: c.short,
+                  align: "right" as const,
+                  render: (r: CommunityRow) =>
+                    Number(r[c.key]) === 1 ? (
+                      <span aria-label={`${c.label}: present`} style={{ color: "var(--status-good)" }}>
+                        ✓
+                      </span>
+                    ) : (
+                      <span aria-label={`${c.label}: missing`} className="text-ink-muted">
+                        —
+                      </span>
+                    ),
+                  sortValue: (r: CommunityRow) => Number(r[c.key]),
+                })),
+              ]}
+            />
+          }
+        >
+          <HeatMatrix
+            mode="binary"
+            rowLabels={data.map((r) => r.full_name)}
+            columnLabels={CHECKS.map((c) => c.short)}
+            values={data.map((r) => CHECKS.map((c) => Number(r[c.key])))}
+            format={(v, _r, c) => (v > 0 ? CHECKS[c].label : `Missing ${CHECKS[c].label}`)}
           />
-          <DataTable
-            rows={data}
-            maxHeight={520}
-            rowKey={(r) => r.id}
-            initialSort={{ key: "health", dir: "desc" }}
-            columns={[
-              {
-                key: "repo",
-                header: "Repository",
-                render: (r) => r.full_name,
-                sortValue: (r) => r.full_name,
-              },
-              {
-                key: "health",
-                header: "Health",
-                width: "150px",
-                render: (r) => <Meter value={Number(r.health)} />,
-                sortValue: (r) => Number(r.health),
-              },
-              ...CHECKS.map((c) => ({
-                key: String(c.key),
-                header: c.short,
-                align: "right" as const,
-                render: (r: CommunityRow) =>
-                  Number(r[c.key]) === 1 ? (
-                    <span aria-label={`${c.label}: present`} style={{ color: "var(--status-good)" }}>
-                      ✓
-                    </span>
-                  ) : (
-                    <span aria-label={`${c.label}: missing`} className="text-ink-muted">
-                      —
-                    </span>
-                  ),
-                sortValue: (r: CommunityRow) => Number(r[c.key]),
-              })),
-            ]}
-          />
-        </Card>
+        </ChartCard>
       </div>
     </PageShell>
   );
