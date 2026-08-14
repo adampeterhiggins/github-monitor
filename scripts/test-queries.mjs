@@ -1358,6 +1358,63 @@ sqlite.exec(`INSERT INTO pull_requests (repo_id,number,author,title,state,create
   );
 }
 
+/* ── Roster (arrivals, last-seen, repos left cold) ───────────────────────── */
+
+{
+  const all = await q.rosterRows(db, IDS, W, W2);
+  const byLogin = new Map(all.map((r) => [r.login.toLowerCase(), r]));
+  T("roster merges login casings into one person", all.length === 3, `${all.length} rows`);
+  T(
+    "first and last week span every week with commits",
+    Number(byLogin.get("claude").first_week) === W && Number(byLogin.get("claude").last_week) === W2,
+    JSON.stringify(byLogin.get("claude")),
+  );
+
+  const late = await q.rosterRows(db, IDS, W2, W2);
+  const lateBy = new Map(late.map((r) => [r.login.toLowerCase(), r]));
+  T(
+    "a person with no commits in the window is still listed, with zero period commits",
+    Number(lateBy.get("someoneelse").commits) === 0 && Number(lateBy.get("someoneelse").last_week) === W,
+    JSON.stringify(lateBy.get("someoneelse")),
+  );
+  T(
+    "someoneelse left o/c cold — they were the only committer in its last week",
+    Number(lateBy.get("someoneelse").left_repos) === 1,
+    JSON.stringify(lateBy.get("someoneelse")),
+  );
+  T(
+    "a shared last week is not left cold",
+    Number(lateBy.get("claude").left_repos) === 0,
+    JSON.stringify(lateBy.get("claude")),
+  );
+  T(
+    "roster honours the contributor filter, casing and all",
+    (await q.rosterRows(db, IDS, W, W2, ["CLAUDE"])).every((r) => r.login.toLowerCase() === "claude"),
+  );
+  T("no repositories selected yields no roster", (await q.rosterRows(db, [], W, W2)).length === 0);
+}
+
+/* ── Open pull requests ───────────────────────────────────────────────────── */
+
+{
+  const open = await q.openPullRequests(db, IDS, "2026-05-11T00:00:00Z");
+  T("open PRs exclude merged ones", open.length === 1 && Number(open[0].number) === 2, JSON.stringify(open));
+  T(
+    "age is created-to-asOf, so a pinned clock is testable",
+    Number(open[0].age_hours) === 7 * 24,
+    String(open[0].age_hours),
+  );
+  T(
+    "open PRs honour the contributor filter",
+    (await q.openPullRequests(db, IDS, "2026-05-11T00:00:00Z", ["someoneelse"])).length === 1,
+  );
+  T(
+    "an asOf before the PR was opened excludes it",
+    (await q.openPullRequests(db, IDS, "2026-05-03T00:00:00Z")).length === 0,
+  );
+  T("no repositories selected yields no open PRs", (await q.openPullRequests(db, [], "2026-05-11T00:00:00Z")).length === 0);
+}
+
 /* ── Referrer history ─────────────────────────────────────────────────────── */
 
 sqlite.exec(`INSERT INTO traffic_referrers (repo_id,snapshot_day,referrer,count,uniques) VALUES

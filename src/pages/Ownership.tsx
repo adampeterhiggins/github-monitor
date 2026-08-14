@@ -1,13 +1,13 @@
 import { useMemo, useState } from "react";
 import { useScope, useScopedQuery } from "../lib/hooks";
-import { ownershipCells } from "../lib/db/queries";
+import { contributorWeeklyByLogin, ownershipCells } from "../lib/db/queries";
 import { allocateUnits, concentration } from "../lib/agg/concentration";
-import { PERIODS, formatDate } from "../lib/agg/weeks";
+import { PERIODS, axisWeeksFor, dayKey, formatDate } from "../lib/agg/weeks";
 import { useApp } from "../lib/state/app";
 import { useVizPalette } from "../lib/viz/useVizPalette";
 import { seriesColorCycled } from "../lib/viz/palette";
 import { PageShell } from "../components/PageShell";
-import { HeatMatrix, Waffle, otherColor, type HeatTooltipContent } from "../components/charts";
+import { DailyLines, HeatMatrix, Waffle, otherColor, type HeatTooltipContent } from "../components/charts";
 import {
   Callout,
   Card,
@@ -71,6 +71,15 @@ export function Ownership() {
   const cells = useScopedQuery("ownership-cells", scope, (db) =>
     ownershipCells(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek, scope.logins),
   );
+  const weekly = useScopedQuery("ownership-weekly", scope, (db) =>
+    contributorWeeklyByLogin(
+      db,
+      scope.repoIds,
+      scope.range.fromWeek,
+      scope.range.toWeek,
+      scope.logins,
+    ),
+  );
 
   const rows = cells.data ?? [];
 
@@ -111,6 +120,29 @@ export function Ownership() {
   }, [rows]);
 
   const org = useMemo(() => concentration(byPerson.map((p) => p.commits)), [byPerson]);
+
+  const overTime = useMemo(() => {
+    const byWeek = new Map<number, number[]>();
+    for (const r of weekly.data ?? []) {
+      const commits = Number(r.commits);
+      if (commits <= 0) continue;
+      const list = byWeek.get(r.week) ?? [];
+      list.push(commits);
+      byWeek.set(r.week, list);
+    }
+    return axisWeeksFor(scope.range.fromWeek, scope.range.toWeek, [...byWeek.keys()]).map((week) => {
+      const c = concentration(byWeek.get(week) ?? []);
+      return {
+        week,
+        day: dayKey(week * 1000),
+        top1: Math.round(c.top1 * 100),
+        top3: Math.round(c.top3 * 100),
+        top5: Math.round(c.top5 * 100),
+        commits: c.total,
+        people: c.contributors,
+      };
+    });
+  }, [weekly.data, scope.range.fromWeek, scope.range.toWeek]);
 
   const waffle = useMemo(() => {
     const top = byPerson.slice(0, 8);
@@ -264,6 +296,75 @@ export function Ownership() {
           hint={`${full(org.total)} commits in range`}
         />
       </div>
+
+      <ChartCard
+        title="Concentration over time"
+        subtitle="Share of that week's commits held by the most active people"
+        loading={weekly.isFetching}
+        table={
+          <DataTable
+            rows={overTime.filter((d) => d.commits > 0)}
+            maxHeight={320}
+            empty="No weekly commits in this selection"
+            rowKey={(r) => r.week}
+            initialSort={{ key: "week", dir: "desc" }}
+            columns={[
+              {
+                key: "week",
+                header: "Week of",
+                render: (r) => formatDate(r.week * 1000),
+                sortValue: (r) => r.week,
+              },
+              {
+                key: "top1",
+                header: "Top person",
+                align: "right",
+                render: (r) => `${r.top1}%`,
+                sortValue: (r) => r.top1,
+              },
+              {
+                key: "top3",
+                header: "Top 3",
+                align: "right",
+                render: (r) => `${r.top3}%`,
+                sortValue: (r) => r.top3,
+              },
+              {
+                key: "top5",
+                header: "Top 5",
+                align: "right",
+                render: (r) => `${r.top5}%`,
+                sortValue: (r) => r.top5,
+              },
+              {
+                key: "people",
+                header: "People",
+                align: "right",
+                render: (r) => full(r.people),
+                sortValue: (r) => r.people,
+              },
+              {
+                key: "commits",
+                header: "Commits",
+                align: "right",
+                render: (r) => full(r.commits),
+                sortValue: (r) => r.commits,
+              },
+            ]}
+          />
+        }
+      >
+        <DailyLines
+          data={overTime}
+          series={[
+            { key: "top1", label: "Top person", slot: 0 },
+            { key: "top3", label: "Top 3", slot: 1 },
+            { key: "top5", label: "Top 5", slot: 2 },
+          ]}
+          height={240}
+          valueFormatter={(n) => `${n}%`}
+        />
+      </ChartCard>
 
       <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
         <ChartCard

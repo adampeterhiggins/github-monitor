@@ -21,6 +21,8 @@ import { ActionsUsage } from "./pages/ActionsUsage";
 import { ActionsPerformance } from "./pages/ActionsPerformance";
 import { Ownership } from "./pages/Ownership";
 import { People } from "./pages/People";
+import { Roster } from "./pages/Roster";
+import { Scorecard } from "./pages/Scorecard";
 
 const queryClient = new QueryClient({
   defaultOptions: { queries: { refetchOnWindowFocus: false, retry: 1 } },
@@ -46,6 +48,8 @@ const INSIGHTS = [
 const ORG_VIEWS = [
   { id: "ownership", label: "Ownership" },
   { id: "people", label: "People" },
+  { id: "roster", label: "Roster" },
+  { id: "scorecard", label: "Scorecard" },
 ] as const;
 
 const NAV = [...INSIGHTS, ...ORG_VIEWS] as const;
@@ -217,6 +221,10 @@ function Page({ page }: { page: PageId }) {
       return <Ownership />;
     case "people":
       return <People />;
+    case "roster":
+      return <Roster />;
+    case "scorecard":
+      return <Scorecard />;
     case "settings":
       return <Settings />;
   }

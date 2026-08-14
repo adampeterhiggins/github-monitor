@@ -3,6 +3,7 @@ import { useScope, useScopedQuery } from "../lib/hooks";
 import {
   mergedPrDurations,
   mergedPrScatter,
+  openPullRequests,
   pulseAuthors,
   pulseByRepo,
   pulseDaily,
@@ -65,6 +66,9 @@ export function Pulse() {
   const scatter = useScopedQuery("pulse-scatter", scope, (db) =>
     mergedPrScatter(db, scope.repoIds, scope.fromIso, scope.toIso, scope.logins),
   );
+  const openPrs = useScopedQuery("pulse-open", scope, (db) =>
+    openPullRequests(db, scope.repoIds, new Date().toISOString(), scope.logins),
+  );
 
   const s = summary.data;
 
@@ -84,6 +88,41 @@ export function Pulse() {
 
   const p50 = percentile(leadTimes, 0.5);
   const p90 = percentile(leadTimes, 0.9);
+
+  const openRows = openPrs.data ?? [];
+  const openAges = openRows
+    .map((r) => Number(r.age_hours))
+    .filter((h) => Number.isFinite(h) && h >= 0);
+  const openP50 = percentile(openAges, 0.5);
+  const openP90 = percentile(openAges, 0.9);
+  const olderThan30 = openAges.filter((h) => h >= 30 * 24).length;
+
+  const openByAuthor = useMemo(() => {
+    const map = new Map<string, { author: string; count: number; p90: number[] }>();
+    for (const r of openRows) {
+      const author = r.author ?? "(none)";
+      const seen = map.get(author) ?? { author, count: 0, p90: [] };
+      seen.count += 1;
+      seen.p90.push(Number(r.age_hours));
+      map.set(author, seen);
+    }
+    return [...map.values()]
+      .map((r) => ({ ...r, p90: percentile(r.p90, 0.9) }))
+      .sort((a, b) => b.count - a.count || a.author.localeCompare(b.author));
+  }, [openRows]);
+
+  const openByRepo = useMemo(() => {
+    const map = new Map<string, { full_name: string; count: number; ages: number[] }>();
+    for (const r of openRows) {
+      const seen = map.get(r.full_name) ?? { full_name: r.full_name, count: 0, ages: [] };
+      seen.count += 1;
+      seen.ages.push(Number(r.age_hours));
+      map.set(r.full_name, seen);
+    }
+    return [...map.values()]
+      .map((r) => ({ ...r, p90: percentile(r.ages, 0.9) }))
+      .sort((a, b) => b.p90 - a.p90 || b.count - a.count);
+  }, [openRows]);
 
   return (
     <PageShell
@@ -292,6 +331,151 @@ export function Pulse() {
             />
           </ChartCard>
         </div>
+
+        <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+          <ChartCard
+            title="Open pull requests by author"
+            subtitle="Still open in the latest sync, not a historical snapshot of the period"
+            loading={openPrs.isFetching}
+            table={
+              <DataTable
+                rows={openByAuthor}
+                maxHeight={300}
+                empty="No open pull requests in this selection"
+                rowKey={(r) => r.author}
+                initialSort={{ key: "count", dir: "desc" }}
+                columns={[
+                  { key: "author", header: "Author", render: (r) => r.author, sortValue: (r) => r.author },
+                  {
+                    key: "count",
+                    header: "Open",
+                    align: "right",
+                    render: (r) => full(r.count),
+                    sortValue: (r) => r.count,
+                  },
+                  {
+                    key: "p90",
+                    header: "Age p90",
+                    align: "right",
+                    render: (r) => hoursLabel(r.p90),
+                    sortValue: (r) => r.p90,
+                  },
+                ]}
+              />
+            }
+          >
+            <RankedBars
+              valueLabel="open"
+              data={openByAuthor.slice(0, 12).map((a) => ({ name: a.author, value: a.count }))}
+            />
+          </ChartCard>
+
+          <ChartCard
+            title="Open pull requests by repository"
+            subtitle={`${full(openRows.length)} still open · median age ${hoursLabel(openP50)} · ${full(olderThan30)} older than 30 days`}
+            loading={openPrs.isFetching}
+            table={
+              <DataTable
+                rows={openByRepo}
+                maxHeight={300}
+                empty="No open pull requests in this selection"
+                rowKey={(r) => r.full_name}
+                initialSort={{ key: "p90", dir: "desc" }}
+                columns={[
+                  { key: "repo", header: "Repository", render: (r) => r.full_name, sortValue: (r) => r.full_name },
+                  {
+                    key: "count",
+                    header: "Open",
+                    align: "right",
+                    render: (r) => full(r.count),
+                    sortValue: (r) => r.count,
+                  },
+                  {
+                    key: "p90",
+                    header: "Age p90",
+                    align: "right",
+                    render: (r) => hoursLabel(r.p90),
+                    sortValue: (r) => r.p90,
+                  },
+                ]}
+              />
+            }
+          >
+            <RankedBars
+              valueLabel="age p90 (hours)"
+              data={openByRepo.slice(0, 12).map((r) => ({
+                name: r.full_name.split("/").pop() ?? r.full_name,
+                value: Math.round(r.p90),
+              }))}
+            />
+          </ChartCard>
+        </div>
+
+        <ChartCard
+          title="Still open"
+          subtitle="Age is measured to today. The period does not hide older open work — that is the point."
+          loading={openPrs.isFetching}
+          table={
+            <DataTable
+              rows={openRows}
+              maxHeight={360}
+              empty="No open pull requests in this selection"
+              rowKey={(r) => `${r.full_name}#${r.number}`}
+              initialSort={{ key: "age", dir: "desc" }}
+              columns={[
+                {
+                  key: "pr",
+                  header: "Pull request",
+                  render: (r) => (
+                    <span>
+                      {r.full_name}#{r.number}
+                      {r.title ? <span className="text-ink-secondary"> — {r.title}</span> : null}
+                    </span>
+                  ),
+                  sortValue: (r) => `${r.full_name}#${r.number}`,
+                },
+                {
+                  key: "author",
+                  header: "Author",
+                  render: (r) => r.author ?? "—",
+                  sortValue: (r) => r.author ?? "",
+                },
+                {
+                  key: "age",
+                  header: "Age",
+                  align: "right",
+                  render: (r) => hoursLabel(Number(r.age_hours)),
+                  sortValue: (r) => Number(r.age_hours),
+                },
+                {
+                  key: "size",
+                  header: "Lines",
+                  align: "right",
+                  render: (r) => full(Number(r.additions) + Number(r.deletions)),
+                  sortValue: (r) => Number(r.additions) + Number(r.deletions),
+                },
+              ]}
+            />
+          }
+        >
+          <div className="flex flex-col gap-4">
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              <StatTile label="Open" value={openRows.length} hint="Still open in the cache" />
+              <StatTile label="Median age" value={hoursLabel(openP50)} />
+              <StatTile label="90th percentile" value={hoursLabel(openP90)} hint="Oldest tenth" />
+              <StatTile label="Older than 30 days" value={olderThan30} />
+            </div>
+            <RankedBars
+              valueLabel="open"
+              data={[
+                { name: "0–7 days", value: openAges.filter((h) => h < 7 * 24).length },
+                { name: "7–30 days", value: openAges.filter((h) => h >= 7 * 24 && h < 30 * 24).length },
+                { name: "30–90 days", value: openAges.filter((h) => h >= 30 * 24 && h < 90 * 24).length },
+                { name: "90+ days", value: openAges.filter((h) => h >= 90 * 24).length },
+              ].filter((d) => d.value > 0)}
+            />
+          </div>
+        </ChartCard>
 
         <ChartCard
           title="Size versus time to merge"
