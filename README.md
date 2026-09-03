@@ -296,17 +296,31 @@ The sync exploits this rather than fighting it:
 
 Polling each repository to completion in turn would serialise all that waiting.
 
-### Resuming an interrupted sync
+### Incremental sync and resuming interrupted work
 
 Every (repository, endpoint) pair's outcome is written to `sync_state` as it
 completes — including when a run is cancelled — so an interrupted sync leaves an
-accurate record of how far it got. **Settings → Sync** then offers:
+accurate record of how far it got. The same record contains each endpoint's last
+successful fetch, so normal refreshes do not start from scratch. **Settings →
+Sync** offers:
 
 - **Resume (N)** — fetches only the outstanding items and leaves finished work
   alone. Shown only when there is both finished and unfinished work, with a
   breakdown of what the N is made of.
-- **Full re-sync** — ignores the record and re-fetches everything, which is what
-  you want when the data itself has gone stale rather than incomplete.
+- **Sync changes** — the normal refresh. Actions, pull requests and issues start
+  from their own last-successful checkpoint (with a small overlap so boundary
+  events cannot be missed). Commit statistics and repository snapshots are only
+  downloaded for repositories changed since that endpoint last succeeded.
+- **Full re-sync** — explicitly ignores every checkpoint and re-fetches everything.
+  This is mainly for recovery and for changed token permissions.
+
+Traffic is the intentional exception: GitHub only retains its rolling 14-day
+window, so it is sampled every time. PR and issue pagination is ordered by update
+time rather than creation time; this ensures an older item that was merged, closed,
+or commented on after the previous sync is refreshed without walking the full
+history. Endpoints which GitHub only exposes as aggregate snapshots still return a
+complete payload when their repository has changed, but unchanged repositories no
+longer incur those downloads.
 
 What counts as finished:
 
@@ -320,10 +334,10 @@ What counts as finished:
 | *(no record)* | **attempt** | new repository, or a run that stopped early |
 
 Because `forbidden` is treated as finished, **run a full re-sync after changing
-the token** — a resume would keep skipping repositories the old token could not
-read.
+the token** — both resume and incremental sync keep skipping repositories the old
+token could not read.
 
-The decision is a single exported function, `shouldSkip(status, mode)`, tested
+The resume and refresh decisions are exported as small pure functions and tested
 directly. Skipping something that had not actually finished is the one way this
 feature could quietly lose data, so it is worth isolating. The per-endpoint poll budget is 7 minutes because a
 very active repository (`focaldata/orchestra`) was observed returning 202

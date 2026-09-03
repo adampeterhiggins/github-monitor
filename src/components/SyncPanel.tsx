@@ -61,6 +61,7 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
         org,
         mode,
         endpoints: selectedEndpoints,
+        repoIds: selectedRepoIds,
         includeArchived,
         signal: controller.signal,
         onProgress: setSync,
@@ -76,13 +77,16 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
       setSyncing(false);
       abortRef.current = null;
     }
-  }, [db, token, org, selectedEndpoints, includeArchived, setSync, setSyncing, refreshRepos, reloadSyncTime, queryClient, work]);
+  }, [db, token, org, selectedEndpoints, selectedRepoIds, includeArchived, setSync, setSyncing, refreshRepos, reloadSyncTime, queryClient, work]);
 
   const cancel = () => abortRef.current?.abort();
 
   const grouped = useMemo(() => groupErrors(sync?.errors ?? []), [sync?.errors]);
 
   const pct = sync && sync.total > 0 ? Math.round((sync.done / sync.total) * 100) : 0;
+  const recorded = work.data
+    ? work.data.complete + work.data.pending + work.data.errored
+    : 0;
 
   return (
     <Card>
@@ -102,7 +106,7 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
                 <Button
                   variant="primary"
                   onClick={() => void start("resume")}
-                  disabled={!db || !token || !org}
+                  disabled={!db || !token || !org || selectedRepoIds.length === 0}
                   title={`Fetch only the ${full(work.data.outstanding)} outstanding items, keeping the ${full(work.data.complete)} already done`}
                 >
                   Resume ({full(work.data.outstanding)})
@@ -110,12 +114,22 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
               ) : null}
               <Button
                 variant={work.data?.resumable ? "default" : "primary"}
-                onClick={() => void start("full")}
-                disabled={!db || !token || !org}
-                title="Re-fetch everything, including items already synced"
+                onClick={() => void start("incremental")}
+                disabled={!db || !token || !org || selectedRepoIds.length === 0}
+                title="Fetch changes since each endpoint last synced"
               >
-                {work.data?.resumable ? "Full re-sync" : "Sync now"}
+                {recorded > 0 ? "Sync changes" : "Sync now"}
               </Button>
+              {recorded > 0 ? (
+                <Button
+                  variant="default"
+                  onClick={() => void start("full")}
+                  disabled={!db || !token || !org || selectedRepoIds.length === 0}
+                  title="Ignore checkpoints and re-fetch every selected endpoint"
+                >
+                  Full re-sync
+                </Button>
+              ) : null}
             </>
           )
         }
@@ -171,15 +185,16 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
             {work.data.pending > 0 ? ` ${full(work.data.pending)} GitHub was still computing,` : ""}
             {work.data.errored > 0 ? ` ${full(work.data.errored)} that failed,` : ""}
             {work.data.never > 0 ? ` ${full(work.data.never)} not yet attempted,` : ""} and leaves the
-            rest alone. A full re-sync repeats everything.
+            rest alone. <strong className="text-ink">Sync changes</strong> also refreshes data that
+            changed since its last successful fetch. A full re-sync repeats everything.
           </Callout>
         </div>
       ) : null}
 
       {!syncing && work.data && !work.data.resumable && work.data.complete > 0 ? (
         <p className="mb-3 text-[12px] text-ink-secondary">
-          All {full(work.data.complete)} items are synced for the current selection. A full re-sync
-          refreshes them.
+          All {full(work.data.complete)} items are synced for the current selection. Sync changes
+          uses their individual checkpoints; full re-sync ignores them.
         </p>
       ) : null}
 
