@@ -291,10 +291,15 @@ The sync exploits this rather than fighting it:
 
 1. **Warm pass** — one request per repository/endpoint, without waiting. GitHub
    starts ~80 background jobs concurrently.
-2. **Collect pass** — poll only what was still computing, with backoff inside a
-   120-second-per-endpoint budget.
+2. **Concurrent work queues** — computed statistics, ordinary REST endpoints and
+   Pulse all advance through one six-request client limit. Statistics are checked
+   in fair rounds: every pending endpoint gets one poll before any gets another,
+   and no worker slot is held while an endpoint backs off.
 
-Polling each repository to completion in turn would serialise all that waiting.
+This lets traffic, Actions, dependencies, pull requests and issues fill the gaps
+while GitHub computes statistics. Polling each repository to completion in turn
+would serialise all that waiting; merely raising the HTTP limit would invite
+GitHub's secondary rate limiting instead.
 
 ### Incremental sync and resuming interrupted work
 
