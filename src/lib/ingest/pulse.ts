@@ -21,6 +21,7 @@ interface PrNode {
   title: string;
   state: "OPEN" | "CLOSED" | "MERGED";
   createdAt: string;
+  updatedAt: string;
   mergedAt: string | null;
   closedAt: string | null;
   additions: number;
@@ -35,6 +36,7 @@ interface IssueNode {
   title: string;
   state: "OPEN" | "CLOSED";
   createdAt: string;
+  updatedAt: string;
   closedAt: string | null;
   author: { login: string } | null;
   comments: { totalCount: number };
@@ -51,13 +53,14 @@ type IssuePage = { repository: { issues: Connection<IssueNode> } | null };
 const PR_QUERY = `
 query PullRequests($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
-    pullRequests(first: 100, orderBy: { field: CREATED_AT, direction: DESC }, after: $cursor) {
+    pullRequests(first: 100, orderBy: { field: UPDATED_AT, direction: DESC }, after: $cursor) {
       pageInfo { hasNextPage endCursor }
       nodes {
         number
         title
         state
         createdAt
+        updatedAt
         mergedAt
         closedAt
         additions
@@ -73,13 +76,14 @@ query PullRequests($owner: String!, $name: String!, $cursor: String) {
 const ISSUE_QUERY = `
 query Issues($owner: String!, $name: String!, $cursor: String) {
   repository(owner: $owner, name: $name) {
-    issues(first: 100, orderBy: { field: CREATED_AT, direction: DESC }, after: $cursor) {
+    issues(first: 100, orderBy: { field: UPDATED_AT, direction: DESC }, after: $cursor) {
       pageInfo { hasNextPage endCursor }
       nodes {
         number
         title
         state
         createdAt
+        updatedAt
         closedAt
         author { login }
         comments { totalCount }
@@ -95,15 +99,17 @@ export interface SyncPulseOptions {
   client: GitHubClient;
   db: Database;
   repos: PulseRepo[];
-  /** Stop paginating once records predate this ISO timestamp. */
+  /** Stop paginating once records were last updated before this timestamp. */
   sinceIso: string;
+  /** Optional per-repository checkpoints used by incremental refreshes. */
+  sinceIsoByRepo?: ReadonlyMap<number, string>;
   signal?: AbortSignal;
-  onRepoDone?: (fullName: string) => void;
+  onRepoDone?: (fullName: string) => void | Promise<void>;
   onError?: (fullName: string, message: string) => void;
 }
 
 export async function syncPulse(options: SyncPulseOptions): Promise<void> {
-  const { client, db, repos, sinceIso, signal } = options;
+  const { client, db, repos, sinceIso, sinceIsoByRepo, signal } = options;
 
   // GraphQL is heavier per call than REST, so keep the fan-out modest.
   const concurrency = 4;
@@ -116,13 +122,13 @@ export async function syncPulse(options: SyncPulseOptions): Promise<void> {
       if (i >= repos.length) return;
       const repo = repos[i];
       try {
-        await syncRepoPulse(client, db, repo, sinceIso, signal);
+        await syncRepoPulse(client, db, repo, sinceIsoByRepo?.get(repo.id) ?? sinceIso, signal);
       } catch (err) {
         if ((err as Error)?.name !== "AbortError") {
           options.onError?.(repo.fullName, (err as Error)?.message ?? String(err));
         }
       } finally {
-        options.onRepoDone?.(repo.fullName);
+        await options.onRepoDone?.(repo.fullName);
       }
     }
   });
@@ -153,9 +159,9 @@ async function syncRepoPulse(
 
     let reachedCutoff = false;
     for (const pr of conn.nodes) {
-      if (pr.createdAt < sinceIso) {
-        // Ordered newest-first, so the first old record ends the walk. Keep it:
-        // a PR opened before the window can still have merged inside it.
+      if (pr.updatedAt < sinceIso) {
+        // Ordered by last update, so the first old record ends the walk. Keep it
+        // to make the cutoff inclusive and harmlessly overlap adjacent runs.
         reachedCutoff = true;
       }
       prRows.push([
@@ -190,7 +196,7 @@ async function syncRepoPulse(
 
     let reachedCutoff = false;
     for (const issue of conn.nodes) {
-      if (issue.createdAt < sinceIso) reachedCutoff = true;
+      if (issue.updatedAt < sinceIso) reachedCutoff = true;
       issueRows.push([
         repo.id,
         issue.number,

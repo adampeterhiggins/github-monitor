@@ -542,9 +542,8 @@ function SweepProgress({
  * Per-row sync status and action.
  *
  * "Resume" and "Re-sync" are distinguished deliberately: resuming a repository
- * fetches only its outstanding endpoints, whereas re-syncing a complete one has
- * to redo all of them, and the button should not hide which of those it is about
- * to do.
+ * fetches only its outstanding endpoints, whereas re-syncing a complete one
+ * checks for changes since each endpoint last succeeded.
  */
 function RepoSyncCell({
   repoId,
@@ -559,7 +558,7 @@ function RepoSyncCell({
   active: boolean;
   busy: boolean;
   label: string | null;
-  onSync: (repoId: number, mode: "resume" | "full") => Promise<void>;
+  onSync: (repoId: number, mode: "resume" | "incremental") => Promise<void>;
 }) {
   if (active) {
     return (
@@ -592,10 +591,10 @@ function RepoSyncCell({
       <Button
         variant="ghost"
         disabled={busy}
-        onClick={() => void onSync(repoId, state === "complete" ? "full" : "resume")}
+        onClick={() => void onSync(repoId, state === "complete" ? "incremental" : "resume")}
         title={
           state === "complete"
-            ? "Re-fetch everything for this repository"
+            ? "Fetch changes since this repository last synced"
             : "Fetch only what is outstanding for this repository"
         }
       >

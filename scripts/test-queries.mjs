@@ -454,6 +454,68 @@ T("resume RETRIES pending (GitHub was still computing)", !shouldSkip("pending", 
 T("resume RETRIES error", !shouldSkip("error", "resume"));
 T("resume attempts never-recorded pairs", !shouldSkip(undefined, "resume"));
 T("full mode redoes everything", ["ok","empty","forbidden","pending","error"].every((st) => !shouldSkip(st, "full")));
+T("incremental mode does not use resume's terminal-status shortcut", !shouldSkip("ok", "incremental"));
+
+/* Incremental refresh decisions */
+const quietRepo = {
+  pushed_at: "2026-08-10T00:00:00Z",
+  updated_at: "2026-08-10T00:00:00Z",
+};
+const changedRepo = {
+  pushed_at: "2026-08-12T00:00:00Z",
+  updated_at: "2026-08-12T00:00:00Z",
+};
+const okCheckpoint = {
+  status: "ok",
+  lastOkAt: "2026-08-11T00:00:00Z",
+  lastAttemptAt: "2026-08-11T00:00:00Z",
+};
+T(
+  "incremental stats skip a repository with no pushes since its checkpoint",
+  !sync.shouldFetchIncrementally("contributors", okCheckpoint, quietRepo),
+);
+T(
+  "incremental stats refresh a repository pushed since its checkpoint",
+  sync.shouldFetchIncrementally("contributors", okCheckpoint, changedRepo),
+);
+T(
+  "incremental metadata refreshes after the repository update timestamp",
+  sync.shouldFetchIncrementally("community", okCheckpoint, changedRepo),
+);
+T(
+  "incremental traffic, Actions and pulse are sampled on every run",
+  ["traffic", "actions", "pulse"].every((e) =>
+    sync.shouldFetchIncrementally(e, okCheckpoint, quietRepo)),
+);
+T(
+  "incremental refresh retries failed work",
+  sync.shouldFetchIncrementally(
+    "contributors",
+    { ...okCheckpoint, status: "error" },
+    quietRepo,
+  ),
+);
+T(
+  "incremental refresh leaves forbidden work for an explicit full sync",
+  !sync.shouldFetchIncrementally(
+    "contributors",
+    { ...okCheckpoint, status: "forbidden" },
+    changedRepo,
+  ),
+);
+T(
+  "incremental refresh fetches never-recorded work",
+  sync.shouldFetchIncrementally("contributors", undefined, quietRepo),
+);
+T(
+  "incremental cutoff starts ten minutes before the endpoint checkpoint",
+  sync.incrementalSince("2026-08-11T12:00:00Z", 365) === "2026-08-11T11:50:00.000Z",
+);
+T(
+  "first-sync cutoff falls back to the configured history window",
+  sync.incrementalSince(null, 2, Date.parse("2026-08-11T12:00:00Z")) ===
+    "2026-08-09T12:00:00.000Z",
+);
 
 /* ── Saved selections ─────────────────────────────────────────────────────── */
 

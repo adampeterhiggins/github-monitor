@@ -18,8 +18,8 @@ import {
  * The whole-org sync is all-or-nothing, which is awkward when a single repository
  * is the one that failed or is still being computed by GitHub — re-running
  * everything to fix one repository is a lot of wasted requests. `runSync` already
- * accepts a repo id list, so a single-repository run is the same code path with a
- * narrower target.
+ * accepts a repo id list and per-endpoint checkpoints, so a single-repository run
+ * is the same code path with a narrower target.
  */
 
 export type RepoSyncState = "never" | "complete" | "outstanding";

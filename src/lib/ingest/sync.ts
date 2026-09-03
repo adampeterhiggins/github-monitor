@@ -90,10 +90,11 @@ export interface SyncProgress {
 
 /**
  * `resume` skips work already recorded as finished, so an interrupted sync can be
- * picked up without repeating it. `full` ignores that record and re-fetches
- * everything, which is what you want when the data itself has gone stale.
+ * picked up without repeating it. `incremental` refreshes only data that can have
+ * changed since each endpoint last succeeded. `full` ignores all checkpoints and
+ * is reserved for explicit recovery operations such as changing token scopes.
  */
-export type SyncMode = "resume" | "full";
+export type SyncMode = "resume" | "incremental" | "full";
 
 /**
  * Statuses that count as finished for a (repository, endpoint) pair.
@@ -119,9 +120,71 @@ const TERMINAL_STATUSES: ReadonlySet<SyncStatus> = new Set<SyncStatus>([
  * @param status the recorded outcome, or undefined if never attempted
  */
 export function shouldSkip(status: SyncStatus | undefined, mode: SyncMode): boolean {
-  if (mode === "full") return false;
+  if (mode !== "resume") return false;
   if (status === undefined) return false;
   return TERMINAL_STATUSES.has(status);
+}
+
+export interface IncrementalState {
+  status: SyncStatus;
+  lastOkAt: string | null;
+  lastAttemptAt: string | null;
+}
+
+/** Endpoints whose result is driven by commits or repository metadata. */
+const PUSH_DRIVEN_ENDPOINTS: ReadonlySet<EndpointId> = new Set([
+  ...STATS_ENDPOINTS,
+  "community",
+  "forks",
+  "branches",
+  "dependencies",
+]);
+
+/**
+ * Decide whether an incremental run needs this repository/endpoint pair.
+ *
+ * Actions and pulse have their own time cutoffs, while traffic is a rolling
+ * 14-day snapshot which must be sampled every run. The remaining endpoints do
+ * not expose a `since` parameter, so the repository timestamps from the cheap
+ * inventory request are used to avoid downloading unchanged payloads.
+ */
+export function shouldFetchIncrementally(
+  endpoint: EndpointId,
+  state: IncrementalState | undefined,
+  repo: Pick<GhRepo, "pushed_at" | "updated_at">,
+): boolean {
+  if (!state) return true;
+  if (state.status === "pending" || state.status === "error") return true;
+  // A changed token or permission scope needs the deliberately explicit full sync.
+  if (state.status === "forbidden") return false;
+  if (endpoint === "traffic" || endpoint === "actions" || endpoint === "pulse") return true;
+
+  const checkpoint = state.lastOkAt ?? state.lastAttemptAt;
+  if (!checkpoint) return true;
+  if (!PUSH_DRIVEN_ENDPOINTS.has(endpoint)) return true;
+
+  const changedAt = endpoint === "community" || endpoint === "forks"
+    ? repo.updated_at
+    : repo.pushed_at ?? repo.updated_at;
+  const changed = Date.parse(changedAt);
+  const checked = Date.parse(checkpoint);
+  // Unknown timestamps must fail open: an extra request is safer than stale data.
+  // Apply the same overlap used by time-filtered endpoints to close the small
+  // fetch-to-checkpoint race. At worst this repeats one payload on the next run.
+  return !Number.isFinite(changed) || !Number.isFinite(checked) || changed > checked - 10 * 60_000;
+}
+
+/** Build an inclusive checkpoint, falling back to the initial history window. */
+export function incrementalSince(
+  checkpoint: string | null | undefined,
+  historyDays: number,
+  now = Date.now(),
+): string {
+  const parsed = checkpoint ? Date.parse(checkpoint) : Number.NaN;
+  const fallback = now - historyDays * 86_400_000;
+  // Ten minutes is enough to cover pagination/write races without materially
+  // increasing repeat traffic. Stable-id upserts make the overlap idempotent.
+  return new Date(Number.isFinite(parsed) ? parsed - 10 * 60_000 : fallback).toISOString();
 }
 
 export interface SyncOptions {
@@ -136,7 +199,7 @@ export interface SyncOptions {
   activeSince?: string | null;
   /** How far back to pull PR/issue/Actions data. */
   historyDays?: number;
-  /** Defaults to `full`; the UI passes `resume` to continue an interrupted sync. */
+  /** Defaults to an incremental refresh; `full` must be requested explicitly. */
   mode?: SyncMode;
   onProgress?: (p: SyncProgress) => void;
   signal?: AbortSignal;
@@ -192,7 +255,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     includeArchived = false,
     activeSince = null,
     historyDays = 365,
-    mode = "full",
+    mode = "incremental",
     signal,
   } = options;
 
@@ -300,21 +363,56 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
      sync_state records the outcome of every (repository, endpoint) pair as it
      completes, including on cancellation, so an interrupted run leaves an
      accurate record of what it got through. In `resume` mode that record is
-     consulted and finished work is skipped; in `full` mode it is ignored. */
+     consulted and finished work is skipped. Incremental mode also reads each
+     pair's checkpoint so it can fetch only changes. Full mode ignores it. */
 
-  const doneAlready = new Set<string>();
-  if (mode === "resume") {
-    const rows = await db.select<Array<{ repo_id: number; endpoint: string; status: SyncStatus }>>(
-      "SELECT repo_id, endpoint, status FROM sync_state",
+  type SyncStateRow = {
+    repo_id: number;
+    endpoint: string;
+    status: SyncStatus;
+    last_ok_at: string | null;
+    last_attempt_at: string | null;
+  };
+  const stateByPair = new Map<string, IncrementalState>();
+  if (mode !== "full") {
+    const rows = await db.select<SyncStateRow[]>(
+      "SELECT repo_id, endpoint, status, last_ok_at, last_attempt_at FROM sync_state",
     );
     for (const row of rows) {
-      if (shouldSkip(row.status, mode)) doneAlready.add(`${row.repo_id}:${row.endpoint}`);
+      stateByPair.set(`${row.repo_id}:${row.endpoint}`, {
+        status: row.status,
+        lastOkAt: row.last_ok_at,
+        lastAttemptAt: row.last_attempt_at,
+      });
     }
   }
 
-  /** True when a previous run finished this pair and we are resuming. */
-  const isDone = (repoId: number, endpoint: EndpointId | string) =>
-    doneAlready.has(`${repoId}:${endpoint}`);
+  const repoById = new Map(repos.map((repo) => [repo.id, repo]));
+  const stateFor = (repoId: number, endpoint: EndpointId) =>
+    stateByPair.get(`${repoId}:${endpoint}`);
+
+  /** Whether this pair needs an API request in the selected mode. */
+  const needsFetch = (repo: RepoTarget, endpoint: EndpointId) => {
+    const state = stateFor(repo.id, endpoint);
+    if (mode === "full") return true;
+    if (mode === "resume") return !shouldSkip(state?.status, mode);
+    const source = repoById.get(repo.id);
+    return source ? shouldFetchIncrementally(endpoint, state, source) : true;
+  };
+
+  /**
+   * Per-endpoint high-water mark with a small overlap. The overlap closes the
+   * race between GitHub serving a page and us recording its completion; the
+   * affected writers upsert by stable GitHub ids, so duplicates are harmless.
+   */
+  const sinceFor = (repoId: number, endpoint: EndpointId, dateOnly = false) => {
+    const state = stateFor(repoId, endpoint);
+    const checkpoint = mode === "incremental"
+      ? state?.lastOkAt
+      : null;
+    const since = incrementalSince(checkpoint, historyDays);
+    return dateOnly ? since.slice(0, 10) : since;
+  };
 
   const statsWanted = STATS_ENDPOINTS.filter((e) => endpoints.includes(e));
 
@@ -332,7 +430,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   const warmKeys: WarmKey[] = [];
   for (const repo of targets) {
     for (const endpoint of statsWanted) {
-      if (isDone(repo.id, endpoint)) {
+      if (!needsFetch(repo, endpoint)) {
         skipped++;
         continue;
       }
@@ -440,12 +538,10 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     done = 0;
     emit();
 
-    const sinceIso = new Date(Date.now() - historyDays * 86_400_000).toISOString().slice(0, 10);
-
     await pool(targets, 6, async (repo) => {
       for (const endpoint of extras) {
         if (cancelled()) return;
-        if (isDone(repo.id, endpoint)) {
+        if (!needsFetch(repo, endpoint)) {
           skipped++;
           done++;
           emit();
@@ -454,7 +550,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
         attempted++;
         current = repo.fullName;
         try {
-          await syncExtra(client, db, repo, endpoint, sinceIso, signal);
+          await syncExtra(client, db, repo, endpoint, sinceFor(repo.id, endpoint, true), signal);
           await recordSync(db, repo.id, endpoint, "ok");
         } catch (err) {
           if (!cancelled()) {
@@ -479,7 +575,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
         await write.writeDependabotAlerts(
           db,
           alerts,
-          repos.map((r) => r.id),
+          targets.map((r) => r.id),
         );
       }
     } catch (err) {
@@ -496,7 +592,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     label = "Fetching pull requests and issues";
 
     const pulseTargets = targets.filter((r) => {
-      if (!isDone(r.id, "pulse")) return true;
+      if (needsFetch(r, "pulse")) return true;
       skipped++;
       return false;
     });
@@ -522,15 +618,17 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
         fullName: r.fullName,
       })),
       sinceIso: new Date(Date.now() - historyDays * 86_400_000).toISOString(),
+      sinceIsoByRepo: new Map(pulseTargets.map((r) => [r.id, sinceFor(r.id, "pulse")])),
       signal,
-      onRepoDone: (fullName) => {
+      onRepoDone: async (fullName) => {
         done++;
         attempted++;
         current = fullName;
         const repoId = idByFullName.get(fullName);
         if (repoId != null && !cancelled()) {
-          // Fire and forget: a bookkeeping write must not stall the sweep.
-          void recordSync(db, repoId, "pulse", failedRepos.has(fullName) ? "error" : "ok");
+          // The next incremental run depends on this checkpoint, so do not return
+          // before it is durable.
+          await recordSync(db, repoId, "pulse", failedRepos.has(fullName) ? "error" : "ok");
         }
         emit();
       },
