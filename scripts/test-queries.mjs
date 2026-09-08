@@ -55,6 +55,7 @@ async function bundle(entry, out) {
 
 const q = await bundle("src/lib/db/queries.ts", "queries.cjs");
 const sync = await bundle("src/lib/ingest/sync.ts", "sync.cjs");
+const pulse = await bundle("src/lib/ingest/pulse.ts", "pulse.cjs");
 const stacks = await bundle("src/lib/agg/stacks.ts", "stacks.cjs");
 const series = await bundle("src/lib/agg/series.ts", "series.cjs");
 const weeksLib = await bundle("src/lib/agg/weeks.ts", "weeks.cjs");
@@ -516,6 +517,74 @@ T(
   sync.incrementalSince(null, 2, Date.parse("2026-08-11T12:00:00Z")) ===
     "2026-08-09T12:00:00.000Z",
 );
+
+/* Fair polling checks every pending item before any item gets a second poll. */
+{
+  const seen = [];
+  const attempts = new Map();
+  const unfinished = await sync.pollInRounds(["slow-a", "slow-b", "ready"], {
+    limit: 2,
+    deadline: Number.MAX_SAFE_INTEGER,
+    retryDelay: () => 0,
+    poll: async (item) => {
+      seen.push(item);
+      const count = (attempts.get(item) ?? 0) + 1;
+      attempts.set(item, count);
+      return item === "ready" || count === 2;
+    },
+  });
+  T("fair stats polling eventually completes every item", unfinished.length === 0);
+  T(
+    "fair stats polling checks later items before retrying slow ones",
+    seen.indexOf("ready") < seen.lastIndexOf("slow-a") &&
+      seen.indexOf("ready") < seen.lastIndexOf("slow-b"),
+    seen.join(","),
+  );
+
+  const expired = await sync.pollInRounds(["still-pending"], {
+    limit: 1,
+    deadline: Date.now() - 1,
+    poll: async () => false,
+  });
+  T(
+    "fair stats polling returns deadline-expired work with its attempt count",
+    expired.length === 1 && expired[0].attempts === 1,
+  );
+}
+
+/* Pull requests and issues have independent cursors, so neither should wait for the other. */
+{
+  const started = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const pulseRun = pulse.syncPulse({
+    client: {
+      graphql: async (query) => {
+        const kind = query.includes("pullRequests") ? "prs" : "issues";
+        started.push(kind);
+        await gate;
+        return {
+          repository: {
+            [kind === "prs" ? "pullRequests" : "issues"]: {
+              pageInfo: { hasNextPage: false, endCursor: null },
+              nodes: [],
+            },
+          },
+        };
+      },
+    },
+    db: { execute: async () => ({ rowsAffected: 0 }) },
+    repos: [{ id: 1, owner: "o", name: "a", fullName: "o/a" }],
+    sinceIso: "2026-01-01T00:00:00Z",
+  });
+  T(
+    "Pulse starts PR and issue pagination concurrently",
+    started.includes("prs") && started.includes("issues"),
+    started.join(","),
+  );
+  release();
+  await pulseRun;
+}
 
 /* ── Saved selections ─────────────────────────────────────────────────────── */
 

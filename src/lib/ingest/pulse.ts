@@ -143,74 +143,13 @@ async function syncRepoPulse(
   sinceIso: string,
   signal?: AbortSignal,
 ): Promise<void> {
-  const prRows: unknown[][] = [];
-  const issueRows: unknown[][] = [];
-
-  let cursor: string | null = null;
-  for (let page = 0; page < MAX_PAGES; page++) {
-    if (signal?.aborted) return;
-    const data: PrPage = await client.graphql<PrPage>(
-      PR_QUERY,
-      { owner: repo.owner, name: repo.name, cursor },
-      { signal },
-    );
-    const conn: Connection<PrNode> | undefined = data.repository?.pullRequests;
-    if (!conn) break;
-
-    let reachedCutoff = false;
-    for (const pr of conn.nodes) {
-      if (pr.updatedAt < sinceIso) {
-        // Ordered by last update, so the first old record ends the walk. Keep it
-        // to make the cutoff inclusive and harmlessly overlap adjacent runs.
-        reachedCutoff = true;
-      }
-      prRows.push([
-        repo.id,
-        pr.number,
-        pr.author?.login ?? null,
-        pr.title,
-        pr.state,
-        pr.createdAt,
-        pr.mergedAt,
-        pr.closedAt,
-        pr.additions ?? 0,
-        pr.deletions ?? 0,
-        pr.comments?.totalCount ?? 0,
-        pr.reviews?.totalCount ?? 0,
-      ]);
-    }
-    if (reachedCutoff || !conn.pageInfo.hasNextPage) break;
-    cursor = conn.pageInfo.endCursor;
-  }
-
-  cursor = null;
-  for (let page = 0; page < MAX_PAGES; page++) {
-    if (signal?.aborted) return;
-    const data: IssuePage = await client.graphql<IssuePage>(
-      ISSUE_QUERY,
-      { owner: repo.owner, name: repo.name, cursor },
-      { signal },
-    );
-    const conn: Connection<IssueNode> | undefined = data.repository?.issues;
-    if (!conn) break;
-
-    let reachedCutoff = false;
-    for (const issue of conn.nodes) {
-      if (issue.updatedAt < sinceIso) reachedCutoff = true;
-      issueRows.push([
-        repo.id,
-        issue.number,
-        issue.author?.login ?? null,
-        issue.title,
-        issue.state,
-        issue.createdAt,
-        issue.closedAt,
-        issue.comments?.totalCount ?? 0,
-      ]);
-    }
-    if (reachedCutoff || !conn.pageInfo.hasNextPage) break;
-    cursor = conn.pageInfo.endCursor;
-  }
+  // These are independent cursor chains. Running both at once keeps the shared
+  // client busy without raising its global request-concurrency limit.
+  const [prRows, issueRows] = await Promise.all([
+    fetchPullRequests(client, repo, sinceIso, signal),
+    fetchIssues(client, repo, sinceIso, signal),
+  ]);
+  if (signal?.aborted) return;
 
   // Serialised against the other concurrent repo writers; see ../db/index.ts.
   await withWriteLock(async () => {
@@ -250,4 +189,91 @@ async function syncRepoPulse(
       rows: issueRows,
     });
   });
+}
+
+async function fetchPullRequests(
+  client: GitHubClient,
+  repo: PulseRepo,
+  sinceIso: string,
+  signal?: AbortSignal,
+): Promise<unknown[][]> {
+  const prRows: unknown[][] = [];
+
+  let cursor: string | null = null;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    if (signal?.aborted) break;
+    const data: PrPage = await client.graphql<PrPage>(
+      PR_QUERY,
+      { owner: repo.owner, name: repo.name, cursor },
+      { signal },
+    );
+    const conn: Connection<PrNode> | undefined = data.repository?.pullRequests;
+    if (!conn) break;
+
+    let reachedCutoff = false;
+    for (const pr of conn.nodes) {
+      if (pr.updatedAt < sinceIso) {
+        // Ordered by last update, so the first old record ends the walk. Keep it
+        // to make the cutoff inclusive and harmlessly overlap adjacent runs.
+        reachedCutoff = true;
+      }
+      prRows.push([
+        repo.id,
+        pr.number,
+        pr.author?.login ?? null,
+        pr.title,
+        pr.state,
+        pr.createdAt,
+        pr.mergedAt,
+        pr.closedAt,
+        pr.additions ?? 0,
+        pr.deletions ?? 0,
+        pr.comments?.totalCount ?? 0,
+        pr.reviews?.totalCount ?? 0,
+      ]);
+    }
+    if (reachedCutoff || !conn.pageInfo.hasNextPage) break;
+    cursor = conn.pageInfo.endCursor;
+  }
+
+  return prRows;
+}
+
+async function fetchIssues(
+  client: GitHubClient,
+  repo: PulseRepo,
+  sinceIso: string,
+  signal?: AbortSignal,
+): Promise<unknown[][]> {
+  const issueRows: unknown[][] = [];
+  let cursor: string | null = null;
+  for (let page = 0; page < MAX_PAGES; page++) {
+    if (signal?.aborted) break;
+    const data: IssuePage = await client.graphql<IssuePage>(
+      ISSUE_QUERY,
+      { owner: repo.owner, name: repo.name, cursor },
+      { signal },
+    );
+    const conn: Connection<IssueNode> | undefined = data.repository?.issues;
+    if (!conn) break;
+
+    let reachedCutoff = false;
+    for (const issue of conn.nodes) {
+      if (issue.updatedAt < sinceIso) reachedCutoff = true;
+      issueRows.push([
+        repo.id,
+        issue.number,
+        issue.author?.login ?? null,
+        issue.title,
+        issue.state,
+        issue.createdAt,
+        issue.closedAt,
+        issue.comments?.totalCount ?? 0,
+      ]);
+    }
+    if (reachedCutoff || !conn.pageInfo.hasNextPage) break;
+    cursor = conn.pageInfo.endCursor;
+  }
+
+  return issueRows;
 }

@@ -1,5 +1,11 @@
 import type Database from "@tauri-apps/plugin-sql";
-import { GitHubClient, GitHubError, StatsPendingError, type RateLimitState } from "../github/client";
+import {
+  GitHubClient,
+  GitHubError,
+  StatsPendingError,
+  statsRetryDelay,
+  type RateLimitState,
+} from "../github/client";
 import * as api from "../github/endpoints";
 import { recordSync, setMeta, type SyncStatus } from "../db";
 import * as write from "./writers";
@@ -51,6 +57,13 @@ const STATS_ENDPOINTS = [
   "punchcard",
 ] as const;
 
+/** Stats payloads where a commit-bearing repository can transiently answer 200 + []. */
+const EMPTY_STATS_ARE_PENDING: ReadonlySet<(typeof STATS_ENDPOINTS)[number]> = new Set([
+  "contributors",
+  "commit_activity",
+  "code_frequency",
+]);
+
 export const ENDPOINT_LABELS: Record<EndpointId, string> = {
   contributors: "Contributor stats",
   commit_activity: "Commit activity",
@@ -74,7 +87,7 @@ export interface SyncError {
 }
 
 export interface SyncProgress {
-  phase: "repos" | "warming" | "collecting" | "extras" | "pulse" | "done" | "cancelled";
+  phase: "repos" | "warming" | "syncing" | "collecting" | "extras" | "pulse" | "done" | "cancelled";
   label: string;
   done: number;
   total: number;
@@ -234,6 +247,69 @@ async function pool<T, R>(
   });
   await Promise.all(workers);
   return results;
+}
+
+export interface FairPollState<T> {
+  item: T;
+  attempts: number;
+}
+
+interface FairPollOptions<T> {
+  limit: number;
+  deadline: number;
+  poll: (item: T, attempt: number) => Promise<boolean>;
+  retryDelay?: (attempt: number) => number;
+  signal?: AbortSignal;
+}
+
+const wait = (ms: number, signal?: AbortSignal) =>
+  new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) return reject(new DOMException("Aborted", "AbortError"));
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+
+/**
+ * Poll every outstanding item once per round.
+ *
+ * A retrying item never owns a worker while it sleeps. This avoids the previous
+ * head-of-line blocking where the first six slow statistics endpoints could hold
+ * every collection slot for their full poll budget while later results sat ready.
+ * Returns the items that were still pending when the deadline or cancellation hit.
+ */
+export async function pollInRounds<T>(
+  items: readonly T[],
+  options: FairPollOptions<T>,
+): Promise<Array<FairPollState<T>>> {
+  let pending = items.map((item) => ({ item, attempts: 0 }));
+
+  while (pending.length > 0 && !options.signal?.aborted) {
+    const outcomes = await pool(pending, Math.max(1, options.limit), async (state) => {
+      state.attempts++;
+      return options.poll(state.item, state.attempts);
+    });
+    pending = pending.filter((_, index) => !outcomes[index]);
+    if (pending.length === 0 || options.signal?.aborted) break;
+
+    const attempt = Math.max(...pending.map((state) => state.attempts));
+    const delayMs = (options.retryDelay ?? statsRetryDelay)(attempt);
+    if (Date.now() + delayMs > options.deadline) break;
+    try {
+      await wait(delayMs, options.signal);
+    } catch (err) {
+      if ((err as Error)?.name !== "AbortError") throw err;
+      break;
+    }
+  }
+
+  return pending;
 }
 
 interface RepoTarget {
@@ -491,83 +567,118 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     });
   }
 
-  /* ── 3. Collect phase — poll whatever was still computing ──────────────── */
+  /* ── 3. Build the independent work queues ────────────────────────────────
+     Once every statistics job has been warmed, collection, ordinary REST
+     endpoints and Pulse can all advance independently. They still share the
+     GitHubClient's six-request semaphore, so this fills stats backoff gaps
+     without increasing actual request concurrency. */
 
   const pendingKeys = warmKeys.filter(({ repo, endpoint }) => !settled.has(keyOf(repo, endpoint)));
-  if (pendingKeys.length && !cancelled()) {
-    phase = "collecting";
-    label = "Collecting computed statistics";
-    total = pendingKeys.length;
-    done = 0;
-    emit();
-
-    await pool(pendingKeys, 6, async ({ repo, endpoint }) => {
-      if (cancelled()) return;
-      current = repo.fullName;
-      try {
-        const data = await fetchStats(client, repo, endpoint, signal);
-        if (data == null) {
-          await recordSync(db, repo.id, endpoint, "empty");
-        } else {
-          await persistStats(db, repo, endpoint, data);
-          await recordSync(db, repo.id, endpoint, "ok");
-        }
-      } catch (err) {
-        if (!cancelled()) {
-          noteError(repo.fullName, endpoint, err);
-          const status: SyncStatus = err instanceof StatsPendingError ? "pending" : "error";
-          await recordSync(db, repo.id, endpoint, status, { error: (err as Error)?.message });
-        }
-      } finally {
-        done++;
-        emit();
-      }
-    });
-  }
-
-  /* ── 4. Everything that is a plain GET ─────────────────────────────────── */
-
   const extras = endpoints.filter((e) =>
     (["traffic", "community", "forks", "branches", "dependencies", "actions"] as EndpointId[]).includes(e),
   );
-
-  if (extras.length && !cancelled()) {
-    phase = "extras";
-    label = "Fetching traffic, community and repository detail";
-    total = targets.length * extras.length;
-    done = 0;
-    emit();
-
-    await pool(targets, 6, async (repo) => {
-      for (const endpoint of extras) {
-        if (cancelled()) return;
-        if (!needsFetch(repo, endpoint)) {
-          skipped++;
-          done++;
-          emit();
-          continue;
-        }
-        attempted++;
-        current = repo.fullName;
-        try {
-          await syncExtra(client, db, repo, endpoint, sinceFor(repo.id, endpoint, true), signal);
-          await recordSync(db, repo.id, endpoint, "ok");
-        } catch (err) {
-          if (!cancelled()) {
-            noteError(repo.fullName, endpoint, err);
-            await recordSync(db, repo.id, endpoint, "error", { error: (err as Error)?.message });
-          }
-        } finally {
-          done++;
-          emit();
-        }
-      }
-    });
+  const extraKeys: Array<{ repo: RepoTarget; endpoint: EndpointId }> = [];
+  for (const repo of targets) {
+    for (const endpoint of extras) {
+      if (needsFetch(repo, endpoint)) extraKeys.push({ repo, endpoint });
+      else skipped++;
+    }
   }
 
-  /* ── 4b. Org-level Dependabot alerts (one request, not per repository) ─── */
+  const pulseTargets = endpoints.includes("pulse")
+    ? targets.filter((repo) => {
+        if (needsFetch(repo, "pulse")) return true;
+        skipped++;
+        return false;
+      })
+    : [];
 
-  if (endpoints.includes("dependencies") && !cancelled()) {
+  phase = "syncing";
+  label = "Syncing statistics and repository data";
+  total = pendingKeys.length + extraKeys.length + pulseTargets.length;
+  done = 0;
+  current = null;
+  emit();
+
+  const markDone = (fullName: string) => {
+    done++;
+    current = fullName;
+    emit();
+  };
+
+  /* ── 4. Fair statistics collection ───────────────────────────────────────
+     Each round checks every pending endpoint once. Backoff happens between
+     rounds, outside the request pool, so six pathological repositories cannot
+     prevent later ready results from being collected. */
+
+  const statsTask = (async () => {
+    if (!pendingKeys.length || cancelled()) return;
+    const unfinished = await pollInRounds(pendingKeys, {
+      limit: 6,
+      deadline: Date.now() + client.getStatsPollBudgetMs(),
+      signal,
+      poll: async ({ repo, endpoint }) => {
+        if (cancelled()) return false;
+        try {
+          const result = await client.statsAttempt<unknown>(statsPath(repo, endpoint), {
+            signal,
+            allowNotFound: true,
+            allowForbidden: true,
+            treatEmptyAsPending: repo.hasCommits && EMPTY_STATS_ARE_PENDING.has(endpoint),
+          });
+          if (result.pending) return false;
+          if (result.data == null) {
+            await recordSync(db, repo.id, endpoint, "empty");
+          } else {
+            const wrote = await persistStats(db, repo, endpoint, result.data);
+            if (!wrote) return false;
+            await recordSync(db, repo.id, endpoint, "ok");
+          }
+        } catch (err) {
+          if (cancelled()) return false;
+          noteError(repo.fullName, endpoint, err);
+          await recordSync(db, repo.id, endpoint, "error", { error: (err as Error)?.message });
+        }
+        markDone(repo.fullName);
+        return true;
+      },
+    });
+
+    if (cancelled()) return;
+    await pool(unfinished, 6, async ({ item: { repo, endpoint }, attempts }) => {
+      const err = new StatsPendingError(statsPath(repo, endpoint), attempts);
+      noteError(repo.fullName, endpoint, err);
+      await recordSync(db, repo.id, endpoint, "pending", { error: err.message });
+      markDone(repo.fullName);
+    });
+  })();
+
+  /* ── 5. Plain REST endpoints ──────────────────────────────────────────────
+     Jobs are flattened by (repository, endpoint), instead of six repository
+     workers each walking their endpoints serially. Twelve logical jobs are
+     enough to cover pagination/retry waits; the client still permits only six
+     simultaneous HTTP requests. */
+
+  const extrasTask = pool(extraKeys, 12, async ({ repo, endpoint }) => {
+    if (cancelled()) return;
+    attempted++;
+    try {
+      await syncExtra(client, db, repo, endpoint, sinceFor(repo.id, endpoint, true), signal);
+      await recordSync(db, repo.id, endpoint, "ok");
+    } catch (err) {
+      if (!cancelled()) {
+        noteError(repo.fullName, endpoint, err);
+        await recordSync(db, repo.id, endpoint, "error", { error: (err as Error)?.message });
+      }
+    } finally {
+      if (!cancelled()) markDone(repo.fullName);
+    }
+  });
+
+  /* ── 5b. Org-level Dependabot alerts ───────────────────────────────────── */
+
+  const dependabotTask = (async () => {
+    if (!endpoints.includes("dependencies") || cancelled()) return;
     try {
       const alerts = await api.dependabotAlerts(client, org, signal);
       // null means the token cannot read them; leave whatever we already have.
@@ -575,69 +686,54 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
         await write.writeDependabotAlerts(
           db,
           alerts,
-          targets.map((r) => r.id),
+          targets.map((repo) => repo.id),
         );
       }
     } catch (err) {
-      if (!cancelled()) {
-        noteError(org, "dependencies", err);
-      }
+      if (!cancelled()) noteError(org, "dependencies", err);
     }
-  }
+  })();
 
-  /* ── 5. Pulse (PRs and issues, via GraphQL) ────────────────────────────── */
+  /* ── 6. Pulse (PRs and issues, via GraphQL) ────────────────────────────── */
 
-  if (endpoints.includes("pulse") && !cancelled()) {
-    phase = "pulse";
-    label = "Fetching pull requests and issues";
+  const pulseTask = (async () => {
+    if (!pulseTargets.length || cancelled()) return;
 
-    const pulseTargets = targets.filter((r) => {
-      if (needsFetch(r, "pulse")) return true;
-      skipped++;
-      return false;
-    });
-
-    total = pulseTargets.length;
-    done = 0;
-    current = null;
-    emit();
-
-    // Pulse previously recorded nothing in sync_state, so it re-fetched every
-    // repository on every run and could never resume. It is recorded per
-    // repository now, which is also the granularity at which it can be resumed.
+    // Pulse is recorded per repository, which is also the granularity at which
+    // it can be resumed after a cancellation or failure.
     const failedRepos = new Set<string>();
-    const idByFullName = new Map(pulseTargets.map((r) => [r.fullName, r.id]));
+    const idByFullName = new Map(pulseTargets.map((repo) => [repo.fullName, repo.id]));
 
     await syncPulse({
       client,
       db,
-      repos: pulseTargets.map((r) => ({
-        id: r.id,
-        owner: r.owner,
-        name: r.name,
-        fullName: r.fullName,
+      repos: pulseTargets.map((repo) => ({
+        id: repo.id,
+        owner: repo.owner,
+        name: repo.name,
+        fullName: repo.fullName,
       })),
       sinceIso: new Date(Date.now() - historyDays * 86_400_000).toISOString(),
-      sinceIsoByRepo: new Map(pulseTargets.map((r) => [r.id, sinceFor(r.id, "pulse")])),
+      sinceIsoByRepo: new Map(pulseTargets.map((repo) => [repo.id, sinceFor(repo.id, "pulse")])),
       signal,
       onRepoDone: async (fullName) => {
-        done++;
         attempted++;
-        current = fullName;
         const repoId = idByFullName.get(fullName);
         if (repoId != null && !cancelled()) {
           // The next incremental run depends on this checkpoint, so do not return
           // before it is durable.
           await recordSync(db, repoId, "pulse", failedRepos.has(fullName) ? "error" : "ok");
+          markDone(fullName);
         }
-        emit();
       },
       onError: (fullName, message) => {
         failedRepos.add(fullName);
         errors.push({ repo: fullName, endpoint: "pulse", message, kind: "error" });
       },
     });
-  }
+  })();
+
+  await Promise.all([statsTask, extrasTask, dependabotTask, pulseTask]);
 
   await setMeta(db, "last_sync_at", new Date().toISOString());
   await setMeta(db, "last_sync_org", org);
@@ -678,28 +774,6 @@ function statsPath(repo: RepoTarget, endpoint: (typeof STATS_ENDPOINTS)[number])
       return `${base}/code_frequency`;
     case "punchcard":
       return `${base}/punch_card`;
-  }
-}
-
-function fetchStats(
-  client: GitHubClient,
-  repo: RepoTarget,
-  endpoint: (typeof STATS_ENDPOINTS)[number],
-  signal?: AbortSignal,
-): Promise<unknown> {
-  const ref = { owner: repo.owner, name: repo.name };
-  const opts = { signal, hasCommits: repo.hasCommits };
-  switch (endpoint) {
-    case "contributors":
-      return api.contributorStats(client, ref, opts);
-    case "commit_activity":
-      return api.commitActivity(client, ref, opts);
-    case "participation":
-      return api.participation(client, ref, { signal });
-    case "code_frequency":
-      return api.codeFrequency(client, ref, opts);
-    case "punchcard":
-      return api.punchCard(client, ref, { signal });
   }
 }
 

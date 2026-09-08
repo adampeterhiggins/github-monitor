@@ -69,6 +69,13 @@ export interface GhResponse<T> {
   lastPage: number | null;
 }
 
+export interface StatsAttempt<T> {
+  /** True when GitHub is still computing this statistics payload. */
+  pending: boolean;
+  /** The completed payload, or null for a definitively empty/inaccessible result. */
+  data: T | null;
+}
+
 export interface ClientEvents {
   onRateLimit?: (state: RateLimitState) => void;
   /** Fired while parked on a rate limit or secondary limit, so the UI can explain the pause. */
@@ -135,6 +142,14 @@ export interface GitHubClientConfig {
   events?: ClientEvents;
 }
 
+export const DEFAULT_STATS_POLL_BUDGET_MS = 420_000;
+
+const STATS_BACKOFF_MS = [1_000, 2_000, 3_000, 5_000, 8_000, 10_000, 15_000, 20_000, 30_000];
+
+export function statsRetryDelay(attempt: number): number {
+  return STATS_BACKOFF_MS[Math.min(Math.max(0, attempt - 1), STATS_BACKOFF_MS.length - 1)];
+}
+
 export class GitHubClient {
   private readonly token: string;
   private readonly sem: Semaphore;
@@ -142,8 +157,11 @@ export class GitHubClient {
   private readonly rateLimitFloor: number;
   private readonly events: ClientEvents;
   private rateLimit: RateLimitState | null = null;
-  /** Set while parked on a limit so every in-flight caller waits on the same clock. */
-  private throttleUntil = 0;
+  private readonly rateLimits = new Map<string, RateLimitState>();
+  /** Secondary limits are shared across REST and GraphQL. */
+  private secondaryThrottleUntil = 0;
+  /** Primary REST and GraphQL budgets reset independently. */
+  private readonly primaryThrottleUntil = new Map<string, number>();
 
   constructor(config: GitHubClientConfig) {
     this.token = config.token;
@@ -151,14 +169,18 @@ export class GitHubClient {
     // Measured against a large real repository (focaldata/orchestra, 33
     // contributors over 69+ weeks) which took over six minutes to compute from
     // cold. Repos that still miss the budget are recorded as `pending` and retried
-    // on the next sync, and because polls run in a pool they do not stall others.
-    this.statsPollBudgetMs = config.statsPollBudgetMs ?? 420_000;
+    // on the next sync; the sync's fair polling rounds keep them from stalling others.
+    this.statsPollBudgetMs = config.statsPollBudgetMs ?? DEFAULT_STATS_POLL_BUDGET_MS;
     this.rateLimitFloor = config.rateLimitFloor ?? 50;
     this.events = config.events ?? {};
   }
 
   getRateLimit(): RateLimitState | null {
     return this.rateLimit;
+  }
+
+  getStatsPollBudgetMs(): number {
+    return this.statsPollBudgetMs;
   }
 
   private headers(options: RequestOptions): Record<string, string> {
@@ -187,23 +209,35 @@ export class GitHubClient {
         reset: Number(reset),
         resource: headers.get("x-ratelimit-resource") ?? "core",
       };
+      this.rateLimits.set(this.rateLimit.resource, this.rateLimit);
       this.events.onRateLimit?.(this.rateLimit);
     }
   }
 
-  /** Park all callers when the primary budget is nearly spent. */
+  private resourceFor(path: string): string {
+    return path.replace(/^https:\/\/api\.github\.com\//, "").startsWith("graphql")
+      ? "graphql"
+      : "core";
+  }
+
+  /** Park callers on shared secondary limits or their own resource's primary limit. */
   private async respectBudget(path: string, signal?: AbortSignal): Promise<void> {
     const now = Date.now();
-    if (this.throttleUntil > now) {
-      const waitMs = this.throttleUntil - now;
+    const resource = this.resourceFor(path);
+    const throttleUntil = Math.max(
+      this.secondaryThrottleUntil,
+      this.primaryThrottleUntil.get(resource) ?? 0,
+    );
+    if (throttleUntil > now) {
+      const waitMs = throttleUntil - now;
       this.events.onThrottle?.({ reason: "rate limit", waitMs, path });
       await sleep(waitMs, signal);
       return;
     }
-    const rl = this.rateLimit;
-    if (rl && rl.resource === "core" && rl.remaining <= this.rateLimitFloor) {
+    const rl = this.rateLimits.get(resource);
+    if (rl && rl.remaining <= this.rateLimitFloor) {
       const waitMs = Math.max(0, rl.reset * 1000 - now) + 1_000;
-      this.throttleUntil = now + waitMs;
+      this.primaryThrottleUntil.set(resource, now + waitMs);
       this.events.onThrottle?.({ reason: "rate limit exhausted", waitMs, path });
       await sleep(waitMs, signal);
     }
@@ -298,7 +332,12 @@ export class GitHubClient {
             ? Number(retryAfter) * 1000
             : Math.max(0, (this.rateLimit?.reset ?? 0) * 1000 - Date.now()) + 1_000;
           const capped = Math.min(waitMs || 60_000, 15 * 60_000);
-          this.throttleUntil = Date.now() + capped;
+          if (isPrimary) {
+            const resource = res.headers.get("x-ratelimit-resource") ?? this.resourceFor(path);
+            this.primaryThrottleUntil.set(resource, Date.now() + capped);
+          } else {
+            this.secondaryThrottleUntil = Date.now() + capped;
+          }
           this.events.onThrottle?.({
             reason: isPrimary ? "rate limit exhausted" : "secondary rate limit",
             waitMs: capped,
@@ -404,36 +443,48 @@ export class GitHubClient {
     options: RequestOptions & { treatEmptyAsPending?: boolean } = {},
   ): Promise<T | null> {
     const deadline = Date.now() + this.statsPollBudgetMs;
-    // Small repos finish in seconds; large ones can take many minutes, so the
-    // backoff grows then plateaus rather than hammering a slow computation.
-    const backoff = [1_000, 2_000, 3_000, 5_000, 8_000, 10_000, 15_000, 20_000, 30_000];
     let attempt = 0;
 
     for (;;) {
       attempt++;
-      const res = await this.request<T>(path, options);
+      const result = await this.statsAttempt<T>(path, options);
+      if (!result.pending) return result.data;
 
-      if (res.notModified) return null;
-      if (res.status === 204) return null;
-      if (res.status === 404 || res.status === 403) return null;
-
-      const isEmpty =
-        res.data == null ||
-        (Array.isArray(res.data) && res.data.length === 0) ||
-        (typeof res.data === "object" && Object.keys(res.data as object).length === 0);
-
-      const pending =
-        res.status === 202 || (isEmpty && options.treatEmptyAsPending === true);
-
-      if (!pending) return res.data;
-
-      const waitMs = backoff[Math.min(attempt - 1, backoff.length - 1)];
+      const waitMs = statsRetryDelay(attempt);
       if (Date.now() + waitMs > deadline) {
         throw new StatsPendingError(path, attempt);
       }
       this.events.onStatsPending?.({ path, attempt, waitMs });
       await sleep(waitMs, options.signal);
     }
+  }
+
+  /**
+   * Poll a computed statistics endpoint exactly once.
+   *
+   * Keeping this separate from `stats` lets the sync scheduler release its job
+   * slot during backoff and check every repository fairly. Callers that want the
+   * original self-contained polling behaviour can continue to use `stats`.
+   */
+  async statsAttempt<T>(
+    path: string,
+    options: RequestOptions & { treatEmptyAsPending?: boolean } = {},
+  ): Promise<StatsAttempt<T>> {
+    const res = await this.request<T>(path, options);
+
+    if (res.notModified || res.status === 204 || res.status === 404 || res.status === 403) {
+      return { pending: false, data: null };
+    }
+
+    const isEmpty =
+      res.data == null ||
+      (Array.isArray(res.data) && res.data.length === 0) ||
+      (typeof res.data === "object" && Object.keys(res.data as object).length === 0);
+
+    return {
+      pending: res.status === 202 || (isEmpty && options.treatEmptyAsPending === true),
+      data: res.data,
+    };
   }
 
   async graphql<T>(
