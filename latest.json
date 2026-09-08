@@ -1,15 +1,15 @@
 {
-  "version": "0.1.4",
-  "notes": "## What's Changed\n* Let the Settings sync include archived repositories by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/2\n* Add org views GitHub Insights cannot show by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/3\n* Add roster, scorecard, concentration over time, and open PR age by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/4\n\n\n**Full Changelog**: https://github.com/adampeterhiggins/github-monitor/compare/v0.1.3...v0.1.4",
-  "pub_date": "2026-08-14T09:55:47Z",
+  "version": "0.1.5",
+  "notes": "## What's Changed\n* Make re-syncs incremental by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/5\n* Parallelize sync work queues by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/6\n\n\n**Full Changelog**: https://github.com/adampeterhiggins/github-monitor/compare/v0.1.4...v0.1.5",
+  "pub_date": "2026-09-08T12:31:46Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNU5pWXV6RXFJTGxZUS9LemZzR3lmWWJVamoyRW5uMlJ2T0NBOTB2NmRGeksvSVovNm9hdWtET0lOZHdYVUdSUXJxaXZUcEZKcWJYOE9jL2g0aExjdFFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NzAxMjcyCWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5nego1eUJ4S293dTd6WHYwTnVQc2hMV3JPRnltQ2NONUhkS0tpY2QyY3BUb0hhTHFPc0UrSmtwS0NyYlhWczJJbm90NGtSVjBtWTNVM0c2RkZIL1VRSkxDUT09Cg==",
-      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/514247391"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUFRRHNUaFJ3eFI1Mklpd1NRTmQyejJkRTIzV3ZnMFRGYTlQL1RsY2xSTGwvQklRUCsrakI2STEvM0RSR3FIUEdhZHNVcWpNTU4xWUZTTHlmVFdhQXdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4ODcwNjM3CWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negpUTWdkSjk3TFJ3RC91VWw2Z0cwcmt6WGxTcWRhRFl5MEFrVTV6ZWFNQ2hiMXRTWGxPZG1wTGlXZGtMWFc5cUpBaWMrYTBubSsvZVdnQ0RKampXQkRCQT09Cg==",
+      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/550460206"
     },
     "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNU5pWXV6RXFJTGxZUS9LemZzR3lmWWJVamoyRW5uMlJ2T0NBOTB2NmRGeksvSVovNm9hdWtET0lOZHdYVUdSUXJxaXZUcEZKcWJYOE9jL2g0aExjdFFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg2NzAxMjcyCWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5nego1eUJ4S293dTd6WHYwTnVQc2hMV3JPRnltQ2NONUhkS0tpY2QyY3BUb0hhTHFPc0UrSmtwS0NyYlhWczJJbm90NGtSVjBtWTNVM0c2RkZIL1VRSkxDUT09Cg==",
-      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/514247391"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUFRRHNUaFJ3eFI1Mklpd1NRTmQyejJkRTIzV3ZnMFRGYTlQL1RsY2xSTGwvQklRUCsrakI2STEvM0RSR3FIUEdhZHNVcWpNTU4xWUZTTHlmVFdhQXdFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg4ODcwNjM3CWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negpUTWdkSjk3TFJ3RC91VWw2Z0cwcmt6WGxTcWRhRFl5MEFrVTV6ZWFNQ2hiMXRTWGxPZG1wTGlXZGtMWFc5cUpBaWMrYTBubSsvZVdnQ0RKampXQkRCQT09Cg==",
+      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/550460206"
     }
   }
 }
