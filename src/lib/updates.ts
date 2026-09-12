@@ -5,23 +5,11 @@ import { getVersion } from "@tauri-apps/api/app";
 /**
  * In-app updates.
  *
- * The release repository is private, so both the manifest and the binary need
- * authentication. Two things make that work without any Rust:
- *
- *  - the plugin sends configured request headers on *both* the manifest fetch and
- *    the artifact download, and only defaults `Accept` when the caller has not set
- *    it (`application/json` for the manifest, `application/octet-stream` for the
- *    download). Passing just `Authorization` therefore leaves both correct;
- *  - the manifest is served from `raw.githubusercontent.com`, which honours a
- *    bearer token on private repositories, and the manifest points the download at
- *    `api.github.com/.../releases/assets/<id>`, which does the same.
- *
- * Both were verified against this private repository before this was written:
- * authenticated requests return 200, unauthenticated ones 404.
- *
- * The token is the same one the app already stores for reading the GitHub API, so
- * updating requires no extra credential — but it does mean only people with read
- * access to the repository can update.
+ * The release repository is public, so the updater works anonymously — no
+ * headers, no Rust. The manifest is served from `raw.githubusercontent.com` on
+ * the `releases` branch (a stable URL, unlike per-release asset ids) and points
+ * the download at the asset's `api.github.com/.../releases/assets/<id>` URL,
+ * which honours the updater's `Accept: application/octet-stream`.
  */
 
 export type UpdatePhase =
@@ -66,12 +54,6 @@ export async function currentVersion(): Promise<string> {
   return getVersion();
 }
 
-function authHeaders(token: string | null): Record<string, string> | undefined {
-  // Deliberately only Authorization: setting Accept here would break one of the
-  // two requests, since they need different values.
-  return token ? { Authorization: `Bearer ${token}` } : undefined;
-}
-
 export interface CheckOutcome {
   update: Update | null;
   state: Partial<UpdateState>;
@@ -81,11 +63,10 @@ export interface CheckOutcome {
  * Look for a newer release. Returns the `Update` handle so the caller can hand it
  * back to `installUpdate` without re-checking.
  */
-export async function checkForUpdate(token: string | null): Promise<CheckOutcome> {
+export async function checkForUpdate(): Promise<CheckOutcome> {
   const version = await currentVersion();
-  const headers = authHeaders(token);
 
-  const update = await check({ headers, timeout: 30_000 });
+  const update = await check({ timeout: 30_000 });
   const lastCheckedAt = new Date().toISOString();
 
   if (!update) {
@@ -122,7 +103,6 @@ export async function checkForUpdate(token: string | null): Promise<CheckOutcome
  */
 export async function installUpdate(
   update: Update,
-  token: string | null,
   onProgress: (patch: Partial<UpdateState>) => void,
 ): Promise<void> {
   let downloaded = 0;
@@ -149,7 +129,6 @@ export async function installUpdate(
           break;
       }
     },
-    { headers: authHeaders(token) },
   );
 
   onProgress({ phase: "ready", progress: 1 });
@@ -197,13 +176,10 @@ export function describeUpdateError(err: unknown): string {
   const message = (err as Error)?.message ?? String(err);
 
   if (/404|not found/i.test(message)) {
-    return (
-      "Could not read the update manifest (404). Either no release has been published yet, " +
-      "or the stored GitHub token lacks read access to this repository."
-    );
+    return "Could not read the update manifest (404). No release has been published yet.";
   }
   if (/401|403|unauthor|forbidden/i.test(message)) {
-    return "GitHub rejected the credentials for the update check. Re-check the token in Settings.";
+    return "GitHub rejected the update check. Rate limits reset hourly — try again later.";
   }
   if (/signature|minisign|pubkey/i.test(message)) {
     return (

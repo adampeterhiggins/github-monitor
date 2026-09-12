@@ -62,8 +62,7 @@ export const useUpdates = create<UpdateStore>((set, get) => ({
     if (manual) set({ phase: "checking", error: null });
 
     try {
-      const token = readToken();
-      const { update, state } = await checkForUpdate(token);
+      const { update, state } = await checkForUpdate();
       pendingUpdate = update;
       set(state);
     } catch (err) {
@@ -79,7 +78,7 @@ export const useUpdates = create<UpdateStore>((set, get) => ({
     if (!pendingUpdate || get().busy) return;
     set({ busy: true });
     try {
-      await installUpdate(pendingUpdate, readToken(), (p) => set(p));
+      await installUpdate(pendingUpdate, (p) => set(p));
     } catch (err) {
       set({ phase: "error", error: describeUpdateError(err) });
     } finally {
@@ -109,17 +108,3 @@ export const useUpdates = create<UpdateStore>((set, get) => ({
     };
   },
 }));
-
-/**
- * The GitHub token lives in the app store. Read it lazily at call time rather than
- * wiring a store-to-store subscription, so a token added after launch is picked up.
- */
-let tokenGetter: () => string | null = () => null;
-
-export function provideUpdateToken(getter: () => string | null): void {
-  tokenGetter = getter;
-}
-
-function readToken(): string | null {
-  return tokenGetter();
-}

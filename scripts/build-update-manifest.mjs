@@ -4,17 +4,11 @@
  *
  *   GH_TOKEN=… node scripts/build-update-manifest.mjs --tag v0.2.0 [--out latest.json]
  *
- * Why this exists rather than pointing the updater at
- * `releases/latest/download/latest.json`: that URL only works on a public
- * repository. This repository is private, so the manifest must reference each
- * asset by its **API** URL —
- * `https://api.github.com/repos/O/R/releases/assets/<id>` — which honours a bearer
- * token. Asset ids only exist after upload, hence generating the manifest as a
- * post-publish step.
- *
- * The app sends only an `Authorization` header; the updater then defaults `Accept`
- * to `application/json` for the manifest and `application/octet-stream` for the
- * download, which is exactly what each endpoint needs.
+ * The manifest references each asset by its **API** URL —
+ * `https://api.github.com/repos/O/R/releases/assets/<id>` — because asset ids
+ * only exist after upload, hence generating the manifest as a post-publish step.
+ * The updater's `Accept: application/octet-stream` on the download is exactly
+ * what the asset endpoint needs.
  *
  * One universal macOS build serves both architectures, so both platform keys point
  * at the same asset.

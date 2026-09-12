@@ -1,8 +1,11 @@
 [package]
 name = "github-monitor"
 version = "0.1.5"
-description = "A Tauri App"
-authors = ["you"]
+description = "Org-wide GitHub Insights analytics for macOS"
+authors = ["Adam Higgins"]
+license = "MIT"
+repository = "https://github.com/adampeterhiggins/github-monitor"
+homepage = "https://github.com/adampeterhiggins/github-monitor"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

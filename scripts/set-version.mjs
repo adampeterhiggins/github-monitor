@@ -8,7 +8,9 @@
  * `tauri.conf.json` is the version the updater compares against, so if it drifts
  * from `package.json` the app either offers an update it already has or never
  * offers one at all. Cargo.toml is kept aligned so `cargo` metadata is not
- * misleading.
+ * misleading — and the root package's entry in Cargo.lock is rewritten too,
+ * otherwise the lockfile stays a version behind until the next `cargo` run and
+ * leaves the tree permanently dirty between releases.
  */
 
 import { readFileSync, writeFileSync, appendFileSync } from "node:fs";
@@ -25,22 +27,20 @@ if (!/^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(version)) {
   process.exit(2);
 }
 
-// package.json
 const pkgPath = "package.json";
 const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
 const previous = pkg.version;
 pkg.version = version;
 writeFileSync(pkgPath, `${JSON.stringify(pkg, null, 2)}\n`);
 
-// tauri.conf.json — the one the updater actually compares
 const confPath = "src-tauri/tauri.conf.json";
 const conf = JSON.parse(readFileSync(confPath, "utf8"));
 conf.version = version;
 writeFileSync(confPath, `${JSON.stringify(conf, null, 2)}\n`);
 
-// Cargo.toml — only the first `version =` under [package]
 const cargoPath = "src-tauri/Cargo.toml";
 let cargo = readFileSync(cargoPath, "utf8");
+const cargoName = cargo.match(/^name\s*=\s*"([^"]+)"\s*$/m)?.[1];
 let replaced = false;
 cargo = cargo.replace(/^version\s*=\s*".*"$/m, (line) => {
   if (replaced) return line;
@@ -49,7 +49,21 @@ cargo = cargo.replace(/^version\s*=\s*".*"$/m, (line) => {
 });
 writeFileSync(cargoPath, cargo);
 
-console.log(`${previous} -> ${version} (package.json, tauri.conf.json, Cargo.toml)`);
+const lockPath = "src-tauri/Cargo.lock";
+if (cargoName) {
+  try {
+    const lock = readFileSync(lockPath, "utf8");
+    const blockRe = new RegExp(
+      `(\\[\\[package\\]\\]\\nname = "${cargoName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}"\\nversion = ")[^"]*"`,
+    );
+    const synced = lock.replace(blockRe, `$1${version}"`);
+    if (synced !== lock) writeFileSync(lockPath, synced);
+  } catch {
+    // No lockfile yet — cargo will generate one at the new version on build.
+  }
+}
+
+console.log(`${previous} -> ${version} (package.json, tauri.conf.json, Cargo.toml, Cargo.lock)`);
 
 if (process.argv.includes("--github-output") && process.env.GITHUB_OUTPUT) {
   appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\nprevious=${previous}\n`);

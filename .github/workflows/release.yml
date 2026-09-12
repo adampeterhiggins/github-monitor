@@ -192,6 +192,63 @@ jobs:
           fail_on_unmatched_files: true
           token: ${{ github.token }}
 
+  tap:
+    name: Update Homebrew tap
+    needs: [preflight, release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: macos-bundle
+          path: dist-release
+
+      - name: Compute dmg sha256
+        id: digest
+        run: |
+          set -euo pipefail
+          sha="$(shasum -a 256 "dist-release/github-monitor_${{ needs.preflight.outputs.version }}_universal.dmg" | cut -d' ' -f1)"
+          echo "sha256=$sha" >> "$GITHUB_OUTPUT"
+
+      - name: Require tap token
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [[ -z "${TAP_TOKEN}" ]]; then
+            echo "::error::HOMEBREW_TAP_TOKEN is not set. Create a fine-grained PAT with" \
+                 "contents:write on adampeterhiggins/homebrew-tap only, then:" \
+                 "gh secret set HOMEBREW_TAP_TOKEN --repo ${GITHUB_REPOSITORY}"
+            exit 1
+          fi
+
+      - name: Check out the tap
+        uses: actions/checkout@v4
+        with:
+          repository: adampeterhiggins/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+      - name: Update the cask and push
+        env:
+          VERSION: ${{ needs.preflight.outputs.version }}
+          SHA256: ${{ steps.digest.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          sed -i -E \
+            -e "s/^  version \".*\"/  version \"${VERSION}\"/" \
+            -e "s/^  sha256 \".*\"/  sha256 \"${SHA256}\"/" \
+            Casks/github-monitor.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/github-monitor.rb
+          if git diff --cached --quiet; then
+            echo "Cask already current; nothing to push."
+          else
+            git commit -m "github-monitor ${VERSION}"
+            git push
+          fi
+
   manifest:
     name: Update updater manifest
     needs: [preflight, release]
@@ -217,8 +274,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # The app fetches this file from raw.githubusercontent.com, which serves
-          # private repositories to an authenticated request. It therefore needs a
+          # The app fetches this file from raw.githubusercontent.com, which needs a
           # stable branch path, not a per-release asset URL.
           cp latest.json /tmp/latest.json
           # Remove the untracked copy before switching branches. The releases
@@ -274,7 +330,7 @@ jobs:
           fi
           echo "Manifest on the releases branch serves ${COMMITTED}."
 
-          # The artifact must actually be downloadable with the same auth the app uses.
+          # The artifact must actually be downloadable.
           ASSET_URL="$(gh api "repos/${REPO}/contents/latest.json?ref=releases" \
             --jq '.content' | base64 -d \
             | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{process.stdout.write(JSON.parse(d).platforms["darwin-aarch64"].url)})')"

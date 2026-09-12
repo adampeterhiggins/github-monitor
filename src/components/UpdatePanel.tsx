@@ -1,10 +1,8 @@
-import { useApp } from "../lib/state/app";
 import { useUpdates } from "../lib/state/updates";
 import { formatBytes, formatPublished } from "../lib/updates";
 import { Button, Callout, Card, CardHeader, Spinner } from "./ui";
 
 export function UpdatePanel() {
-  const token = useApp((s) => s.token);
   const state = useUpdates();
   const pct = state.progress != null ? Math.round(state.progress * 100) : null;
 
@@ -111,9 +109,7 @@ export function UpdatePanel() {
       ) : null}
 
       <p className="mt-3 text-[11px] leading-relaxed text-ink-secondary">
-        {token
-          ? "Updates come from this app's own private repository, so the check reuses the GitHub token stored above. Only accounts with read access to that repository can update."
-          : "Updates are served from a private repository and need the GitHub token above to authenticate. Add a token to enable update checks."}
+        Updates are checked against the project's GitHub releases — no sign-in needed.
       </p>
     </Card>
   );
