@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useApp, startThemeSync } from "./lib/state/app";
 import { useUpdates } from "./lib/state/updates";
-import { provideUpdateToken } from "./lib/state/updates";
 import { UpdateBadge } from "./components/UpdatePanel";
 import { Button, Card, Spinner } from "./components/ui";
 import { Setup } from "./pages/Setup";
@@ -75,13 +74,9 @@ function Shell() {
   useEffect(() => startThemeSync(), []);
 
   // One updater poller for the whole app, so the sidebar badge and the Settings
-  // card never issue competing checks. The token is read lazily so one added
-  // after launch is picked up.
+  // card never issue competing checks.
   const startPoller = useUpdates((s) => s.startPoller);
-  useEffect(() => {
-    provideUpdateToken(() => useApp.getState().token);
-    return startPoller();
-  }, [startPoller]);
+  useEffect(() => startPoller(), [startPoller]);
 
   if (!booted) {
     return (

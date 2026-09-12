@@ -7,6 +7,18 @@ is here, with **repository turned into a filter** you slice by — plus a
 
 Tauri v2 shell (real `.app`, WKWebView, ~10 MB) with all logic in TypeScript.
 
+## Install
+
+```bash
+brew install --cask adampeterhiggins/tap/github-monitor
+```
+
+The build is unsigned, so installing via Homebrew is the easy path — it skips the quarantine attribute. If you download the `.dmg` from a [release](https://github.com/adampeterhiggins/github-monitor/releases) directly instead, macOS will refuse to open it; either allow it in **System Settings → Privacy & Security** after the first failed launch, or run:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/GitHub Monitor.app"
+```
+
 ## Setup
 
 ```bash
@@ -70,6 +82,10 @@ npx tauri signer generate -w .updater/signing.key -p ""
 # 2. Give CI the private key
 gh secret set TAURI_SIGNING_PRIVATE_KEY < .updater/signing.key
 gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD --body ""
+
+# 3. Let CI update the Homebrew tap — create a fine-grained PAT with
+#    contents:write on adampeterhiggins/homebrew-tap only, then:
+gh secret set HOMEBREW_TAP_TOKEN --repo adampeterhiggins/github-monitor
 ```
 
 The **public** key lives in `src-tauri/tauri.conf.json` and is committed — that is
@@ -89,10 +105,10 @@ make release PUSH=0   # rehearse: stops after tagging, pushes nothing
 the universal-build target, the signing key, the repo secret, git state) before you
 find out the hard way.
 
-The chain is: version gate → bump → `npm run check` → commit → tag → push → follow
-the CI run → **verify the published manifest is actually installable**. That last
-step reads the same URL with the same auth the app uses, so a green CI run with a
-broken manifest still fails.
+The chain is: `npm run check` → version gate → bump → commit → tag → push →
+follow the CI run → **verify the published manifest is actually installable**.
+That last step reads the same URL the app polls, so a green CI run with a broken
+manifest still fails.
 
 | Knob | Effect |
 |---|---|
@@ -117,10 +133,12 @@ git push origin main --tags
 ```
 
 The workflow then builds a signed **universal** macOS bundle, publishes a GitHub
-Release with the `.dmg`, `.app.tar.gz` and `.app.tar.gz.sig`, and commits a
-`latest.json` to the `releases` branch. The running app picks it up on its next
-check — 15 seconds after launch, then every 6 hours — or immediately via
-**Settings → Updates → Check now**.
+Release with the `.dmg`, `.app.tar.gz` and `.app.tar.gz.sig`, updates the
+`github-monitor` cask in
+[adampeterhiggins/homebrew-tap](https://github.com/adampeterhiggins/homebrew-tap),
+and commits a `latest.json` to the `releases` branch. The running app picks it up
+on its next check — 15 seconds after launch, then every 6 hours — or immediately
+via **Settings → Updates → Check now**.
 
 `workflow_dispatch` with a version input does the same thing without a local tag.
 
@@ -129,27 +147,14 @@ tag. That mismatch is silent but nasty: the updater compares against the config
 version, so the app would either re-offer a version it already runs or never offer
 it at all.
 
-### How updates reach a private repo
+### How updates reach the app
 
-This repository is private, so the updater cannot fetch anonymously. Two facts make
-it work without any Rust:
-
-- the plugin sends configured request headers on **both** the manifest fetch and
-  the binary download, defaulting `Accept` only when unset — `application/json` for
-  the manifest, `application/octet-stream` for the download. Passing just
-  `Authorization` therefore leaves both correct;
-- `raw.githubusercontent.com` honours a bearer token on private repositories, and
-  so does `api.github.com/repos/…/releases/assets/<id>`.
-
-So the manifest lives on the `releases` branch (a stable URL, unlike per-release
-asset ids) and points the download at the asset's **API** URL. Both were verified
-against this repository before the code was written: authenticated requests return
-200, unauthenticated ones 404.
-
-The app reuses the GitHub token you already gave it, so updating needs no extra
-credential — but it does mean **only accounts with read access to this repository
-can update**. If that becomes limiting, host the artifacts in a small public repo
-and drop the auth headers.
+The repository is public, so the updater works anonymously — the check sends no
+credentials at all. The manifest lives on the `releases` branch (a stable URL,
+unlike per-release asset ids) at
+`raw.githubusercontent.com/…/releases/latest.json`, and points the download at
+the asset's `api.github.com` URL, which honours the updater's
+`Accept: application/octet-stream`.
 
 **`raw.githubusercontent.com` caches**, so a freshly published manifest is not
 served immediately. Measured on the v0.1.1 release: **182 seconds** between the
@@ -475,3 +480,7 @@ picked by eye: adjacent-pair worst CVD ΔE 9.1 light / 8.4 dark, normal-vision �
 obligates a relief channel — so **every chart ships a table view** via the
 Chart/Table toggle, and no value is reachable only by telling two fills apart. Dark
 mode is a separately selected palette, not a lightness flip.
+
+## License
+
+[MIT](LICENSE)
