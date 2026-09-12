@@ -1,15 +1,15 @@
 {
   "version": "0.2.0",
-  "notes": "## What's Changed\n* Prepare for public release: Homebrew tap publishing and anonymous updates by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/7\n\n\n**Full Changelog**: https://github.com/adampeterhiggins/github-monitor/compare/v0.1.5...v0.2.0",
+  "notes": "## What's Changed\n* Prepare for public release: Homebrew tap publishing and anonymous updates by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/7\n\n\n**Full Changelog**: https://github.com/adampeterhiggins/github-monitor/compare/v0.1.5...v0.2.0\n\n## What's Changed\n* Prepare for public release: Homebrew tap publishing and anonymous updates by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/7\n\n\n**Full Changelog**: https://github.com/adampeterhiggins/github-monitor/compare/v0.1.5...v0.2.0",
   "pub_date": "2026-09-12T11:21:35Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUh2dk0xNEhuMzhaVDJpZ1BpN3JSNXI3aE9zY1VMdUxLTUxXRm5zaHp2NnlKVGo1M1Y2WUgwZmFUbmcyUWF4YmNEMWdqNmFMeFJEU1FhbjZZcmFBTFEwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5MjEyMDg4CWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negpQRm00NC9UQ25nWUtsWUt1L2gzamRhSXFOeXhpeVBkUGJWUk1HOVJCMHN1bFN6RS90MW5CSkZvUjQ2RmoxTkxCS2FxMmZwamNvSzBGcUhGcENCUGhBUT09Cg==",
-      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/559142181"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUtRalpRL3MxUlJQczFVb05UWWc2VTREeUlBR2M5N0t2WXRsUlJha2MwdkN3QTM5dUZNbzdGZkNKTnRWT3ZzTEdVdVVNN2FzTW01M0djRW9Obm1aQUE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5MjEyNTEwCWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negpIM0VBQ0w0bzV1YXRFbUNQaVpsMEwxSEJ2UWQ0WDJSTjlWTk5EbXBpNnhGRjIrZi8yYWtzTGQySUhyMkV4ckptbm5DeEJJYnU4L3FxTTRkT1VhYlNEdz09Cg==",
+      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/559151921"
     },
     "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUh2dk0xNEhuMzhaVDJpZ1BpN3JSNXI3aE9zY1VMdUxLTUxXRm5zaHp2NnlKVGo1M1Y2WUgwZmFUbmcyUWF4YmNEMWdqNmFMeFJEU1FhbjZZcmFBTFEwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5MjEyMDg4CWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negpQRm00NC9UQ25nWUtsWUt1L2gzamRhSXFOeXhpeVBkUGJWUk1HOVJCMHN1bFN6RS90MW5CSkZvUjQ2RmoxTkxCS2FxMmZwamNvSzBGcUhGcENCUGhBUT09Cg==",
-      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/559142181"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUtRalpRL3MxUlJQczFVb05UWWc2VTREeUlBR2M5N0t2WXRsUlJha2MwdkN3QTM5dUZNbzdGZkNKTnRWT3ZzTEdVdVVNN2FzTW01M0djRW9Obm1aQUE4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5MjEyNTEwCWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negpIM0VBQ0w0bzV1YXRFbUNQaVpsMEwxSEJ2UWQ0WDJSTjlWTk5EbXBpNnhGRjIrZi8yYWtzTGQySUhyMkV4ckptbm5DeEJJYnU4L3FxTTRkT1VhYlNEdz09Cg==",
+      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/559151921"
     }
   }
 }
