@@ -1,7 +1,7 @@
 {
   "name": "github-monitor",
   "private": true,
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Native macOS app for GitHub Insights analytics across a whole organisation",
   "author": "Adam Higgins",
   "license": "MIT",
