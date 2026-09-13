@@ -130,6 +130,15 @@ textarea,
   user-select: text;
 }
 
+/* The window-wide arrow is right for chrome, wrong for controls — every
+   clickable element gets the pointer back. Disabled controls keep the cursor
+   their component set (not-allowed, or default where it means "not a toggle"). */
+button:not(:disabled),
+select:not(:disabled),
+[role="button"]:not([aria-disabled="true"]) {
+  cursor: pointer;
+}
+
 /* Columns of figures align; standalone numbers use proportional figures. */
 .tabular {
   font-variant-numeric: tabular-nums;
