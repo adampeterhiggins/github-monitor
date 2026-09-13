@@ -1,11 +1,12 @@
-import { useEffect, useState } from "react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { useApp, startThemeSync } from "./lib/state/app";
 import { useUpdates } from "./lib/state/updates";
+import { syncProblems } from "./lib/db/queries";
 import { UpdateBadge } from "./components/UpdatePanel";
-import { Button, Card, Spinner } from "./components/ui";
+import { Button, Card, Spinner, full } from "./components/ui";
 import { Setup } from "./pages/Setup";
-import { Settings } from "./pages/Settings";
+import { Settings, SETTINGS_GROUPS, type SettingsSubId } from "./pages/Settings";
 import { Pulse } from "./pages/Pulse";
 import { Contributors } from "./pages/Contributors";
 import { Commits } from "./pages/Commits";
@@ -66,6 +67,10 @@ export default function App() {
 function Shell() {
   const { booted, bootError, boot, token, org } = useApp();
   const [page, setPage] = useState<PageId>("contributors");
+  const [settingsSub, setSettingsSub] = useState<SettingsSubId>("repositories");
+  // Where "Back" from settings lands — the page the user was actually on, not a
+  // fixed default.
+  const lastContentPage = useRef<PageId>("contributors");
 
   useEffect(() => {
     void boot();
@@ -99,26 +104,47 @@ function Shell() {
 
   if (!token || !org) return <Setup />;
 
+  const navigate = (p: PageId) => {
+    if (p !== "settings") lastContentPage.current = p;
+    setPage(p);
+  };
+
+  const openSettings = (sub?: SettingsSubId) => {
+    if (sub) setSettingsSub(sub);
+    setPage("settings");
+  };
+
   return (
     <div className="flex h-full">
-      <Sidebar page={page} onNavigate={setPage} />
+      {page === "settings" ? (
+        <SettingsSidebar
+          sub={settingsSub}
+          backLabel={
+            NAV.find((i) => i.id === lastContentPage.current)?.label ?? "Back"
+          }
+          onSelect={setSettingsSub}
+          onBack={() => setPage(lastContentPage.current)}
+        />
+      ) : (
+        <Sidebar page={page} onNavigate={navigate} onOpenSettings={openSettings} />
+      )}
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <Page page={page} />
+        <Page page={page} settingsSub={settingsSub} />
       </main>
     </div>
   );
 }
 
-function NavGroup({
+function NavGroup<I extends string>({
   label,
   items,
-  page,
+  current,
   onNavigate,
 }: {
   label: string;
-  items: ReadonlyArray<{ id: PageId; label: string }>;
-  page: PageId;
-  onNavigate: (p: PageId) => void;
+  items: ReadonlyArray<{ id: I; label: string; badge?: ReactNode }>;
+  current: I;
+  onNavigate: (p: I) => void;
 }) {
   return (
     <li className="list-none">
@@ -130,15 +156,16 @@ function NavGroup({
           <li key={item.id}>
             <button
               onClick={() => onNavigate(item.id)}
-              aria-current={page === item.id ? "page" : undefined}
+              aria-current={current === item.id ? "page" : undefined}
               className={
-                "mb-0.5 w-full rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors " +
-                (page === item.id
+                "mb-0.5 flex w-full items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-left text-[12.5px] transition-colors " +
+                (current === item.id
                   ? "bg-wash-strong font-medium text-ink"
                   : "text-ink-secondary hover:bg-wash hover:text-ink")
               }
             >
-              {item.label}
+              <span className="min-w-0 truncate">{item.label}</span>
+              {item.badge}
             </button>
           </li>
         ))}
@@ -147,7 +174,15 @@ function NavGroup({
   );
 }
 
-function Sidebar({ page, onNavigate }: { page: PageId; onNavigate: (p: PageId) => void }) {
+function Sidebar({
+  page,
+  onNavigate,
+  onOpenSettings,
+}: {
+  page: PageId;
+  onNavigate: (p: PageId) => void;
+  onOpenSettings: (sub?: SettingsSubId) => void;
+}) {
   const org = useApp((s) => s.org);
   const lastSyncAt = useApp((s) => s.lastSyncAt);
   const syncing = useApp((s) => s.syncing);
@@ -165,16 +200,16 @@ function Sidebar({ page, onNavigate }: { page: PageId; onNavigate: (p: PageId) =
       </div>
 
       <ul className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
-        <NavGroup label="Insights" items={INSIGHTS} page={page} onNavigate={onNavigate} />
-        <NavGroup label="Org views" items={ORG_VIEWS} page={page} onNavigate={onNavigate} />
+        <NavGroup label="Insights" items={INSIGHTS} current={page} onNavigate={onNavigate} />
+        <NavGroup label="Org views" items={ORG_VIEWS} current={page} onNavigate={onNavigate} />
       </ul>
 
       <div className="border-t border-hairline p-2">
-        <UpdateBadge onClick={() => onNavigate("settings")} />
+        <UpdateBadge onClick={() => onOpenSettings("updates")} />
         <Button
-          variant={page === "settings" ? "default" : "ghost"}
+          variant="ghost"
           className="w-full justify-start"
-          onClick={() => onNavigate("settings")}
+          onClick={() => onOpenSettings()}
         >
           {syncing ? <Spinner /> : null} Settings &amp; sync
         </Button>
@@ -186,7 +221,98 @@ function Sidebar({ page, onNavigate }: { page: PageId; onNavigate: (p: PageId) =
   );
 }
 
-function Page({ page }: { page: PageId }) {
+/**
+ * While inside Settings the sidebar swaps to the subpage nav — the same pattern
+ * as macOS System Settings. Live counts ride on the items that have something to
+ * report: a spinner while a sync runs, the outstanding problem count, and the
+ * pending update version.
+ */
+function SettingsSidebar({
+  sub,
+  backLabel,
+  onSelect,
+  onBack,
+}: {
+  sub: SettingsSubId;
+  backLabel: string;
+  onSelect: (s: SettingsSubId) => void;
+  onBack: () => void;
+}) {
+  const org = useApp((s) => s.org);
+  const db = useApp((s) => s.db);
+  const syncing = useApp((s) => s.syncing);
+  const lastSyncAt = useApp((s) => s.lastSyncAt);
+  const updateVersion = useUpdates((s) => s.availableVersion);
+  const updatePhase = useUpdates((s) => s.phase);
+
+  const problems = useQuery({
+    // Same key as the Sync problems subpage, so the badge and the table share
+    // one query and clear together when an item is fixed.
+    queryKey: ["sync-problems", syncing],
+    enabled: db != null,
+    queryFn: () => syncProblems(db!),
+  });
+  const problemCount = problems.data?.length ?? 0;
+  const updatePending =
+    updateVersion != null &&
+    updatePhase !== "up-to-date" &&
+    updatePhase !== "idle" &&
+    updatePhase !== "checking";
+
+  const badgeFor = (id: SettingsSubId): ReactNode => {
+    switch (id) {
+      case "sync":
+        return syncing ? <Spinner /> : null;
+      case "sync-problems":
+        return problemCount > 0 ? (
+          <span className="text-[10.5px] font-semibold tabular text-critical">
+            {full(problemCount)}
+          </span>
+        ) : null;
+      case "updates":
+        return updatePending ? (
+          <span className="text-[10.5px] font-semibold tabular text-accent">{updateVersion}</span>
+        ) : null;
+      default:
+        return null;
+    }
+  };
+
+  return (
+    <nav className="flex w-[212px] shrink-0 flex-col border-r border-hairline bg-sidebar">
+      <div className="px-4 pt-4 pb-3">
+        <div className="text-[11px] uppercase tracking-wide text-ink-muted">
+          Settings &amp; sync
+        </div>
+        <div className="mt-0.5 truncate text-[14px] font-semibold text-ink">{org}</div>
+      </div>
+
+      <ul className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+        {SETTINGS_GROUPS.map((group) => (
+          <NavGroup
+            key={group.label}
+            label={group.label}
+            items={group.items.map((item) => ({ ...item, badge: badgeFor(item.id) }))}
+            current={sub}
+            onNavigate={onSelect}
+          />
+        ))}
+      </ul>
+
+      <div className="border-t border-hairline p-2">
+        <UpdateBadge onClick={() => onSelect("updates")} />
+        <Button variant="ghost" className="w-full justify-start" onClick={onBack}>
+          ‹ Back to {backLabel}
+        </Button>
+        <p className="mt-1.5 px-1 text-[10px] leading-snug text-ink-muted">
+          {lastSyncAt ? `Synced ${new Date(lastSyncAt).toLocaleString("en-GB")}` : "Never synced"}
+        </p>
+      </div>
+    </nav>
+  );
+}
+
+function Page({ page, settingsSub }: { page: PageId; settingsSub: SettingsSubId }) {
   switch (page) {
     case "pulse":
       return <Pulse />;
@@ -221,6 +347,6 @@ function Page({ page }: { page: PageId }) {
     case "scorecard":
       return <Scorecard />;
     case "settings":
-      return <Settings />;
+      return <Settings sub={settingsSub} />;
   }
 }
