@@ -60,41 +60,56 @@ and the app says so rather than rendering blank charts.
 | Actions usage | `actions/runs` | Wall-clock elapsed, not billable minutes |
 | Actions performance | `actions/runs` | p50/p90/p99 duration, failure rates |
 | Ownership | `contributor_weeks` | Bus factor, concentration over time, people × repositories matrix — no GitHub equivalent |
-| Line ownership | Local `git blame` | Surviving-line attribution, co-authors and identity merging; automatic GitHub clones or existing local clones |
+| Line ownership | Synced `git blame` snapshots | Org-wide surviving lines, co-author credit and identity merging; incremental Git-backed sync |
 | People | `contributor_weeks` + PRs | One person across the org, not across all of GitHub |
 | Roster | `contributor_weeks` | Arrivals, last-seen, and repositories left cold |
 | Scorecard | several | One ranked table joining concentration, health, alerts, open PRs, lead time, views |
 
 ## Line ownership
 
-Open **Line ownership** and select a GitHub repository, or enter the absolute path
-of an existing local clone. **Scan line ownership** clones full history using the
-app’s saved GitHub token and reuses/refetches that cache on subsequent scans.
-Repositories are scanned individually. Managed bare clones live under the app’s
-cache directory in `line-ownership/`; credentials are passed only to the Git process,
-never stored in the clone. Git must be installed. Local clones are read without
-fetching or changing their working trees; shallow clones must be unshallowed first.
+Line ownership is included in **Settings & sync → Sync now / Sync changes** by
+default. It runs for the same selected repositories as the other analytics, with
+the same archived-repository controls. **Full re-sync** rebuilds all selected
+ownership snapshots, and **Resume** retries unfinished repositories.
 
-The report attributes committed lines surviving at a revision (HEAD by default),
-including full credit for each `Co-authored-by` identity. Shares can therefore sum
-past 100%. Person grouping merges shared emails or normalized names transitively;
-Email and Name grouping are also available. Blame honours the clone’s `.mailmap`.
-Same-name people can merge, so use Email when that is undesirable.
+The first sync downloads full Git history using the saved GitHub token. Subsequent
+syncs fetch only missing Git objects and inspect the new default-branch head. Each
+repository’s exact commit SHA, calculation/check timestamps, report, and per-file
+attribution cache are saved together in one atomic SQLite upsert. The page reads
+these saved results across the selected repositories, including after app restarts.
+A failure or cancellation retains the previous complete snapshot and checkpoint.
 
-Scan options include Git pathspecs, exclusion globs, whitespace handling, generated
-files and bot exclusion (`[bot]` or `copilot` in the name/email). Binary files,
-symlinks and submodules are skipped. When bots are excluded, bot-only lines are
-removed from the share base; human co-authored lines remain. Skipped files and blame
-failures are shown with the results. The revision is resolved once before blaming
-so a scan cannot mix revisions. Cancellation stops after the current Git operation.
+Incremental calculation reuses untouched files, recalculates files touched by the
+intervening history and removes deleted files. It examines every intervening commit,
+not just the final tree diff: a change followed by a revert can restore identical
+content with different attribution. Rewritten history, a missing/incompatible cache,
+changes to `.mailmap`, and full re-sync trigger a complete calculation. New co-author
+trailers are loaded only for commits not already cached. An unchanged head requires
+no new blame work. Git transfers and blame run independently of the API sync queue.
 
-Results remain available while navigating the app and can be exported as CSV or
-JSON. Scan options are remembered locally; reports are held for the current app
-session. Organisation, date and GitHub-login filters do not apply to this view.
-The existing **Ownership** page continues to measure commit concentration.
+The **Line ownership** page shows surviving-line credit across the selected
+repositories, with Person/Email/Name grouping, bot exclusion and CSV/JSON export.
+Identity merging happens across the entire selection before co-author credit is
+counted, so connected aliases cannot credit the same line twice. Each distinct
+co-author gets full credit, so shares can sum above 100%. Bot exclusion removes
+bot-only lines from the share base. Generated files, binary files, symlinks and
+submodules are skipped, and attribution ignores whitespace-only edits.
 
-Run the native scanner’s Git-fixture tests with
+Repository snapshots show the calculated commit and timestamp, including stale
+saved results when a refresh fails. This is a latest-snapshot view, with no date
+range or GitHub-login filter. The existing **Ownership** page continues to measure
+commit concentration.
+
+Managed bare clones live under the app’s cache directory in `line-ownership/`.
+Credentials are passed only to the Git process, never stored in clone config.
+Git must be installed; cancellation stops after the current Git operation. Clearing
+the analytics cache clears ownership snapshots and forces a fresh calculation on
+the next sync, while existing clones can be reused.
+
+Run the native Git-fixture tests with
 `cargo test --locked --manifest-path src-tauri/Cargo.toml --lib`.
+`npm run test:line-ownership` tests sync integration, durable checkpoints, failure
+recovery, org-wide aggregation and exports against a real SQLite database.
 
 ## Releasing and updating
 

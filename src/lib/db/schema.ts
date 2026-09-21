@@ -13,9 +13,18 @@
  * series with empty weeks and keeping them would multiply row counts for nothing.
  */
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 export const SCHEMA_SQL = `
+-- One atomic snapshot keeps the summary, revision and incremental file cache aligned.
+CREATE TABLE IF NOT EXISTS line_ownership (
+  repo_id INTEGER PRIMARY KEY,
+  revision TEXT,
+  calculated_at TEXT NOT NULL,
+  checked_at TEXT NOT NULL,
+  snapshot TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
   value TEXT

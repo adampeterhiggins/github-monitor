@@ -182,7 +182,7 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
             <strong className="text-ink">{full(work.data.complete + work.data.outstanding)}</strong>{" "}
             items are already synced. <strong className="text-ink">Resume</strong> fetches only the{" "}
             <strong className="text-ink">{full(work.data.outstanding)}</strong> outstanding —
-            {work.data.pending > 0 ? ` ${full(work.data.pending)} GitHub was still computing,` : ""}
+            {work.data.pending > 0 ? ` ${full(work.data.pending)} unfinished or still computing,` : ""}
             {work.data.errored > 0 ? ` ${full(work.data.errored)} that failed,` : ""}
             {work.data.never > 0 ? ` ${full(work.data.never)} not yet attempted,` : ""} and leaves the
             rest alone. <strong className="text-ink">Sync changes</strong> also refreshes data that
@@ -226,6 +226,11 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
                 resume or re-sync them in the same run.
               </p>
             </div>
+            <p className="mb-3 text-[11px] leading-relaxed text-ink-muted">
+              Line ownership saves each repository’s commit and surviving-line attribution.
+              The first sync downloads full Git history; later syncs fetch new history and
+              recalculate touched files. Full re-sync rebuilds the ownership snapshots.
+            </p>
             <div className="grid grid-cols-2 gap-x-4 gap-y-1">
               {ALL_ENDPOINTS.map((e) => (
                 <label key={e} className="flex cursor-pointer items-center gap-2 text-[12px] text-ink">

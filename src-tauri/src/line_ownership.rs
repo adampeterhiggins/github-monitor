@@ -16,7 +16,7 @@ pub struct ScanControl {
     cancelled: Arc<AtomicBool>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanOptions {
     repo: String,
@@ -29,7 +29,7 @@ pub struct ScanOptions {
     exclude_bots: bool,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 enum GroupBy {
     Person,
@@ -45,7 +45,7 @@ pub struct Progress {
     phase: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthorRow {
     author: String,
@@ -55,7 +55,7 @@ pub struct AuthorRow {
     share: f64,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Report {
     repo: String,
@@ -67,18 +67,45 @@ pub struct Report {
     credited_lines: u64,
     coauthored_lines: u64,
     authors: Vec<AuthorRow>,
+    credits: Vec<LineCredit>,
+    files_reused: usize,
+    files_recalculated: usize,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq, Ord, PartialOrd)]
 struct Identity {
     name: String,
     email: String,
 }
-#[derive(Default)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 struct CommitLines {
     author: Identity,
     lines: u64,
 }
+
+#[derive(Clone, Deserialize, Serialize)]
+struct LineCredit {
+    lines: u64,
+    people: Vec<Identity>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct CachedFile {
+    blob: String,
+    binary: bool,
+    counts: BTreeMap<String, CommitLines>,
+}
+
+// Stored with the report in a single SQLite row: the file cache and commit
+// checkpoint become visible atomically, even if a sync is interrupted.
+#[derive(Deserialize, Serialize)]
+struct Snapshot {
+    version: u32,
+    report: Report,
+    files: BTreeMap<String, CachedFile>,
+    coauthors: BTreeMap<String, Vec<Identity>>,
+}
+const SNAPSHOT_VERSION: u32 = 1;
 
 fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new("git")
@@ -346,11 +373,21 @@ fn check_cancel(cancelled: &AtomicBool) -> Result<(), String> {
     }
 }
 
+#[cfg(test)]
 fn scan(
     options: ScanOptions,
     cancelled: &AtomicBool,
     progress: impl Fn(Progress),
 ) -> Result<Report, String> {
+    scan_snapshot(options, None, cancelled, progress).map(|s| s.report)
+}
+
+fn scan_snapshot(
+    options: ScanOptions,
+    previous: Option<&Snapshot>,
+    cancelled: &AtomicBool,
+    progress: impl Fn(Progress),
+) -> Result<Snapshot, String> {
     let input = PathBuf::from(&options.repo);
     let bare = git_text(&input, &["rev-parse", "--is-bare-repository"])?;
     let repo = PathBuf::from(
@@ -387,6 +424,45 @@ fn scan(
     if git_text(&repo, &["rev-parse", "--is-shallow-repository"])?.trim() == "true" {
         return Err("This clone has shallow history. Fetch its full history (git fetch --unshallow) before scanning.".into());
     }
+    let mut changed = BTreeSet::new();
+    let previous = previous.filter(|p| {
+        p.version == SNAPSHOT_VERSION
+            && p.report.options == options
+            && git(
+                &repo,
+                &["merge-base", "--is-ancestor", &p.report.revision, &revision],
+            )
+            .is_ok()
+    });
+    if let Some(previous) = previous {
+        if previous.report.revision != revision {
+            // Include all paths touched in intervening commits, including merges
+            // and changes later reverted to the same blob. Tree diff alone is unsafe.
+            let range = format!("{}..{}", previous.report.revision, revision);
+            let log = git(
+                &repo,
+                &[
+                    "log",
+                    "--format=",
+                    "--name-only",
+                    "-z",
+                    "--full-history",
+                    "-m",
+                    &range,
+                    "--",
+                ],
+            )?;
+            for path in log.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+                changed.insert(
+                    std::str::from_utf8(path)
+                        .map_err(|_| "Non-UTF-8 changed path")?
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    // Mailmap changes can change identities in every otherwise untouched file.
+    let previous = previous.filter(|_| !changed.contains(".mailmap"));
     let patterns: Vec<glob::Pattern> = GENERATED
         .iter()
         .filter(|_| !options.include_generated)
@@ -435,44 +511,64 @@ fn scan(
         }
     }
     let total = files.len();
-    let mut commits = BTreeMap::new();
+    let mut commits: BTreeMap<String, CommitLines> = BTreeMap::new();
+    let mut cached_files = BTreeMap::new();
     let mut files_blamed = 0;
+    let mut files_reused = 0;
+    let mut files_recalculated = 0;
     progress(Progress {
         completed: 0,
         total,
-        phase: "Blaming files".into(),
+        phase: "Updating line ownership".into(),
     });
     for (index, (path, blob)) in files.iter().enumerate() {
         check_cancel(cancelled)?;
-        // Suffixes alone miss binary files with no extension. Inspect committed bytes.
-        let content = git(&repo, &["cat-file", "blob", blob])?;
-        if content.iter().take(8000).any(|b| *b == 0) {
+        let cached = previous
+            .and_then(|p| p.files.get(path))
+            .filter(|f| f.blob == *blob && !changed.contains(path));
+        let file = if let Some(cached) = cached {
+            files_reused += 1;
+            cached.clone()
+        } else {
+            files_recalculated += 1;
+            let content = git(&repo, &["cat-file", "blob", blob])?;
+            let binary = content.iter().take(8000).any(|b| *b == 0);
+            let mut counts = BTreeMap::new();
+            if !binary {
+                let mut args = vec!["blame", "--line-porcelain", "--encoding=utf-8"];
+                if options.ignore_whitespace {
+                    args.push("-w");
+                }
+                args.extend([&revision, "--", path]);
+                // A failed file must not advance the durable checkpoint or replace
+                // the previous complete report with silently partial data.
+                let text =
+                    git_text(&repo, &args).map_err(|e| format!("Cannot blame {path}: {e}"))?;
+                parse_blame(&text, &mut counts);
+            }
+            CachedFile {
+                blob: blob.clone(),
+                binary,
+                counts,
+            }
+        };
+        if file.binary {
             *skipped.entry("binary".into()).or_default() += 1;
         } else {
-            let mut args = vec!["blame", "--line-porcelain", "--encoding=utf-8"];
-            if options.ignore_whitespace {
-                args.push("-w");
-            }
-            args.extend([&revision, "--", path]);
-            match git_text(&repo, &args) {
-                Ok(text) => {
-                    parse_blame(&text, &mut commits);
-                    files_blamed += 1;
-                }
-                Err(error) => {
-                    *skipped
-                        .entry(format!(
-                            "blame failed: {}",
-                            error.lines().next().unwrap_or("unknown error")
-                        ))
-                        .or_default() += 1;
-                }
+            files_blamed += 1;
+            for (sha, count) in &file.counts {
+                let entry = commits.entry(sha.clone()).or_default();
+                entry.author = count.author.clone();
+                entry.lines += count.lines;
             }
         }
+        cached_files.insert(path.clone(), file);
         progress(Progress {
             completed: index + 1,
             total,
-            phase: "Blaming files".into(),
+            phase: format!(
+                "Line ownership: {files_recalculated} recalculated, {files_reused} reused"
+            ),
         });
     }
     check_cancel(cancelled)?;
@@ -481,8 +577,20 @@ fn scan(
         total,
         phase: "Reading co-authors".into(),
     });
-    let shas: Vec<_> = commits.keys().map(String::as_str).collect();
-    let mut coauthors = BTreeMap::new();
+    let mut coauthors: BTreeMap<_, _> = previous
+        .map(|p| {
+            p.coauthors
+                .iter()
+                .filter(|(sha, _)| commits.contains_key(*sha))
+                .map(|(sha, people)| (sha.clone(), people.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let shas: Vec<_> = commits
+        .keys()
+        .filter(|sha| !coauthors.contains_key(*sha))
+        .map(String::as_str)
+        .collect();
     for chunk in shas.chunks(200) {
         check_cancel(cancelled)?;
         let mut args = vec!["log", "--no-walk", "--format=%H%x00%B%x00"];
@@ -497,7 +605,16 @@ fn scan(
     check_cancel(cancelled)?;
     let (authors, total_lines, coauthored_lines) =
         aggregate(&commits, &coauthors, options.group_by, options.exclude_bots);
-    Ok(Report {
+    let credits = commits
+        .iter()
+        .map(|(sha, count)| LineCredit {
+            lines: count.lines,
+            people: std::iter::once(count.author.clone())
+                .chain(coauthors.get(sha).into_iter().flatten().cloned())
+                .collect(),
+        })
+        .collect();
+    let report = Report {
         repo: repo.to_string_lossy().into_owned(),
         revision,
         options,
@@ -507,18 +624,28 @@ fn scan(
         credited_lines: authors.iter().map(|a| a.lines).sum(),
         coauthored_lines,
         authors,
+        credits,
+        files_reused,
+        files_recalculated,
+    };
+    Ok(Snapshot {
+        version: SNAPSHOT_VERSION,
+        report,
+        files: cached_files,
+        coauthors,
     })
 }
 
 #[tauri::command]
-pub async fn scan_line_ownership(
-    mut options: ScanOptions,
-    github_repo: Option<String>,
-    token: Option<String>,
+pub async fn sync_line_ownership(
+    github_repo: String,
+    token: String,
+    previous_json: Option<String>,
+    full: bool,
     app: tauri::AppHandle,
     on_progress: Channel<Progress>,
     control: State<'_, ScanControl>,
-) -> Result<Report, String> {
+) -> Result<String, String> {
     let cache = app
         .path()
         .app_cache_dir()
@@ -529,7 +656,7 @@ pub async fn scan_line_ownership(
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        return Err("A line ownership scan is already running".into());
+        return Err("A line ownership sync is already running".into());
     }
     control.cancelled.store(false, Ordering::SeqCst);
     let running = control.running.clone();
@@ -542,25 +669,57 @@ pub async fn scan_line_ownership(
             }
         }
         let _reset = Reset(running);
-        if let Some(full_name) = &github_repo {
-            let phase = |message: &str| {
-                let _ = on_progress.send(Progress {
-                    completed: 0,
-                    total: 0,
-                    phase: message.into(),
-                });
-            };
-            options.repo = prepare_github(&cache, full_name, token.as_deref(), &cancelled, phase)?
-                .to_string_lossy()
-                .into_owned();
-        }
-        let mut report = scan(options, &cancelled, |event| {
-            let _ = on_progress.send(event);
-        })?;
-        if let Some(full_name) = github_repo {
-            report.repo = format!("https://github.com/{full_name}");
-        }
-        Ok(report)
+        let phase = |message: &str| {
+            let _ = on_progress.send(Progress {
+                completed: 0,
+                total: 0,
+                phase: message.into(),
+            });
+        };
+        let repo = prepare_github(&cache, &github_repo, Some(&token), &cancelled, phase)?;
+        let options = ScanOptions {
+            repo: repo.to_string_lossy().into_owned(),
+            revision: "HEAD".into(),
+            group_by: GroupBy::Person,
+            pathspecs: vec![],
+            excludes: vec![],
+            include_generated: false,
+            ignore_whitespace: true,
+            exclude_bots: false,
+        };
+        let previous: Option<Snapshot> = if full {
+            None
+        } else {
+            previous_json.and_then(|s| serde_json::from_str(&s).ok())
+        };
+        let mut snapshot = if git_text(&repo, &["rev-list", "--all", "--count"])?.trim() == "0" {
+            Snapshot {
+                version: SNAPSHOT_VERSION,
+                files: BTreeMap::new(),
+                coauthors: BTreeMap::new(),
+                report: Report {
+                    repo: String::new(),
+                    revision: String::new(),
+                    options,
+                    files_blamed: 0,
+                    files_skipped: BTreeMap::new(),
+                    total_lines: 0,
+                    credited_lines: 0,
+                    coauthored_lines: 0,
+                    authors: vec![],
+                    credits: vec![],
+                    files_reused: 0,
+                    files_recalculated: 0,
+                },
+            }
+        } else {
+            scan_snapshot(options, previous.as_ref(), &cancelled, |event| {
+                let _ = on_progress.send(event);
+            })?
+        };
+        check_cancel(&cancelled)?;
+        snapshot.report.repo = format!("https://github.com/{github_repo}");
+        serde_json::to_string(&snapshot).map_err(|e| e.to_string())
     })
     .await
     .map_err(|e| e.to_string())?
@@ -948,6 +1107,166 @@ mod tests {
         assert!(!cache.path().join("org/missing.git").exists());
         assert!(!cache.path().join("org/missing.cloning").exists());
     }
+    fn assert_matches_full(incremental: &Snapshot, options: ScanOptions) {
+        let full = scan_snapshot(options, None, &AtomicBool::new(false), |_| {}).unwrap();
+        assert_eq!(incremental.report.revision, full.report.revision);
+        assert_eq!(incremental.report.total_lines, full.report.total_lines);
+        assert_eq!(
+            incremental.report.coauthored_lines,
+            full.report.coauthored_lines
+        );
+        assert_eq!(
+            serde_json::to_value(&incremental.report.authors).unwrap(),
+            serde_json::to_value(&full.report.authors).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&incremental.files).unwrap(),
+            serde_json::to_value(&full.files).unwrap()
+        );
+    }
+
+    #[test]
+    fn incremental_updates_additions_deletions_renames_and_reuses_untouched_files() {
+        let dir = fixture();
+        fs::write(dir.path().join("stable.txt"), "keep me\n").unwrap();
+        fs::write(dir.path().join("delete.txt"), "delete me\n").unwrap();
+        fs::write(dir.path().join("rename.txt"), "rename me\n").unwrap();
+        git(dir.path(), &["add", "."]).unwrap();
+        git(dir.path(), &["commit", "-m", "Extra files"]).unwrap();
+        let cancel = AtomicBool::new(false);
+        let initial = scan_snapshot(options(dir.path()), None, &cancel, |_| {}).unwrap();
+        // Round-trip exactly the persisted representation, as a restarted app does.
+        let restored: Snapshot =
+            serde_json::from_str(&serde_json::to_string(&initial).unwrap()).unwrap();
+        let same = scan_snapshot(options(dir.path()), Some(&restored), &cancel, |_| {}).unwrap();
+        assert_eq!(same.report.files_recalculated, 0);
+        assert_eq!(same.report.files_reused, initial.files.len());
+        fs::write(dir.path().join("code.txt"), "replacement\ntwo\nthree\n").unwrap();
+        fs::write(dir.path().join("added.txt"), "new\n").unwrap();
+        fs::remove_file(dir.path().join("delete.txt")).unwrap();
+        fs::rename(
+            dir.path().join("rename.txt"),
+            dir.path().join("renamed.txt"),
+        )
+        .unwrap();
+        git(dir.path(), &["add", "."]).unwrap();
+        git(
+            dir.path(),
+            &[
+                "commit",
+                "--author",
+                "Carol <carol@example.com>",
+                "-m",
+                "Update",
+            ],
+        )
+        .unwrap();
+        let updated = scan_snapshot(options(dir.path()), Some(&restored), &cancel, |_| {}).unwrap();
+        assert_eq!(updated.report.files_recalculated, 3);
+        assert_eq!(updated.report.files_reused, 2); // stable text + binary
+        assert!(!updated.files.contains_key("delete.txt"));
+        assert!(!updated.files.contains_key("rename.txt"));
+        assert_matches_full(&updated, options(dir.path()));
+    }
+
+    #[test]
+    fn incremental_detects_change_then_revert_even_when_tree_diff_is_empty() {
+        let dir = fixture();
+        let cancel = AtomicBool::new(false);
+        let initial = scan_snapshot(options(dir.path()), None, &cancel, |_| {}).unwrap();
+        fs::write(dir.path().join("code.txt"), "temporary\ntwo\nthree\n").unwrap();
+        git(dir.path(), &["add", "."]).unwrap();
+        git(dir.path(), &["commit", "-m", "Temporary change"]).unwrap();
+        fs::write(dir.path().join("code.txt"), "one\ntwo\nthree\n").unwrap();
+        git(dir.path(), &["add", "."]).unwrap();
+        git(
+            dir.path(),
+            &[
+                "commit",
+                "--author",
+                "Carol <carol@example.com>",
+                "-m",
+                "Restore content",
+            ],
+        )
+        .unwrap();
+        assert!(git_text(
+            dir.path(),
+            &["diff", "--name-only", &initial.report.revision, "HEAD"]
+        )
+        .unwrap()
+        .is_empty());
+        let updated = scan_snapshot(options(dir.path()), Some(&initial), &cancel, |_| {}).unwrap();
+        assert_eq!(updated.report.files_recalculated, 1);
+        assert!(updated
+            .report
+            .authors
+            .iter()
+            .any(|a| a.author == "Carol" && a.lines == 1));
+        assert_matches_full(&updated, options(dir.path()));
+    }
+
+    #[test]
+    fn incremental_rebuilds_after_mailmap_changes_rewritten_history_or_cache_version_change() {
+        let dir = fixture();
+        let cancel = AtomicBool::new(false);
+        let initial = scan_snapshot(options(dir.path()), None, &cancel, |_| {}).unwrap();
+        fs::write(
+            dir.path().join(".mailmap"),
+            "Canonical Alice <canonical@example.com> Alice Example <alice@example.com>\n",
+        )
+        .unwrap();
+        git(dir.path(), &["add", "."]).unwrap();
+        git(dir.path(), &["commit", "-m", "Identity correction"]).unwrap();
+        let mapped = scan_snapshot(options(dir.path()), Some(&initial), &cancel, |_| {}).unwrap();
+        assert_eq!(mapped.report.files_reused, 0);
+        assert_matches_full(&mapped, options(dir.path()));
+        git(dir.path(), &["reset", "--hard", &initial.report.revision]).unwrap();
+        let rewritten = scan_snapshot(options(dir.path()), Some(&mapped), &cancel, |_| {}).unwrap();
+        assert_eq!(rewritten.report.files_reused, 0);
+        assert_matches_full(&rewritten, options(dir.path()));
+        let mut outdated = initial;
+        outdated.version = 0;
+        assert_eq!(
+            scan_snapshot(options(dir.path()), Some(&outdated), &cancel, |_| {})
+                .unwrap()
+                .report
+                .files_reused,
+            0
+        );
+        let full = scan_snapshot(options(dir.path()), None, &cancel, |_| {}).unwrap();
+        assert_eq!(full.report.files_reused, 0);
+    }
+
+    #[test]
+    fn incremental_merge_matches_full_attribution() {
+        let dir = fixture();
+        let cancel = AtomicBool::new(false);
+        let initial = scan_snapshot(options(dir.path()), None, &cancel, |_| {}).unwrap();
+        git(dir.path(), &["checkout", "-b", "feature"]).unwrap();
+        fs::write(dir.path().join("code.txt"), "feature\ntwo\nthree\n").unwrap();
+        git(dir.path(), &["add", "."]).unwrap();
+        git(
+            dir.path(),
+            &[
+                "commit",
+                "--author",
+                "Carol <carol@example.com>",
+                "-m",
+                "Feature",
+            ],
+        )
+        .unwrap();
+        git(dir.path(), &["checkout", "main"]).unwrap();
+        git(
+            dir.path(),
+            &["merge", "--no-ff", "feature", "-m", "Merge feature"],
+        )
+        .unwrap();
+        let updated = scan_snapshot(options(dir.path()), Some(&initial), &cancel, |_| {}).unwrap();
+        assert_matches_full(&updated, options(dir.path()));
+    }
+
     #[test]
     fn github_names_cannot_escape_cache_or_change_host() {
         for bad in [

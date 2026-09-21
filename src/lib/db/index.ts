@@ -296,6 +296,7 @@ export async function getSyncState(
 /** Wipe cached analytics but keep repo metadata and the user's repo selection. */
 export async function clearAnalytics(db: Database): Promise<void> {
   const tables = [
+    "line_ownership",
     "contributor_weeks",
     "commit_activity",
     "participation",

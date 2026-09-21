@@ -9,6 +9,7 @@ import {
 import * as api from "../github/endpoints";
 import { recordSync, setMeta, type SyncStatus } from "../db";
 import * as write from "./writers";
+import { syncOwnershipRepo } from "./lineOwnership";
 import { syncPulse } from "./pulse";
 import type {
   GhCodeFrequency,
@@ -31,7 +32,8 @@ export type EndpointId =
   | "branches"
   | "dependencies"
   | "actions"
-  | "pulse";
+  | "pulse"
+  | "line_ownership";
 
 export const ALL_ENDPOINTS: EndpointId[] = [
   "contributors",
@@ -46,6 +48,7 @@ export const ALL_ENDPOINTS: EndpointId[] = [
   "dependencies",
   "actions",
   "pulse",
+  "line_ownership",
 ];
 
 /** The subset that GitHub computes lazily and answers with 202 while cold. */
@@ -77,6 +80,7 @@ export const ENDPOINT_LABELS: Record<EndpointId, string> = {
   dependencies: "Dependencies",
   actions: "Actions runs",
   pulse: "Pull requests & issues",
+  line_ownership: "Line ownership",
 };
 
 export interface SyncError {
@@ -166,6 +170,7 @@ export function shouldFetchIncrementally(
   state: IncrementalState | undefined,
   repo: Pick<GhRepo, "pushed_at" | "updated_at">,
 ): boolean {
+  if (endpoint === "line_ownership") return true;
   if (!state) return true;
   if (state.status === "pending" || state.status === "error") return true;
   // A changed token or permission scope needs the deliberately explicit full sync.
@@ -593,9 +598,17 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
       })
     : [];
 
+  const ownershipTargets = endpoints.includes("line_ownership")
+    ? targets.filter((repo) => {
+        if (needsFetch(repo, "line_ownership")) return true;
+        skipped++;
+        return false;
+      })
+    : [];
+
   phase = "syncing";
   label = "Syncing statistics and repository data";
-  total = pendingKeys.length + extraKeys.length + pulseTargets.length;
+  total = pendingKeys.length + extraKeys.length + pulseTargets.length + ownershipTargets.length;
   done = 0;
   current = null;
   emit();
@@ -733,7 +746,33 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     });
   })();
 
-  await Promise.all([statsTask, extrasTask, dependabotTask, pulseTask]);
+  // Git ownership has its own serial queue to bound clone/blame CPU and disk use,
+  // while API work continues independently. Every completed repo is durable.
+  const ownershipTask = pool(ownershipTargets, 1, async (repo) => {
+    if (cancelled()) return;
+    attempted++;
+    try {
+      await recordSync(db, repo.id, "line_ownership", "pending", { error: "Ownership sync interrupted; resume to finish" });
+      await syncOwnershipRepo({
+        db, repoId: repo.id, fullName: repo.fullName, token, full: mode === "full", signal,
+        onProgress: (progress) => {
+          current = `${repo.fullName} · ${progress.phase}${progress.total ? ` (${progress.completed}/${progress.total} files)` : ""}`;
+          emit();
+        },
+      });
+      await recordSync(db, repo.id, "line_ownership", "ok");
+    } catch (err) {
+      if (!cancelled()) {
+        const message = (err as Error)?.message ?? String(err);
+        noteError(repo.fullName, "line_ownership", err);
+        await recordSync(db, repo.id, "line_ownership", "error", { error: message });
+      }
+    } finally {
+      if (!cancelled()) markDone(repo.fullName);
+    }
+  });
+
+  await Promise.all([statsTask, extrasTask, dependabotTask, pulseTask, ownershipTask]);
 
   await setMeta(db, "last_sync_at", new Date().toISOString());
   await setMeta(db, "last_sync_org", org);

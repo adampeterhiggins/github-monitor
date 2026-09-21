@@ -30,7 +30,7 @@ export interface RepoSyncSummary {
   complete: number;
   /** Endpoints still to do: pending, errored or never attempted. */
   outstanding: number;
-  /** Of the outstanding, those GitHub was still computing. */
+  /** Of the outstanding, interrupted work or statistics still computing. */
   pending: number;
   /** Of the outstanding, those that failed. */
   errored: number;
@@ -112,7 +112,7 @@ export function useRepoSync(
         const label = ENDPOINT_LABELS[endpoint] ?? endpoint;
         if (status === "pending") {
           pending++;
-          outstandingLabels.push(`${label} (GitHub still computing)`);
+          outstandingLabels.push(`${label} (${endpoint === "line_ownership" ? "unfinished sync" : "GitHub still computing"})`);
         } else if (status === "error") {
           errored++;
           // The reason matters more than the fact; without it the only way to find
