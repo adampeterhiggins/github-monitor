@@ -19,6 +19,7 @@ import { Network } from "./pages/Network";
 import { Forks } from "./pages/Forks";
 import { ActionsUsage } from "./pages/ActionsUsage";
 import { ActionsPerformance } from "./pages/ActionsPerformance";
+import { LineOwnership } from "./pages/LineOwnership";
 import { Ownership } from "./pages/Ownership";
 import { People } from "./pages/People";
 import { Roster } from "./pages/Roster";
@@ -47,6 +48,7 @@ const INSIGHTS = [
 /** Views GitHub has no equivalent of — joins and history the website will not show. */
 const ORG_VIEWS = [
   { id: "ownership", label: "Ownership" },
+  { id: "line-ownership", label: "Line ownership" },
   { id: "people", label: "People" },
   { id: "roster", label: "Roster" },
   { id: "scorecard", label: "Scorecard" },
@@ -338,6 +340,8 @@ function Page({ page, settingsSub }: { page: PageId; settingsSub: SettingsSubId 
       return <ActionsUsage />;
     case "actions-performance":
       return <ActionsPerformance />;
+    case "line-ownership":
+      return <LineOwnership />;
     case "ownership":
       return <Ownership />;
     case "people":

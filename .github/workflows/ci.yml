@@ -24,3 +24,11 @@ jobs:
       - run: npm ci
 
       - run: npm run check
+
+  native-tests:
+    name: Native Git ownership tests
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib

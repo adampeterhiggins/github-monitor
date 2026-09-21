@@ -5,7 +5,7 @@ organisation instead of one repository at a time. Every page GitHub offers per r
 is here, with **repository turned into a filter** you slice by — plus a
 **contributor filter**, which GitHub has no equivalent of.
 
-Tauri v2 shell (real `.app`, WKWebView, ~10 MB) with all logic in TypeScript.
+Tauri v2 shell (real `.app`, WKWebView, ~10 MB) with analytics in TypeScript and local Git scanning in Rust.
 
 ## Install
 
@@ -60,9 +60,41 @@ and the app says so rather than rendering blank charts.
 | Actions usage | `actions/runs` | Wall-clock elapsed, not billable minutes |
 | Actions performance | `actions/runs` | p50/p90/p99 duration, failure rates |
 | Ownership | `contributor_weeks` | Bus factor, concentration over time, people × repositories matrix — no GitHub equivalent |
+| Line ownership | Local `git blame` | Surviving-line attribution, co-authors and identity merging; automatic GitHub clones or existing local clones |
 | People | `contributor_weeks` + PRs | One person across the org, not across all of GitHub |
 | Roster | `contributor_weeks` | Arrivals, last-seen, and repositories left cold |
 | Scorecard | several | One ranked table joining concentration, health, alerts, open PRs, lead time, views |
+
+## Line ownership
+
+Open **Line ownership** and select a GitHub repository, or enter the absolute path
+of an existing local clone. **Scan line ownership** clones full history using the
+app’s saved GitHub token and reuses/refetches that cache on subsequent scans.
+Repositories are scanned individually. Managed bare clones live under the app’s
+cache directory in `line-ownership/`; credentials are passed only to the Git process,
+never stored in the clone. Git must be installed. Local clones are read without
+fetching or changing their working trees; shallow clones must be unshallowed first.
+
+The report attributes committed lines surviving at a revision (HEAD by default),
+including full credit for each `Co-authored-by` identity. Shares can therefore sum
+past 100%. Person grouping merges shared emails or normalized names transitively;
+Email and Name grouping are also available. Blame honours the clone’s `.mailmap`.
+Same-name people can merge, so use Email when that is undesirable.
+
+Scan options include Git pathspecs, exclusion globs, whitespace handling, generated
+files and bot exclusion (`[bot]` or `copilot` in the name/email). Binary files,
+symlinks and submodules are skipped. When bots are excluded, bot-only lines are
+removed from the share base; human co-authored lines remain. Skipped files and blame
+failures are shown with the results. The revision is resolved once before blaming
+so a scan cannot mix revisions. Cancellation stops after the current Git operation.
+
+Results remain available while navigating the app and can be exported as CSV or
+JSON. Scan options are remembered locally; reports are held for the current app
+session. Organisation, date and GitHub-login filters do not apply to this view.
+The existing **Ownership** page continues to measure commit concentration.
+
+Run the native scanner’s Git-fixture tests with
+`cargo test --locked --manifest-path src-tauri/Cargo.toml --lib`.
 
 ## Releasing and updating
 
