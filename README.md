@@ -89,8 +89,18 @@ no new blame work. Git transfers and blame run independently of the API sync que
 
 The **Line ownership** page shows surviving-line credit across the selected
 repositories, with Person/Email/Name grouping, bot exclusion and CSV/JSON export.
+Ranked bars show the top owners and repository concentration. A people × repositories
+heatmap switches between credited lines and share within each repository, with
+expand controls, hover details and complete table alternatives. All charts use the
+same grouping and bot filter as the totals; co-author shares remain based on unique
+surviving lines rather than being normalized into a 100% stack.
 Identity merging happens across the entire selection before co-author credit is
-counted, so connected aliases cannot credit the same line twice. Each distinct
+counted, so connected aliases cannot credit the same line twice. Bot exclusion uses
+the same built-in rules and saved patterns as the contributor filter, matching Git
+names, email usernames and every alias of an identity. For example, a configured
+`claude` alias also excludes `Claude Fable 5` when they share an email, while
+`claude*` matches model-name variants directly. Changes take effect immediately
+without a re-sync. Each distinct
 co-author gets full credit, so shares can sum above 100%. Bot exclusion removes
 bot-only lines from the share base. Generated files, binary files, symlinks and
 submodules are skipped, and attribution ignores whitespace-only edits.

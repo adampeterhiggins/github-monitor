@@ -46,6 +46,39 @@ try {
   assert.ok(csv.includes('"\'=HYPERLINK(""evil"")"'));
   assert.ok(csv.includes('"\'+formula@example.com"'));
   console.log("PASS  org-wide aliases, co-author deduplication, bot denominator, CSV escaping and formula safety");
+  assert.equal(merged.byRepository[0].authors.length, 1, "charts use identities resolved across the whole selection");
+  assert.equal(merged.byRepository[0].authors[0].lines, 5, "matrix cells deduplicate co-author aliases");
+  assert.equal(merged.byRepository[0].authors[0].share, 1);
+  assert.equal(merged.byRepository[1].authors[0].key, merged.authors[0].key);
+  assert.equal(merged.byRepository.reduce((n, r) => n + r.totalLines, 0), merged.totalLines);
+  assert.equal(merged.byRepository.reduce((n, r) => n + r.coauthoredLines, 0), merged.coauthoredLines);
+  const agentReports = [
+    { credits: [{ lines: 9, people: [{ name: "Claude Fable 5", email: "noreply@anthropic.com" }, alice] },
+      { lines: 4, people: [{ name: "Cursor", email: "cursoragent@cursor.com" }] }] },
+    { credits: [{ lines: 1, people: [{ name: "Claude", email: "noreply@anthropic.com" }] }] },
+  ];
+  for (const group of ["person", "email", "name"]) {
+    const filtered = aggregateOwnership(agentReports, group, true, ["claude", "cursoragent"]);
+    assert.equal(filtered.authors.length, 1, `${group}: exact configured aliases cover model-name variants and email usernames`);
+    assert.equal(filtered.totalLines, 9, "human coauthored lines remain; bot-only lines leave the denominator");
+    assert.equal(filtered.coauthoredLines, 0);
+    assert.equal(filtered.byRepository[0].authors[0].share, 1);
+    assert.equal(filtered.byRepository[1].authors.length, 0);
+    assert.equal(filtered.byRepository[1].totalLines, 0);
+  }
+  assert.equal(aggregateOwnership(agentReports, "person", true).authors.length, 3, "AI names are governed by the same user patterns, not guessed by this page");
+  const onlyFable = [{ credits: [{ lines: 3, people: [{ name: "Claude Fable 5", email: "noreply@anthropic.com" }] }] }];
+  assert.equal(aggregateOwnership(onlyFable, "person", true, ["CLAUDE*"]).authors.length, 0);
+  assert.equal(aggregateOwnership(onlyFable, "person", false, ["CLAUDE*"]).authors.length, 1, "unchecked filter never hides bots");
+  assert.equal(aggregateOwnership(onlyFable, "person", true, []).authors.length, 1, "changing saved patterns recomputes classification");
+  const builtinBots = [{ credits: [
+    { lines: 2, people: [{ name: "build-bot", email: "build@example.com" }] },
+    { lines: 3, people: [{ name: "Automation", email: "123+dependabot[bot]@users.noreply.github.com" }] },
+    { lines: 5, people: [{ name: "Abbott", email: "abbott@example.com" }] },
+  ] }];
+  assert.equal(aggregateOwnership(builtinBots, "person", true).totalLines, 5);
+  console.log("PASS  chart cells share global identities and totals; shared bot patterns cover aliases, model variants, email usernames and built-ins");
+
 
   const databasePath = join(work, "test.sqlite");
   sqlite = new DatabaseSync(databasePath);

@@ -1,3 +1,5 @@
+import { isBotIdentity } from "./bots";
+
 export interface Identity { name: string; email: string }
 export interface LineCredit { lines: number; people: Identity[] }
 export interface OwnershipAuthor {
@@ -24,7 +26,7 @@ export type GroupBy = "person" | "email" | "name";
 
 /** Merge identities over the whole selection before assigning credit, so an
  * alias connecting two co-authors across repositories cannot double-count a line. */
-export function aggregateOwnership(reports: OwnershipReport[], groupBy: GroupBy = "person", excludeBots = false) {
+export function aggregateOwnership(reports: OwnershipReport[], groupBy: GroupBy = "person", excludeBots = false, botPatterns: readonly string[] = []) {
   const normalize = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
   const keyOf = (p: Identity) => p.email ? `email:${p.email.toLowerCase()}` : `name:${normalize(p.name)}`;
   const parents = new Map<string, string>();
@@ -35,7 +37,9 @@ export function aggregateOwnership(reports: OwnershipReport[], groupBy: GroupBy 
     return current;
   };
   const credits = reports.flatMap((r) => r.credits);
-  for (const { people } of credits) for (const p of people) {
+  const identities = new Map<string, Identity>();
+  for (const { people } of credits) for (const p of people) identities.set(JSON.stringify([p.name, p.email.toLowerCase()]), p);
+  for (const p of identities.values()) {
     const key = keyOf(p);
     if (!parents.has(key)) parents.set(key, key);
     const name = normalize(p.name);
@@ -44,34 +48,64 @@ export function aggregateOwnership(reports: OwnershipReport[], groupBy: GroupBy 
     if (existing) parents.set(root(key), root(existing));
     else names.set(name, key);
   }
+  const groupKey = (p: Identity) => groupBy === "person" ? root(keyOf(p)) : groupBy === "email"
+    ? p.email.toLowerCase() || normalize(p.name) : normalize(p.name) || p.email.toLowerCase();
+  // Match every alias before crediting lines. A configured `claude` alias also
+  // identifies `Claude Fable 5` when both use the same email, in every grouping.
+  const botEmails = new Set<string>();
+  const botKeys = new Set<string>();
+  if (excludeBots) {
+    for (const p of identities.values()) {
+      if (p.email && isBotIdentity(p, botPatterns)) botEmails.add(p.email.toLowerCase());
+    }
+    for (const p of identities.values()) {
+      if (isBotIdentity(p, botPatterns) || (p.email && botEmails.has(p.email.toLowerCase()))) botKeys.add(groupKey(p));
+    }
+  }
   const authors = new Map<string, { names: Set<string>; emails: Set<string>; lines: number }>();
   let totalLines = 0;
   let coauthoredLines = 0;
-  for (const credit of credits) {
-    const seen = new Set<string>();
-    for (const p of credit.people) {
-      if (excludeBots && /\[bot\]|copilot/i.test(`${p.name} ${p.email}`)) continue;
-      const key = groupBy === "person" ? root(keyOf(p)) : groupBy === "email"
-        ? p.email.toLowerCase() || normalize(p.name) : normalize(p.name) || p.email.toLowerCase();
-      if (!key) continue;
-      const author = authors.get(key) ?? { names: new Set<string>(), emails: new Set<string>(), lines: 0 };
-      if (p.name) author.names.add(p.name);
-      if (p.email) author.emails.add(p.email.toLowerCase());
-      if (!seen.has(key)) author.lines += credit.lines;
-      seen.add(key);
-      authors.set(key, author);
+  const repositoryCounts = reports.map((report) => {
+    const counts = new Map<string, number>();
+    let repositoryLines = 0;
+    let repositoryCoauthored = 0;
+    for (const credit of report.credits) {
+      const seen = new Set<string>();
+      for (const p of credit.people) {
+        const key = groupKey(p);
+        if (!key || botKeys.has(key)) continue;
+        const author = authors.get(key) ?? { names: new Set<string>(), emails: new Set<string>(), lines: 0 };
+        if (p.name) author.names.add(p.name);
+        if (p.email) author.emails.add(p.email.toLowerCase());
+        if (!seen.has(key)) {
+          author.lines += credit.lines;
+          counts.set(key, (counts.get(key) ?? 0) + credit.lines);
+        }
+        seen.add(key);
+        authors.set(key, author);
+      }
+      if (seen.size > 0) repositoryLines += credit.lines;
+      if (seen.size > 1) repositoryCoauthored += credit.lines;
     }
-    if (seen.size > 0) totalLines += credit.lines;
-    if (seen.size > 1) coauthoredLines += credit.lines;
-  }
-  const rows: OwnershipAuthor[] = [...authors.values()].map((a) => {
+    totalLines += repositoryLines;
+    coauthoredLines += repositoryCoauthored;
+    return { counts, totalLines: repositoryLines, coauthoredLines: repositoryCoauthored };
+  });
+  const rows = [...authors.entries()].map(([key, a]) => {
     const names = [...a.names].sort();
     const emails = [...a.emails].sort();
     const name = (groupBy === "person" ? names.find((n) => n.includes(" ")) : null) ?? names[0] ?? emails[0] ?? "Unknown";
-    return { author: groupBy === "email" && emails[0] ? `${name} <${emails[0]}>` : name,
+    return { key, author: groupBy === "email" && emails[0] ? `${name} <${emails[0]}>` : name,
       names, emails, lines: a.lines, share: totalLines ? a.lines / totalLines : 0 };
   }).sort((a, b) => b.lines - a.lines || a.author.localeCompare(b.author));
-  return { authors: rows, totalLines, creditedLines: rows.reduce((n, a) => n + a.lines, 0), coauthoredLines };
+  const byRepository = repositoryCounts.map((repo) => ({
+    totalLines: repo.totalLines,
+    coauthoredLines: repo.coauthoredLines,
+    authors: rows.filter((a) => repo.counts.has(a.key)).map((a) => ({
+      ...a, lines: repo.counts.get(a.key)!, share: repo.totalLines ? repo.counts.get(a.key)! / repo.totalLines : 0,
+    })).sort((a, b) => b.lines - a.lines || a.author.localeCompare(b.author)),
+  }));
+  return { authors: rows, totalLines, creditedLines: rows.reduce((n, a) => n + a.lines, 0), coauthoredLines, byRepository };
 }
 
 export function ownershipCsv(report: { authors: OwnershipAuthor[]; totalLines: number }): string {

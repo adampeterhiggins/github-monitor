@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useApp } from "../lib/state/app";
 import { PageShell } from "../components/PageShell";
+import { LineOwnershipCharts } from "../components/LineOwnershipCharts";
 import { RepoFilter } from "../components/RepoFilter";
 import { Button, Callout, Card, CardHeader, DataTable, EmptyState, Spinner, StatTile, full } from "../components/ui";
 import { aggregateOwnership, downloadOwnership, type GroupBy, type OwnershipReport } from "../lib/lineOwnership";
@@ -11,6 +12,7 @@ export function LineOwnership() {
   const db = useApp((s) => s.db);
   const selectedRepoIds = useApp((s) => s.selectedRepoIds);
   const syncing = useApp((s) => s.syncing);
+  const botPatterns = useApp((s) => s.botPatterns);
   const [groupBy, setGroupBy] = useState<GroupBy>("person");
   const [excludeBots, setExcludeBots] = useState(false);
   const repoIds = [...selectedRepoIds].sort((a, b) => a - b);
@@ -22,12 +24,15 @@ export function LineOwnership() {
     refetchInterval: syncing ? 5000 : false,
   });
   const rows = repoIds.length ? snapshots.data ?? [] : [];
+  const chartRepositories = useMemo(() => rows.filter((r) => r.report != null).map((r) => ({ id: r.repo_id, name: r.full_name })), [rows]);
   const reports = useMemo(() => rows.map((r) => r.report).filter((r): r is OwnershipReport => r != null), [rows]);
-  const summary = useMemo(() => aggregateOwnership(reports, groupBy, excludeBots), [reports, groupBy, excludeBots]);
+  const summary = useMemo(() => aggregateOwnership(reports, groupBy, excludeBots, botPatterns), [reports, groupBy, excludeBots, botPatterns]);
+  const filteredLinesByRepo = useMemo(() => new Map(chartRepositories.map((r, i) => [r.id, summary.byRepository[i].totalLines])), [chartRepositories, summary]);
   const missing = rows.filter((r) => !r.report).length;
   const failed = rows.filter((r) => r.status === "error").length;
-  const exportReport = { ...summary, groupBy, excludeBots, repositories: rows.map((r) => ({
-    repository: r.full_name, revision: r.revision, calculatedAt: r.calculated_at, checkedAt: r.checked_at, status: r.status,
+  const exportReport = { authors: summary.authors, totalLines: summary.totalLines, creditedLines: summary.creditedLines,
+    coauthoredLines: summary.coauthoredLines, groupBy, excludeBots, botPatterns, repositories: rows.map((r) => ({
+    repository: r.full_name, revision: r.revision, calculatedAt: r.calculated_at, checkedAt: r.checked_at, status: r.status, totalLines: filteredLinesByRepo.get(r.repo_id) ?? null,
   })) };
   return (
     <PageShell title="Line ownership" subtitle="Who owns the surviving code across your organisation" filters={false} requiresData={false}
@@ -38,7 +43,8 @@ export function LineOwnership() {
             <option value="person">Person</option><option value="email">Email</option><option value="name">Name</option>
           </select>
         </label>
-        <label className="text-[12px] text-ink-secondary"><input type="checkbox" checked={excludeBots} onChange={(e) => setExcludeBots(e.target.checked)} /> Exclude bots</label>
+        <label className="text-[12px] text-ink-secondary" title="Uses the shared bot patterns from Settings → Bots and agents, matched against every name and email alias."><input type="checkbox" checked={excludeBots} onChange={(e) => setExcludeBots(e.target.checked)} /> Exclude bots</label>
+        {reports.length > 0 && <><Button onClick={() => downloadOwnership(exportReport, "csv")}>Export CSV</Button><Button onClick={() => downloadOwnership(exportReport, "json")}>Export JSON</Button></>}
         <span className="ml-auto text-[11px] text-ink-muted">Latest synced default branches</span>
       </div>}>
       {syncing && <div role="status" className="flex items-center gap-2 text-[12px] text-ink-secondary"><Spinner /> Sync in progress. Completed repositories appear as they are saved.</div>}
@@ -58,28 +64,19 @@ export function LineOwnership() {
           <StatTile label="Co-authored lines" value={full(summary.coauthoredLines)} hint={`${full(summary.creditedLines)} person-line credits`} />
           <StatTile label="Repositories" value={`${full(reports.length)} / ${full(repoIds.length)}`} hint="With a saved ownership snapshot" />
         </div>
-        <Card>
-          <CardHeader title="Authors" subtitle="Share of surviving lines across the selected repositories"
-            actions={<><Button onClick={() => downloadOwnership(exportReport, "csv")}>Export CSV</Button><Button onClick={() => downloadOwnership(exportReport, "json")}>Export JSON</Button></>} />
-          <DataTable rows={summary.authors} rowKey={(a) => JSON.stringify([a.names, a.emails])} initialSort={{ key: "lines", dir: "desc" }} empty="No surviving lines match these filters." columns={[
-            { key: "author", header: "Author", render: (a) => a.author, sortValue: (a) => a.author },
-            { key: "lines", header: "Lines", align: "right", render: (a) => full(a.lines), sortValue: (a) => a.lines },
-            { key: "share", header: "Share", align: "right", render: (a) => `${(a.share * 100).toFixed(1)}%`, sortValue: (a) => a.share },
-            { key: "aliases", header: "Names / emails", render: (a) => <span className="whitespace-normal break-all text-ink-secondary">{[...a.names, ...a.emails].join(" · ")}</span> },
-          ]} />
-          <p className="mt-3 text-[12px] text-ink-muted">Each co-author receives full credit, so shares can sum past 100%. Person grouping merges shared names and emails across repositories. Use Email to separate people who share a name.</p>
-        </Card>
+        <LineOwnershipCharts summary={summary} repositories={chartRepositories} />
+        <p className="text-[12px] text-ink-muted">Person grouping merges shared names and emails across repositories. Use Email to separate people who share a name. Exclude bots uses the same built-in rules and saved patterns as the other pages.</p>
       </>}
       {rows.length > 0 && <Card>
         <CardHeader title="Repository snapshots" subtitle="Saved commit and last successful calculation for each repository. Sync changes updates touched files; Full re-sync rebuilds all ownership." />
         <DataTable rows={rows} rowKey={(r) => r.repo_id} columns={[
           { key: "repo", header: "Repository", render: (r) => r.full_name, sortValue: (r) => r.full_name },
-          { key: "lines", header: "Lines", align: "right", render: (r) => r.report ? full(r.report.totalLines) : "—", sortValue: (r) => r.report?.totalLines ?? -1 },
+          { key: "lines", header: "Lines", align: "right", render: (r) => r.report ? full(filteredLinesByRepo.get(r.repo_id) ?? 0) : "—", sortValue: (r) => filteredLinesByRepo.get(r.repo_id) ?? -1 },
           { key: "commit", header: "Commit", render: (r) => r.revision ? <code title={r.revision}>{r.revision.slice(0, 12)}</code> : r.report ? "Empty repository" : "—" },
           { key: "calculated", header: "Calculated", render: (r) => r.calculated_at ? new Date(r.calculated_at).toLocaleString() : "—", sortValue: (r) => r.calculated_at ?? "" },
           { key: "status", header: "Last sync", render: (r) => <span title={r.error ?? (r.checked_at ? `Checked ${new Date(r.checked_at).toLocaleString()}` : undefined)}>{r.status === "error" ? `Failed${r.report ? " · showing saved data" : ""}: ${r.error ?? "Unknown error"}` : r.status === "pending" ? `${syncing ? "Updating" : "Interrupted"}${r.report ? " · showing saved data" : ""}` : r.report ? "Synced" : "Not yet synced"}</span> },
         ]} />
-        <p className="mt-3 text-[12px] text-ink-muted">Repository counts include bots. Attribution ignores whitespace-only edits. Generated files, binaries, symlinks and submodules are excluded. {full(reports.reduce((n, r) => n + Object.values(r.filesSkipped).reduce((a, b) => a + b, 0), 0))} files skipped across these snapshots.</p>
+        <p className="mt-3 text-[12px] text-ink-muted">Line totals follow the grouping and bot filters. Attribution ignores whitespace-only edits. Generated files, binaries, symlinks and submodules are excluded. {full(reports.reduce((n, r) => n + Object.values(r.filesSkipped).reduce((a, b) => a + b, 0), 0))} files skipped across these snapshots.</p>
       </Card>}
     </PageShell>
   );

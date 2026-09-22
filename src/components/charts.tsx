@@ -917,10 +917,20 @@ export function RankedBars({
   data,
   height,
   valueLabel,
+  valueFormatter = full,
+  domain,
+  showAxis = false,
+  labelWidth = 190,
+  truncateLabels = false,
 }: {
   data: Array<{ name: string; value: number }>;
   height?: number;
   valueLabel: string;
+  valueFormatter?: (value: number) => string;
+  domain?: [number, number];
+  showAxis?: boolean;
+  labelWidth?: number;
+  truncateLabels?: boolean;
 }) {
   const palette = useVizPalette();
   // Nominal categories: one hue for every bar. Coloring them by value would spend
@@ -939,12 +949,13 @@ export function RankedBars({
         barCategoryGap={2}
       >
         <CartesianGrid stroke={palette.gridline} horizontal={false} />
-        <XAxis type="number" {...axisProps(palette)} tickFormatter={compact} hide />
+        <XAxis type="number" {...axisProps(palette)} domain={domain} tickFormatter={domain ? valueFormatter : compact} hide={!showAxis} />
         <YAxis
           type="category"
           dataKey="name"
           {...axisProps(palette)}
-          width={190}
+          width={labelWidth}
+          tickFormatter={(name: string) => truncateLabels && name.length > 24 ? `${name.slice(0, 23)}…` : name}
           axisLine={false}
           interval={0}
         />
@@ -957,7 +968,7 @@ export function RankedBars({
               <TooltipShell
                 palette={palette}
                 heading={d.name}
-                rows={[{ label: valueLabel, value: full(d.value), color }]}
+                rows={[{ label: valueLabel, value: valueFormatter(d.value), color }]}
               />
             );
           }}
@@ -972,7 +983,7 @@ export function RankedBars({
             fontSize: 11,
             /* Value at the tip, in ink — never in the series color. */
             fill: palette.inkSecondary,
-            formatter: (v: unknown) => compact(Number(v ?? 0)),
+            formatter: (v: unknown) => domain ? valueFormatter(Number(v ?? 0)) : compact(Number(v ?? 0)),
           }}
         />
       </BarChart>
@@ -1235,6 +1246,9 @@ export function HeatMatrix({
   headerTooltip,
   cellTooltip,
   cellSize = 18,
+  cellWidth = cellSize,
+  scaleMax,
+  legendFormatter = full,
   gap = 2,
   borders = true,
 }: {
@@ -1251,6 +1265,11 @@ export function HeatMatrix({
   cellTooltip?: (value: number, row: number, col: number) => HeatTooltipContent;
   /** Square edge in CSS pixels. Headers stay the same width so gap can reach zero. */
   cellSize?: number;
+  /** Wider cells allow repository labels to remain readable in rectangular matrices. */
+  cellWidth?: number;
+  /** Fixed domain for comparable proportions; defaults to the largest value. */
+  scaleMax?: number;
+  legendFormatter?: (value: number) => string;
   /** White space between squares in CSS pixels. 0 tiles them flush. */
   gap?: number;
   /** Outline on empty squares. Filled cells never stroke. */
@@ -1265,10 +1284,13 @@ export function HeatMatrix({
   } | null>(null);
 
   const max = useMemo(() => {
+    if (scaleMax != null) return scaleMax;
     let m = 0;
     for (const row of values) for (const v of row) if (v > m) m = v;
     return m;
-  }, [values]);
+  }, [values, scaleMax]);
+
+  const offered = useChartHeight();
 
   if (rowLabels.length === 0 || columnLabels.length === 0) {
     return <NoData height={160} />;
@@ -1300,7 +1322,6 @@ export function HeatMatrix({
   };
 
   const hide = () => setTip(null);
-  const offered = useChartHeight();
   const radius = gap <= 0 ? 0 : Math.min(gap, cellSize >= 28 ? 3 : 2);
 
   const headerContent = (axis: "row" | "column", index: number): HeatTooltipContent => {
@@ -1332,13 +1353,13 @@ export function HeatMatrix({
                 <th
                   key={c}
                   className="sticky top-0 z-10 cursor-default bg-surface p-0 text-center text-[9px] font-normal"
-                  style={{ color: palette.inkMuted, width: cellSize, minWidth: cellSize, maxWidth: cellSize }}
+                  style={{ color: palette.inkMuted, width: cellWidth, minWidth: cellWidth, maxWidth: cellWidth }}
                   onMouseEnter={(e) => show(e, headerContent("column", c))}
                   onFocus={(e) => show(e, headerContent("column", c))}
                   onBlur={hide}
                   tabIndex={0}
                 >
-                  <span className="block truncate" style={{ width: cellSize }}>
+                  <span className="block truncate" style={{ width: cellWidth }}>
                     {label}
                   </span>
                 </th>
@@ -1374,7 +1395,7 @@ export function HeatMatrix({
                         onBlur={hide}
                         className="focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
                         style={{
-                          width: cellSize,
+                          width: cellWidth,
                           height: cellSize,
                           borderRadius: radius,
                           background: fill ?? "transparent",
@@ -1400,7 +1421,7 @@ export function HeatMatrix({
               style={{ width: 14, height: 14, background: sequentialStep(palette, t, false)! }}
             />
           ))}
-          <span className="text-[10px] text-ink-muted">{full(max)}</span>
+          <span className="text-[10px] text-ink-muted">{legendFormatter(max)}</span>
         </div>
       ) : null}
       {tip ? (
