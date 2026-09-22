@@ -65,11 +65,20 @@ pub(super) fn stream<T>(
             .map_err(|_| "Git error reader failed")?
             .map_err(|e| e.to_string())?;
         super::check_cancel(cancelled)?;
-        if !status.success() {
-            return Err(String::from_utf8_lossy(&errors).trim().to_owned());
+        // Killing Git after a parse failure makes its status unsuccessful and
+        // often leaves stderr empty. Keep the reader error in that case.
+        let stderr = String::from_utf8_lossy(&errors).trim().to_owned();
+        match result {
+            Err(error) if status.success() || stderr.is_empty() => Err(error),
+            Err(_) => Err(stderr),
+            Ok(value) => {
+                if !status.success() {
+                    return Err(stderr);
+                }
+                written.map_err(|e| e.to_string())?;
+                Ok(value)
+            }
         }
-        written.map_err(|e| e.to_string())?;
-        result
     })
 }
 

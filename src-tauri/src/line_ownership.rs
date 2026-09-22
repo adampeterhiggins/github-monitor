@@ -197,12 +197,10 @@ fn parse_incremental_reader(
             break;
         }
         let line = String::from_utf8_lossy(&bytes);
-        let line = line.trim_end_matches('\n');
+        let line = line.trim_end_matches(['\r', '\n']);
         let mut fields = line.split_whitespace();
         if let Some(token) = fields.next() {
-            if (token.len() == 40 || token.len() == 64)
-                && token.bytes().all(|b| b.is_ascii_hexdigit())
-            {
+            if is_commit_id(token) {
                 sha = token.to_owned();
                 let count = fields
                     .nth(2)
@@ -212,6 +210,9 @@ fn parse_incremental_reader(
                 commits.entry(sha.to_owned()).or_default().lines += count;
                 continue;
             }
+        }
+        if sha.is_empty() {
+            continue;
         }
         if let Some(name) = line.strip_prefix("author ") {
             commits.entry(sha.to_owned()).or_default().author.name = name.to_owned();
@@ -491,6 +492,10 @@ fn check_cancel(cancelled: &AtomicBool) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+fn is_commit_id(value: &str) -> bool {
+    (value.len() == 40 || value.len() == 64) && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 #[cfg(test)]
@@ -845,14 +850,23 @@ struct ActiveScan {
     repository: String,
     cancelled: Arc<AtomicBool>,
 }
+fn lock_map(
+    active: &ActiveJobs,
+) -> std::sync::MutexGuard<'_, BTreeMap<String, (String, Arc<AtomicBool>)>> {
+    match active.lock() {
+        Ok(guard) => guard,
+        // A panicked scan must not wedge every later repository.
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 impl Drop for ActiveScan {
     fn drop(&mut self) {
-        self.active.lock().unwrap().remove(&self.repository);
+        lock_map(&self.active).remove(&self.repository);
     }
 }
 impl ScanControl {
     fn cancel(&self, job_id: &str) {
-        for (id, cancelled) in self.active.lock().unwrap().values() {
+        for (id, cancelled) in lock_map(&self.active).values() {
             if id == job_id {
                 cancelled.store(true, Ordering::SeqCst);
             }
@@ -861,7 +875,7 @@ impl ScanControl {
     fn begin(&self, repository: &str, job_id: &str) -> Result<ActiveScan, String> {
         github_url(repository)?;
         let repository = repository.to_lowercase();
-        let mut active = self.active.lock().map_err(|e| e.to_string())?;
+        let mut active = lock_map(&self.active);
         if active.contains_key(&repository) {
             return Err("This repository is already syncing".into());
         }
@@ -995,16 +1009,14 @@ pub async fn sync_line_ownership(
                 Err(std::sync::TryLockError::WouldBlock) => {
                     std::thread::sleep(Duration::from_millis(20))
                 }
-                Err(error) => return Err(error.to_string()),
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
             }
         };
         let repo = cache.join(format!("{}.git", github_repo.to_lowercase()));
         let options = managed_options(&repo);
         let previous: Option<Snapshot> = previous_json.and_then(|s| serde_json::from_str(&s).ok());
         if !revision.is_empty() {
-            if ![40, 64].contains(&revision.len())
-                || !revision.bytes().all(|b| b.is_ascii_hexdigit())
-            {
+            if !is_commit_id(&revision) {
                 return Err("Invalid prepared revision".into());
             }
             update_commit_graph(&repo, &revision, &active.cancelled, phase)?;
@@ -1064,13 +1076,7 @@ fn update_commit_graph(
     // prevent a correct scan. Cancellation, however, always stops the job.
     if git_cancel(
         repo,
-        &[
-            "commit-graph",
-            "write",
-            "--reachable",
-            "--split",
-            "--changed-paths",
-        ],
+        &["commit-graph", "write", "--reachable", "--changed-paths"],
         cancelled,
     )
     .is_ok()
@@ -1145,6 +1151,46 @@ fn remote_git(
     }
 }
 
+fn same_commit(
+    repo: &Path,
+    reference: &str,
+    sha: &str,
+    cancelled: &AtomicBool,
+) -> Result<bool, String> {
+    match git_cancel(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{reference}^{{commit}}"),
+        ],
+        cancelled,
+    ) {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).trim() == sha),
+        Err(_) => {
+            check_cancel(cancelled)?;
+            Ok(false)
+        }
+    }
+}
+
+fn aligned_default_branch(
+    repo: &Path,
+    head: &str,
+    sha: &str,
+    cancelled: &AtomicBool,
+) -> Result<bool, String> {
+    let symbolic = match git_cancel(repo, &["symbolic-ref", "--quiet", "HEAD"], cancelled) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).trim() == head,
+        Err(_) => {
+            check_cancel(cancelled)?;
+            false
+        }
+    };
+    Ok(symbolic && same_commit(repo, head, sha, cancelled)?)
+}
+
 fn prepare_github(
     cache: &Path,
     full_name: &str,
@@ -1178,16 +1224,24 @@ fn prepare_cache(
     let head = refs.lines().find_map(|line| {
         line.strip_prefix("ref: ")
             .and_then(|s| s.strip_suffix("\tHEAD"))
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
     });
     let remote_revision = refs.lines().find_map(|line| {
         line.strip_suffix("\tHEAD")
-            .filter(|s| !s.starts_with("ref: "))
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && !s.starts_with("ref:"))
     });
     if head.is_none() && remote_revision.is_some() {
         return Err("Remote default branch is not a symbolic branch".into());
     }
     if let Some(head) = head {
         git_cancel(cache, &["check-ref-format", head], cancelled)?;
+    }
+    if let Some(sha) = remote_revision {
+        if !is_commit_id(sha) {
+            return Err("Remote HEAD is not a commit id".into());
+        }
     }
     if remote_revision.is_none() {
         let heads = remote_git(
@@ -1218,34 +1272,36 @@ fn prepare_cache(
         result?;
         std::fs::rename(&staging, &repo).map_err(|e| e.to_string())?;
     } else if let (Some(head), Some(sha)) = (head, remote_revision) {
-        let exists = git_cancel(
-            &repo,
-            &["cat-file", "-e", &format!("{sha}^{{commit}}")],
-            cancelled,
-        )
-        .is_ok();
-        check_cancel(cancelled)?;
-        if exists {
-            // No transfer is needed even after a branch rename or a rewind when
-            // the advertised commit is already present in the full-history cache.
-            git_cancel(&repo, &["update-ref", head, sha], cancelled)?;
-        } else {
-            progress("Updating default branch history");
-            remote_git(
+        if !aligned_default_branch(&repo, head, sha, cancelled)? {
+            let exists = git_cancel(
                 &repo,
-                &[
-                    "fetch",
-                    "--force",
-                    "--no-tags",
-                    "--",
-                    url,
-                    &format!("+{head}:{head}"),
-                ],
-                token,
+                &["cat-file", "-e", &format!("{sha}^{{commit}}")],
                 cancelled,
-            )?;
+            )
+            .is_ok();
+            check_cancel(cancelled)?;
+            if exists {
+                // No transfer is needed even after a branch rename or a rewind when
+                // the advertised commit is already present in the full-history cache.
+                git_cancel(&repo, &["update-ref", head, sha], cancelled)?;
+            } else {
+                progress("Updating default branch history");
+                remote_git(
+                    &repo,
+                    &[
+                        "fetch",
+                        "--force",
+                        "--no-tags",
+                        "--",
+                        url,
+                        &format!("+{head}:{head}"),
+                    ],
+                    token,
+                    cancelled,
+                )?;
+            }
+            git_cancel(&repo, &["symbolic-ref", "HEAD", head], cancelled)?;
         }
-        git_cancel(&repo, &["symbolic-ref", "HEAD", head], cancelled)?;
     } else if !head_revision(&repo, cancelled)?.is_empty() {
         // An emptied remote must not silently display the old cached branch.
         return Err(
@@ -1289,6 +1345,8 @@ mod tests {
     #[test]
     fn parallel_streaming_matches_porcelain_reference_and_batches_binary_detection() {
         let repo = fixture();
+        git(repo.path(), &["config", "user.name", "Ünika Example"]).unwrap();
+        git(repo.path(), &["config", "user.email", "ünika@example.com"]).unwrap();
         fs::write(
             repo.path().join("space and ü.txt"),
             "one\ntwo\nthree\nfour\n",
@@ -1357,16 +1415,51 @@ mod tests {
         }
         let blob = git_text(repo.path(), &["rev-parse", "HEAD:binary.data"]).unwrap();
         let empty = git_text(repo.path(), &["rev-parse", "HEAD:empty.txt"]).unwrap();
+        let mut early_nul = vec![b'a'; 20_000];
+        early_nul[0] = 0;
+        let mut late_nul = vec![b'a'; 20_000];
+        late_nul[9000] = 0;
+        let mut exact_nul = vec![b'b'; 8000];
+        exact_nul[7999] = 0;
+        let blobs = [
+            ("early.bin", early_nul),
+            ("late.bin", late_nul),
+            ("exact.bin", exact_nul),
+            ("text.bin", vec![b'a'; 20_000]),
+        ];
+        let mut hashed = Vec::new();
+        for (name, bytes) in blobs {
+            let path = repo.path().join(name);
+            fs::write(&path, bytes).unwrap();
+            hashed.push(
+                git_text(repo.path(), &["hash-object", "-w", "--", name])
+                    .unwrap()
+                    .trim()
+                    .to_owned(),
+            );
+        }
         assert_eq!(
             binary_blobs(
                 repo.path(),
-                &[blob.trim(), empty.trim(), blob.trim()],
+                &[
+                    blob.trim(),
+                    empty.trim(),
+                    blob.trim(),
+                    &hashed[0],
+                    &hashed[1],
+                    &hashed[2],
+                    &hashed[3],
+                ],
                 &cancelled
             )
             .unwrap(),
-            vec![true, false, true]
+            vec![true, false, true, true, false, true, false]
         );
-        assert!(binary_blobs(repo.path(), &[&"f".repeat(40)], &cancelled).is_err());
+        let missing = binary_blobs(repo.path(), &[&"f".repeat(40)], &cancelled).unwrap_err();
+        assert!(
+            missing.contains("Invalid blob"),
+            "batch framing errors must survive process cleanup: {missing}"
+        );
         let sha = "a".repeat(64);
         let text = format!("{sha} 1 1 2\nauthor Person\nauthor-mail <p@x>\nfilename test\n{sha} 3 5 4\nfilename test\n");
         let parsed = parse_incremental_reader(&mut std::io::Cursor::new(text)).unwrap();
@@ -1382,6 +1475,10 @@ mod tests {
             revision: "abc".into(),
             options: managed_options(repo),
         };
+        assert!(is_commit_id(&"ab".repeat(20)));
+        assert!(is_commit_id(&"ab".repeat(32)));
+        assert!(!is_commit_id("--upload-pack=evil"));
+        assert!(!is_commit_id(&"abc"));
         assert!(matches_checkpoint(Some(&metadata), repo, "abc"));
         assert!(!matches_checkpoint(Some(&metadata), repo, "def"));
         metadata.options.ignore_whitespace = false;
@@ -1420,6 +1517,100 @@ mod tests {
             );
         });
         assert!(start.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn cancellation_during_scan_stops_before_a_snapshot() {
+        let dir = fixture();
+        let cancelled = AtomicBool::new(false);
+        let error = match scan(options(dir.path()), &cancelled, |_| {
+            cancelled.store(true, Ordering::SeqCst);
+        }) {
+            Err(error) => error,
+            Ok(_) => panic!("cancellation must not produce a snapshot"),
+        };
+        assert_eq!(error, "Scan cancelled");
+    }
+
+    #[test]
+    fn worker_failure_returns_the_git_error_and_no_snapshot() {
+        let dir = fixture();
+        let missing = dir.path().join("missing-revs");
+        git(
+            dir.path(),
+            &["config", "blame.ignoreRevsFile", missing.to_str().unwrap()],
+        )
+        .unwrap();
+        let error = match scan_snapshot(options(dir.path()), None, &AtomicBool::new(false), |_| {})
+        {
+            Err(error) => error,
+            Ok(_) => panic!("a blame failure must not produce a snapshot"),
+        };
+        assert!(error.contains("Cannot blame"), "{error}");
+        assert!(
+            error.contains("missing-revs") || error.contains("object name list"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn sha256_repositories_match_porcelain_and_parallel_workers() {
+        let dir = tempfile::tempdir().unwrap();
+        git(
+            dir.path(),
+            &["init", "--object-format=sha256", "-b", "main"],
+        )
+        .unwrap();
+        git(dir.path(), &["config", "user.name", "Alice Example"]).unwrap();
+        git(dir.path(), &["config", "user.email", "alice@example.com"]).unwrap();
+        git(dir.path(), &["config", "commit.gpgsign", "false"]).unwrap();
+        fs::write(dir.path().join("code.txt"), "one\ntwo\n").unwrap();
+        git(dir.path(), &["add", "."]).unwrap();
+        git(dir.path(), &["commit", "-m", "Initial"]).unwrap();
+        fs::write(dir.path().join("code.txt"), "one\nchanged\n").unwrap();
+        git(dir.path(), &["add", "."]).unwrap();
+        git(
+            dir.path(),
+            &[
+                "commit",
+                "--author",
+                "Ünika Example <ünika@example.com>",
+                "-m",
+                "Edit",
+            ],
+        )
+        .unwrap();
+        let cancelled = AtomicBool::new(false);
+        let reference =
+            scan_snapshot_at(options(dir.path()), None, &cancelled, |_| {}, None, 1).unwrap();
+        assert_eq!(reference.report.revision.len(), 64);
+        for (path, file) in &reference.files {
+            let output = git_text(
+                dir.path(),
+                &[
+                    "blame",
+                    "--line-porcelain",
+                    "--encoding=utf-8",
+                    "-w",
+                    &reference.report.revision,
+                    "--",
+                    path,
+                ],
+            )
+            .unwrap();
+            let mut counts = BTreeMap::new();
+            parse_blame(&output, &mut counts);
+            assert_eq!(
+                serde_json::to_value(&counts).unwrap(),
+                serde_json::to_value(&file.counts).unwrap()
+            );
+        }
+        let parallel =
+            scan_snapshot_at(options(dir.path()), None, &cancelled, |_| {}, None, 4).unwrap();
+        assert_eq!(
+            serde_json::to_value(&reference).unwrap(),
+            serde_json::to_value(&parallel).unwrap()
+        );
     }
 
     #[test]
@@ -1467,6 +1658,74 @@ mod tests {
             panic!("Index should be reused")
         })
         .unwrap();
+        git(origin.path(), &["branch", "-m", "main", "trunk"]).unwrap();
+        phases.lock().unwrap().clear();
+        prepare_cache(
+            cache.path(),
+            "org/repo",
+            origin.path().to_str().unwrap(),
+            None,
+            &cancel,
+            |p| phases.lock().unwrap().push(p.to_owned()),
+        )
+        .unwrap();
+        assert!(
+            !phases
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.contains("Updating") || p.contains("Cloning")),
+            "renaming the default branch must not fetch a commit we already have"
+        );
+        assert_eq!(
+            git_text(&repo, &["symbolic-ref", "HEAD"]).unwrap().trim(),
+            "refs/heads/trunk"
+        );
+        assert_eq!(head_revision(&repo, &cancel).unwrap(), revision);
+        fs::write(origin.path().join("code.txt"), "moved\n").unwrap();
+        git(origin.path(), &["add", "."]).unwrap();
+        git(
+            origin.path(),
+            &["commit", "-m", "Move default branch forward"],
+        )
+        .unwrap();
+        phases.lock().unwrap().clear();
+        prepare_cache(
+            cache.path(),
+            "org/repo",
+            origin.path().to_str().unwrap(),
+            None,
+            &cancel,
+            |p| phases.lock().unwrap().push(p.to_owned()),
+        )
+        .unwrap();
+        assert!(phases
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.contains("Updating")));
+        let moved = head_revision(&repo, &cancel).unwrap();
+        assert_ne!(moved, revision);
+        git(origin.path(), &["reset", "--hard", &revision]).unwrap();
+        phases.lock().unwrap().clear();
+        prepare_cache(
+            cache.path(),
+            "org/repo",
+            origin.path().to_str().unwrap(),
+            None,
+            &cancel,
+            |p| phases.lock().unwrap().push(p.to_owned()),
+        )
+        .unwrap();
+        assert!(
+            !phases
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.contains("Updating") || p.contains("Cloning")),
+            "rewinding to a cached commit must not fetch"
+        );
+        assert_eq!(head_revision(&repo, &cancel).unwrap(), revision);
     }
 
     #[test]

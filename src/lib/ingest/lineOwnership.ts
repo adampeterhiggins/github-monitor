@@ -15,16 +15,22 @@ export async function syncOwnershipRepo(options: {
   const parsed = metadataJson ? JSON.parse(metadataJson) : null;
   const metadata = parsed?.version != null && typeof parsed?.revision === "string" && parsed?.options ? parsed : null;
   aborted();
-  const onProgress = new Channel<Progress>();
   // Also retry cancellation on progress in case abort arrived before Rust's
   // command began and reset its cancellation flag.
   const cancel = () => { void invoke("cancel_line_ownership", { jobId }).catch(() => {}); };
-  onProgress.onmessage = (progress) => { if (signal?.aborted) cancel(); else options.onProgress?.(progress); };
+  const onProgressMessage = (progress: Progress) => { if (signal?.aborted) cancel(); else options.onProgress?.(progress); };
+  // Tauri closes a channel when its command returns, so prepare and calculation
+  // each need their own channel or file progress never arrives.
+  const progressChannel = () => {
+    const channel = new Channel<Progress>();
+    channel.onmessage = onProgressMessage;
+    return channel;
+  };
   signal?.addEventListener("abort", cancel, { once: true });
   try {
     aborted();
     const prepared = await invoke<{ revision: string; unchanged: boolean }>("prepare_line_ownership", {
-      githubRepo: fullName, jobId, token, metadata, onProgress,
+      githubRepo: fullName, jobId, token, metadata, onProgress: progressChannel(),
     });
     aborted();
     if (!full && prepared.unchanged && metadataJson && await touchOwnershipSnapshot(db, repoId, metadataJson)) {
@@ -35,7 +41,7 @@ export async function syncOwnershipRepo(options: {
     const previousJson = full ? null : await ownershipCheckpoint(db, repoId);
     aborted();
     const snapshot = await invoke<string>("sync_line_ownership", {
-      githubRepo: fullName, jobId, revision: prepared.revision, previousJson, onProgress,
+      githubRepo: fullName, jobId, revision: prepared.revision, previousJson, onProgress: progressChannel(),
     });
     aborted();
     await writeOwnershipSnapshot(db, repoId, snapshot, full);
