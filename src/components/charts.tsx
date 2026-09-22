@@ -342,10 +342,15 @@ export function TimelineArea({
   const isActive = (key: string) => !filtered || activeKeys!.has(key);
   const dim = (key: string) => (isActive(key) ? 1 : 0.18);
 
-  if (data.length === 0 || series.length === 0) return <NoData height={h} />;
+  // A fresh array every render makes the brush treat the data as new and reset,
+  // which re-renders, which builds another array. Expanded charts show that as a shake.
+  const seriesKey = series.map((s) => s.key).join("\0");
+  const plotted = useMemo(
+    () => (normalised ? toShares(data, seriesKey ? seriesKey.split("\0") : []) : data),
+    [normalised, data, seriesKey],
+  );
 
-  // Shares are of everything, so isolating a band does not re-base the axis.
-  const plotted = normalised ? toShares(data, colored.map((s) => s.key)) : data;
+  if (data.length === 0 || series.length === 0) return <NoData height={h} />;
   /* Room under the baseline only when something goes there, so a share chart of
      commits still fills the plot rather than giving half of it to an empty half. */
   const shareFloor =

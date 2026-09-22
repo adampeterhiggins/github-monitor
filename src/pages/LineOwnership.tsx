@@ -76,7 +76,7 @@ export function LineOwnership() {
           <StatTile label="Repositories" value={`${full(reports.length)} / ${full(repoIds.length)}`} hint="With a saved ownership snapshot" />
         </div>
         {historyPoints.length === 0 && !history.isLoading && <p className="text-[12px] text-ink-muted">Ownership history builds during sync. The daily chart appears once each default-branch commit has been recorded.</p>}
-        {historyPoints.length > 0 && <OwnershipHistoryChart points={historyPoints} selectedLogins={selectedLogins} />}
+        {historyPoints.length > 0 && <OwnershipHistoryChart points={historyPoints} selectedLogins={selectedLogins} repositories={rows.map((row) => ({ id: row.repo_id, name: row.full_name }))} />}
         <LineOwnershipCharts summary={summary} repositories={chartRepositories} />
         <p className="text-[12px] text-ink-muted">Person grouping merges shared names and emails across repositories. Use Email to separate people who share a name. The contributor selector shares selections with other pages; Deselect bots removes detected bots from that selection.</p>
       </>}

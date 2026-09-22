@@ -169,6 +169,48 @@ try {
   }], ["ALICE-DEV"]);
   assert.equal(githubHistory.series.length, 1);
   assert.equal(githubHistory.data[0][githubHistory.series[0].key], 6);
+  const shown = lib.ownershipHistorySeries([{ repoId: 1, committedAt: "2020-01-02T00:00:00Z", authors: nine }], [], { limit: 4 });
+  assert.equal(shown.series.length, 5);
+  assert.equal(shown.series[4].key, "other");
+  assert.equal(shown.data[0][shown.series[4].key], 70, "a smaller series limit folds the rest into Other");
+  const everyone = lib.ownershipHistorySeries([{ repoId: 1, committedAt: "2020-01-02T00:00:00Z", authors: nine }], [], { limit: Infinity });
+  assert.equal(everyone.series.length, 9);
+  assert.equal(everyone.series.some((item) => item.key === "other"), false);
+  assert.equal(everyone.series[8].slot, 8);
+  const byRepo = lib.ownershipHistorySeries([
+    { repoId: 1, committedAt: "2020-01-02T00:00:00Z", authors: [historyAuthor("Alice", "alice@x", 3)] },
+    { repoId: 2, committedAt: "2020-01-02T00:00:00Z", authors: [historyAuthor("A.", "alice@x", 4, ["A."])] },
+  ], [], { split: "repository", repoNames: new Map([[1, "org/one"], [2, "org/two"]]) });
+  assert.equal(byRepo.series.length, 2, "repository split keeps each repository separate");
+  assert.deepEqual(byRepo.series.map((item) => item.label).sort(), ["org/one", "org/two"]);
+  const total = lib.ownershipHistorySeries([
+    { repoId: 1, committedAt: "2020-01-02T00:00:00Z", authors: [aliceHistory(3)] },
+    { repoId: 2, committedAt: "2020-01-02T00:00:00Z", authors: [historyAuthor("Bob", "bob@x", 4)] },
+  ], [], { split: "total" });
+  assert.equal(total.series.length, 1);
+  assert.equal(total.data[0][total.series[0].key], 7);
+  const seconds = (iso) => Date.parse(iso) / 1000;
+  const levels = [
+    { week: seconds("2020-01-01T00:00:00Z"), a: 2 },
+    { week: seconds("2020-01-04T00:00:00Z"), a: 5 },
+    { week: seconds("2020-01-05T00:00:00Z"), a: 8 },
+    { week: seconds("2020-01-31T00:00:00Z"), a: 9 },
+    { week: seconds("2020-02-01T00:00:00Z"), a: 4 },
+  ];
+  assert.equal(lib.ownershipHistoryBuckets(levels, ["a"], "cumulative").length, 5);
+  const weekly = lib.ownershipHistoryBuckets(levels, ["a"], "week");
+  assert.equal(weekly.length, 3);
+  assert.equal(weekly[0].week, seconds("2019-12-29T00:00:00Z"));
+  assert.equal(weekly[0].a, 5, "a week keeps its last day rather than summing the stock");
+  assert.equal(weekly[1].a, 8);
+  assert.equal(weekly[2].a, 4);
+  const monthly = lib.ownershipHistoryBuckets(levels, ["a"], "month");
+  assert.equal(monthly.length, 2);
+  assert.equal(monthly[0].a, 9);
+  assert.equal(monthly[1].a, 4);
+  const quarterly = lib.ownershipHistoryBuckets(levels, ["a"], "quarter");
+  assert.equal(quarterly.length, 1);
+  assert.equal(quarterly[0].a, 4);
   console.log("PASS  ownership history series carry-forward, daily collapse, selection, Other and cross-repo identity");
 
   console.log("PASS  chart cells share global identities and totals; shared bot patterns cover aliases, model variants, email usernames and built-ins");

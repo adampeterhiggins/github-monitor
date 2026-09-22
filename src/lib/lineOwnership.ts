@@ -1,3 +1,5 @@
+import { bucketStart, type Granularity } from "./agg/series";
+import { weekStart } from "./agg/weeks";
 import { isBotIdentity } from "./bots";
 
 export interface Identity { name: string; email: string }
@@ -40,6 +42,19 @@ export interface OwnershipHistoryPoint {
 export interface OwnershipHistorySeries {
   data: Array<Record<string, number>>;
   series: Array<{ key: string; label: string; slot: number | null }>;
+}
+
+export type OwnershipHistorySplit = "people" | "repository" | "total";
+
+/** Cumulative keeps every day. The others keep the last day in each bucket. */
+export type OwnershipTimeline = "cumulative" | Granularity;
+
+export interface OwnershipHistorySeriesOptions {
+  /** Series drawn on their own before the rest become Other. Defaults to eight. */
+  limit?: number;
+  /** People across repositories, one series per repository, or a single total. */
+  split?: OwnershipHistorySplit;
+  repoNames?: ReadonlyMap<number, string>;
 }
 
 /** Merge identities over the whole selection before assigning credit, so an
@@ -145,11 +160,41 @@ function historyAuthorMatches(author: OwnershipHistoryAuthor, selected: Readonly
   return values.some((value) => value && selected.has(value.toLowerCase()));
 }
 
+function rankHistorySeries(
+  totals: Map<number, Map<string, number>>,
+  labelOf: Map<string, string>,
+  limit: number,
+): OwnershipHistorySeries {
+  const peaks = new Map<string, number>();
+  for (const people of totals.values()) {
+    for (const [key, lines] of people) peaks.set(key, Math.max(peaks.get(key) ?? 0, lines));
+  }
+  const ranked = [...peaks.entries()]
+    .filter(([, lines]) => lines > 0)
+    .sort((a, b) => b[1] - a[1] || (labelOf.get(a[0]) ?? "").localeCompare(labelOf.get(b[0]) ?? ""));
+  const kept = ranked.slice(0, limit);
+  const rest = new Set(ranked.slice(limit).map(([key]) => key));
+  const series = [
+    ...kept.map(([key], slot) => ({ key, label: labelOf.get(key) ?? "Unknown", slot })),
+    ...(rest.size ? [{ key: "other", label: "Other", slot: null as number | null }] : []),
+  ];
+  const data = [...totals.keys()].sort((a, b) => a - b).map((day) => {
+    const people = totals.get(day)!;
+    const row: Record<string, number> = { week: day };
+    let other = 0;
+    for (const [key, lines] of people) if (rest.has(key)) other += lines;
+    for (const item of series) row[item.key] = item.key === "other" ? other : people.get(item.key) ?? 0;
+    return row;
+  });
+  return { data, series };
+}
+
 /** Daily stacked series. Each repository keeps its last commit through days with
  * none, and people who share a name or email are one series across repositories. */
 export function ownershipHistorySeries(
   points: readonly OwnershipHistoryPoint[],
   selectedLogins: readonly string[] = [],
+  options: OwnershipHistorySeriesOptions = {},
 ): OwnershipHistorySeries {
   const selected = selectedLogins.length ? new Set(selectedLogins.map((value) => value.toLowerCase())) : new Set<string>();
   const byRepo = new Map<number, Map<number, { at: number; authors: OwnershipHistoryAuthor[] }>>();
@@ -168,6 +213,8 @@ export function ownershipHistorySeries(
     byRepo.set(point.repoId, days);
   }
   if (!Number.isFinite(min)) return { data: [], series: [] };
+  const split = options.split ?? "people";
+  const limit = options.limit ?? 8;
 
   const carried = new Map<number, Map<number, OwnershipHistoryAuthor[]>>();
   const rows: OwnershipHistoryAuthor[] = [];
@@ -191,6 +238,29 @@ export function ownershipHistorySeries(
       }
     }
     carried.set(repoId, filled);
+  }
+
+  if (split !== "people") {
+    const totals = new Map<number, Map<string, number>>();
+    const labelOf = new Map<string, string>();
+    if (split === "total") labelOf.set("total", "Lines");
+    for (let day = min; day <= max; day += DAY) {
+      const bucket = new Map<string, number>();
+      if (split === "total") {
+        let lines = 0;
+        for (const filled of carried.values()) for (const author of filled.get(day) ?? []) lines += author.lines;
+        bucket.set("total", lines);
+      } else {
+        for (const [repoId, filled] of carried) {
+          if (!filled.has(day)) continue;
+          const key = `repo:${repoId}`;
+          bucket.set(key, (filled.get(day) ?? []).reduce((sum, author) => sum + author.lines, 0));
+          if (!labelOf.has(key)) labelOf.set(key, options.repoNames?.get(repoId) ?? `Repository ${repoId}`);
+        }
+      }
+      totals.set(day, bucket);
+    }
+    return rankHistorySeries(totals, labelOf, split === "total" ? 1 : limit);
   }
 
   const parent = rows.map((_, index) => index);
@@ -258,30 +328,25 @@ export function ownershipHistorySeries(
     }
     totals.set(day, people);
   }
-  const peaks = new Map<string, number>();
-  for (const people of totals.values()) {
-    for (const [key, lines] of people) peaks.set(key, Math.max(peaks.get(key) ?? 0, lines));
+  return rankHistorySeries(totals, labelOf, limit);
+}
+
+/** Keep the last day in each week, month or quarter. Summing a stock would
+ * count the same lines once per day. */
+export function ownershipHistoryBuckets(
+  rows: ReadonlyArray<Record<string, number>>,
+  keys: readonly string[],
+  view: OwnershipTimeline,
+): Array<Record<string, number>> {
+  if (view === "cumulative" || rows.length === 0) return [...rows];
+  const buckets = new Map<number, Record<string, number>>();
+  for (const row of rows) {
+    const start = view === "week" ? weekStart(row.week * 1000) : bucketStart(row.week, view);
+    const next: Record<string, number> = { week: start };
+    for (const key of keys) next[key] = row[key] ?? 0;
+    buckets.set(start, next);
   }
-  const ranked = [...peaks.entries()]
-    .filter(([, lines]) => lines > 0)
-    .sort((a, b) => b[1] - a[1] || (labelOf.get(a[0]) ?? "").localeCompare(labelOf.get(b[0]) ?? ""));
-  const kept = ranked.slice(0, 8);
-  const rest = new Set(ranked.slice(8).map(([key]) => key));
-  const series = [
-    ...kept.map(([key], slot) => ({ key, label: labelOf.get(key) ?? "Unknown", slot })),
-    ...(rest.size ? [{ key: "other", label: "Other", slot: null }] : []),
-  ];
-  const data = [...totals.keys()].sort((a, b) => a - b).map((day) => {
-    const people = totals.get(day)!;
-    const row: Record<string, number> = { week: day };
-    let other = 0;
-    for (const [key, lines] of people) {
-      if (rest.has(key)) other += lines;
-    }
-    for (const item of series) row[item.key] = item.key === "other" ? other : people.get(item.key) ?? 0;
-    return row;
-  });
-  return { data, series };
+  return [...buckets.values()].sort((a, b) => a.week - b.week);
 }
 
 /** Snapshot contributors use the shared selector and selection store. Keep all

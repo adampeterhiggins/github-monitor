@@ -1017,7 +1017,7 @@ export function Modal({
           />
           {/* Charts carry a legend under them, so the height offered leaves room
               for one; a legend long enough to need more than that scrolls. */}
-          <div ref={bodyRef} className="min-h-0 flex-1 overflow-auto overscroll-contain">
+          <div ref={bodyRef} className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain">
             {bodyHeight > 0 ? children(Math.max(200, bodyHeight - 52)) : null}
           </div>
         </Card>
