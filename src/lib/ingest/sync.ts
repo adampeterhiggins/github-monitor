@@ -755,7 +755,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     try {
       await recordSync(db, repo.id, "line_ownership", "pending", { error: "Ownership sync interrupted; resume to finish" });
       await syncOwnershipRepo({
-        db, repoId: repo.id, fullName: repo.fullName, token, full: mode === "full", signal,
+        db, repoId: repo.id, fullName: repo.fullName, token, full: mode === "full", client, signal,
         onProgress: (progress) => {
           current = `${repo.fullName} · ${progress.phase}${progress.total ? ` (${progress.completed}/${progress.total} files)` : ""}`;
           emit();

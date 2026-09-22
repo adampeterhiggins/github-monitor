@@ -6,9 +6,11 @@ import { LineOwnershipCharts, OwnershipHistoryChart } from "../components/LineOw
 import { UserFilter } from "../components/UserFilter";
 import { RepoFilter } from "../components/RepoFilter";
 import { Button, Callout, Card, CardHeader, DataTable, EmptyState, Spinner, StatTile, full } from "../components/ui";
-import { aggregateOwnership, ownershipContributors, downloadOwnership, type GroupBy, type OwnershipReport } from "../lib/lineOwnership";
+import { aggregateOwnership, ownershipContributors, downloadOwnership, type GithubAccounts, type GroupBy, type OwnershipReport } from "../lib/lineOwnership";
 import { NO_CONTRIBUTORS } from "../lib/contributorSelection";
-import { ownershipHistory, ownershipSnapshots } from "../lib/db/lineOwnership";
+import { githubAccounts, ownershipHistory, ownershipSnapshots } from "../lib/db/lineOwnership";
+
+const NO_ACCOUNTS: GithubAccounts = new Map();
 
 export function LineOwnership() {
   const db = useApp((s) => s.db);
@@ -31,12 +33,19 @@ export function LineOwnership() {
     queryFn: () => ownershipHistory(db!, repoIds),
     refetchInterval: syncing ? 5000 : false,
   });
+  const accounts = useQuery({
+    queryKey: ["github-accounts", syncing],
+    enabled: db != null,
+    queryFn: () => githubAccounts(db!),
+    refetchInterval: syncing ? 5000 : false,
+  });
+  const accountMap = accounts.data ?? NO_ACCOUNTS;
   const rows = repoIds.length ? snapshots.data ?? [] : [];
   const historyPoints = repoIds.length ? history.data ?? [] : [];
   const chartRepositories = useMemo(() => rows.filter((r) => r.report != null).map((r) => ({ id: r.repo_id, name: r.full_name })), [rows]);
   const reports = useMemo(() => rows.map((r) => r.report).filter((r): r is OwnershipReport => r != null), [rows]);
-  const contributors = useMemo(() => ownershipContributors(reports, botPatterns), [reports, botPatterns]);
-  const summary = useMemo(() => aggregateOwnership(reports, groupBy, selectedLogins), [reports, groupBy, selectedLogins]);
+  const contributors = useMemo(() => ownershipContributors(reports, botPatterns, accountMap), [reports, botPatterns, accountMap]);
+  const summary = useMemo(() => aggregateOwnership(reports, groupBy, selectedLogins, accountMap), [reports, groupBy, selectedLogins, accountMap]);
   const filteredLinesByRepo = useMemo(() => new Map(chartRepositories.map((r, i) => [r.id, summary.byRepository[i].totalLines])), [chartRepositories, summary]);
   const missing = rows.filter((r) => !r.report).length;
   const failed = rows.filter((r) => r.status === "error").length;
@@ -76,9 +85,9 @@ export function LineOwnership() {
           <StatTile label="Repositories" value={`${full(reports.length)} / ${full(repoIds.length)}`} hint="With a saved ownership snapshot" />
         </div>
         {historyPoints.length === 0 && !history.isLoading && <p className="text-[12px] text-ink-muted">Ownership history builds during sync. The daily chart appears once each default-branch commit has been recorded.</p>}
-        {historyPoints.length > 0 && <OwnershipHistoryChart points={historyPoints} selectedLogins={selectedLogins} repositories={rows.map((row) => ({ id: row.repo_id, name: row.full_name }))} />}
+        {historyPoints.length > 0 && <OwnershipHistoryChart points={historyPoints} selectedLogins={selectedLogins} accounts={accountMap} repositories={rows.map((row) => ({ id: row.repo_id, name: row.full_name }))} />}
         <LineOwnershipCharts summary={summary} repositories={chartRepositories} />
-        <p className="text-[12px] text-ink-muted">Person grouping merges shared names and emails across repositories. Use Email to separate people who share a name. The contributor selector shares selections with other pages; Deselect bots removes detected bots from that selection.</p>
+        <p className="text-[12px] text-ink-muted">Person grouping merges shared names, emails, and GitHub accounts across repositories. Use Email to separate people who share a name. The contributor selector shares selections with other pages; Deselect bots removes detected bots from that selection.</p>
       </>}
       {rows.length > 0 && <Card>
         <CardHeader title="Repository snapshots" subtitle="Saved commit and last successful calculation for each repository. Sync changes updates touched files; Full re-sync rebuilds all ownership." />

@@ -1,5 +1,5 @@
 import type Database from "@tauri-apps/plugin-sql";
-import type { OwnershipHistoryAuthor, OwnershipHistoryPoint, OwnershipReport } from "../lineOwnership";
+import type { GithubAccount, OwnershipHistoryAuthor, OwnershipHistoryPoint, OwnershipReport } from "../lineOwnership";
 import { Params } from "./params";
 import { bulkInsert, withWriteLock } from ".";
 
@@ -173,4 +173,37 @@ export async function ownershipHistory(db: Database, repoIds: number[]): Promise
     committedAt: row.committed_at,
     authors: JSON.parse(row.authors_json) as OwnershipHistoryAuthor[],
   }));
+}
+
+/** Emails already resolved, including addresses GitHub could not match. */
+export async function knownGithubAccountEmails(db: Database, emails: readonly string[]): Promise<Set<string>> {
+  if (!emails.length) return new Set();
+  const p = new Params();
+  const rows = await db.select<Array<{ email: string }>>(
+    `SELECT email FROM github_accounts WHERE email IN ${p.in(emails)}`,
+    p.values,
+  );
+  return new Set(rows.map((row) => row.email));
+}
+
+/** Accounts GitHub matched. Unmatched addresses stay out of the join. */
+export async function githubAccounts(db: Database): Promise<Map<string, GithubAccount>> {
+  const rows = await db.select<Array<{ email: string; login: string; github_id: string }>>(
+    "SELECT email, login, github_id FROM github_accounts WHERE login IS NOT NULL AND github_id IS NOT NULL",
+  );
+  return new Map(rows.map((row) => [row.email, { login: row.login, id: row.github_id }]));
+}
+
+/** Remember a lookup. A null login is a miss, so the next sync skips that email. */
+export async function writeGithubAccounts(
+  db: Database,
+  rows: Array<[string, string | null, string | null]>,
+): Promise<void> {
+  await withWriteLock(() => bulkInsert(db, {
+    table: "github_accounts",
+    columns: ["email", "login", "github_id"],
+    rows,
+    conflictColumns: ["email"],
+    onConflict: "replace",
+  }).then(() => {}));
 }

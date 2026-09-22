@@ -299,6 +299,7 @@ export async function clearAnalytics(db: Database): Promise<void> {
     "line_ownership",
     "line_ownership_history",
     "line_ownership_history_state",
+    "github_accounts",
     "contributor_weeks",
     "commit_activity",
     "participation",

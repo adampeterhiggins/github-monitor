@@ -114,6 +114,69 @@ try {
     assert.equal(aggregateOwnership(githubReports, group, ["ALICE-DEV"]).totalLines, 9, "GitHub selections include the person's other emails");
   }
   assert.equal(aggregateOwnership(githubReports, "person", ["unrelated"]).authors.length, 0);
+  const sameAccount = aggregateOwnership([{ credits: [
+    { lines: 5, people: [{ name: "Nate Higgins", email: "nathggns@users.noreply.github.com" }] },
+    { lines: 11, people: [{ name: "nathggns", email: "719814+nathggns@users.noreply.github.com" }] },
+    { lines: 2, people: [{ name: "Old", email: "719814+oldlogin@users.noreply.github.com" }] },
+  ] }]);
+  assert.equal(sameAccount.authors.length, 1, "noreply spellings and a renamed login of one GitHub account are one person");
+  assert.equal(sameAccount.authors[0].author, "nathggns");
+  assert.equal(sameAccount.authors[0].lines, 18);
+  const otherAccount = aggregateOwnership([{ credits: [
+    { lines: 5, people: [{ name: "Nate Higgins", email: "nathggns@users.noreply.github.com" }] },
+    { lines: 4, people: [{ name: "Someone Else", email: "9+someone@users.noreply.github.com" }] },
+  ] }]);
+  assert.equal(otherAccount.authors.length, 2);
+  const accounts = new Map([
+    ["aaronconway796@gmail.com", { login: "aaronconway7", id: "15988654" }],
+    ["bert@hotmail.com", { login: "peakman18", id: "32281438" }],
+    ["bertdec@hotmail.com", { login: "bodcrop", id: "29414131" }],
+    ["ada@x.com", { login: "newlogin", id: "5" }],
+  ]);
+  const resolvedReports = [{ credits: [
+    { lines: 10, people: [{ name: "Aaron Conway", email: "aaronconway796@gmail.com" }] },
+    { lines: 2, people: [{ name: "aaronconway7", email: "15988654+aaronconway7@users.noreply.github.com" }] },
+    { lines: 4, people: [{ name: "Bert Decrop", email: "bert@hotmail.com" }] },
+    { lines: 3, people: [{ name: "bodcrop", email: "bertdec@hotmail.com" }] },
+    { lines: 1, people: [{ name: "Local", email: "local@host" }] },
+  ] }];
+  const resolved = aggregateOwnership(resolvedReports, "person", [], accounts);
+  assert.equal(resolved.authors.length, 4, "a personal email joins the GitHub account, and a different account stays separate");
+  assert.equal(resolved.authors.find((author) => author.author === "aaronconway7").lines, 12);
+  assert.equal(resolved.authors.find((author) => author.author === "peakman18").lines, 4);
+  assert.equal(resolved.authors.find((author) => author.author === "bodcrop").lines, 3);
+  assert.equal(resolved.authors.find((author) => author.author === "Local").lines, 1, "an unmatched address keeps its git name");
+  assert.equal(aggregateOwnership(resolvedReports, "email", [], accounts).authors.length, 5, "email grouping does not merge accounts");
+  assert.equal(aggregateOwnership(resolvedReports, "person", ["aaronconway7"], accounts).totalLines, 12);
+  const resolvedOptions = lib.ownershipContributors(resolvedReports, [], accounts);
+  assert.equal(resolvedOptions.find((contributor) => contributor.login === "aaronconway7").commits, 12);
+  assert.equal(resolvedOptions.find((contributor) => contributor.login === "peakman18").commits, 4);
+  const renamed = aggregateOwnership([{ credits: [
+    { lines: 9, people: [{ name: "Ada", email: "ada@x.com" }] },
+    { lines: 1, people: [{ name: "oldlogin", email: "5+oldlogin@users.noreply.github.com" }] },
+  ] }], "person", [], accounts);
+  assert.equal(renamed.authors.length, 1);
+  assert.equal(renamed.authors[0].author, "newlogin", "the account id joins a renamed login, and the busier login is the label");
+  assert.equal(renamed.authors[0].lines, 10);
+  const matched = lib.githubUserForCommit({
+    author: { login: "aaronconway7", id: 15988654 },
+    committer: { login: "other", id: 9 },
+    commit: { author: { email: "aaronconway796@gmail.com" }, committer: { email: "other@x.com" } },
+  }, { email: "aaronconway796@gmail.com", role: "author" });
+  assert.deepEqual(matched.account, { login: "aaronconway7", id: "15988654" });
+  const wrongSide = lib.githubUserForCommit({
+    author: { login: "aaronconway7", id: 15988654 },
+    committer: { login: "other", id: 9 },
+    commit: { author: { email: "aaronconway796@gmail.com" }, committer: { email: "other@x.com" } },
+  }, { email: "other@x.com", role: "author" });
+  assert.equal(wrongSide.matched, false, "the other side of the commit is not this email's account");
+  const unmatched = lib.githubUserForCommit({
+    author: null,
+    committer: { login: "someone", id: 1 },
+    commit: { author: { email: "local@host" }, committer: { email: "someone@x.com" } },
+  }, { email: "local@host", role: "author" });
+  assert.equal(unmatched.matched, true);
+  assert.equal(unmatched.account, null);
   console.log("PASS  shared contributor contributorOptions, bot deselection, empty selection, alias/GitHub matching and filtered chart totals");
 
   const historyAuthor = (author, email, lines, names = [author]) => ({ author, names, emails: [email], lines });
@@ -169,6 +232,28 @@ try {
   }], ["ALICE-DEV"]);
   assert.equal(githubHistory.series.length, 1);
   assert.equal(githubHistory.data[0][githubHistory.series[0].key], 6);
+  const sameGithubAccount = lib.ownershipHistorySeries([{
+    repoId: 1, committedAt: "2020-01-02T00:00:00Z",
+    authors: [
+      historyAuthor("Nate Higgins", "nathggns@users.noreply.github.com", 5),
+      historyAuthor("nathggns", "719814+nathggns@users.noreply.github.com", 11),
+    ],
+  }], []);
+  assert.equal(sameGithubAccount.series.length, 1);
+  assert.equal(sameGithubAccount.series[0].label, "nathggns");
+  assert.equal(sameGithubAccount.data[0][sameGithubAccount.series[0].key], 16);
+  const resolvedHistory = lib.ownershipHistorySeries([{
+    repoId: 1, committedAt: "2020-01-02T00:00:00Z",
+    authors: [
+      historyAuthor("Aaron Conway", "aaronconway796@gmail.com", 10),
+      historyAuthor("aaronconway7", "15988654+aaronconway7@users.noreply.github.com", 2),
+      historyAuthor("Bert Decrop", "bert@hotmail.com", 4),
+    ],
+  }], [], { accounts });
+  assert.equal(resolvedHistory.series.length, 2);
+  assert.equal(resolvedHistory.series.find((item) => item.label === "aaronconway7").label, "aaronconway7");
+  const aaronKey = resolvedHistory.series.find((item) => item.label === "aaronconway7").key;
+  assert.equal(resolvedHistory.data[0][aaronKey], 12);
   const shown = lib.ownershipHistorySeries([{ repoId: 1, committedAt: "2020-01-02T00:00:00Z", authors: nine }], [], { limit: 4 });
   assert.equal(shown.series.length, 5);
   assert.equal(shown.series[4].key, "other");
@@ -263,6 +348,7 @@ try {
         activePreparations--;
         return { revision, unchanged: args.metadata?.revision === revision };
       }
+      if (command === "line_ownership_account_samples") return [];
       if (command === "advance_line_ownership_history") {
         historyCalls.push(args);
         args.onProgress?.onmessage?.({ completed: 1, total: 1, phase: "Ownership history 1/1" });

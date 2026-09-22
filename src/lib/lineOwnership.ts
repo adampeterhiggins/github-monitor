@@ -52,25 +52,43 @@ export type OwnershipReading = "cumulative" | "period";
 /** How wide each point is. Independent of whether the point is a level or a change. */
 export type OwnershipPeriod = "day" | Granularity;
 
+/** A git email the commits API has matched to a GitHub account. */
+export interface GithubAccount {
+  login: string;
+  id: string;
+}
+
+export type GithubAccounts = ReadonlyMap<string, GithubAccount>;
+
 export interface OwnershipHistorySeriesOptions {
   /** Series drawn on their own before the rest become Other. Defaults to eight. */
   limit?: number;
   /** People across repositories, one series per repository, or a single total. */
   split?: OwnershipHistorySplit;
   repoNames?: ReadonlyMap<number, string>;
+  /** Personal emails joined to the account GitHub recorded on a commit. */
+  accounts?: GithubAccounts;
 }
 
 /** Merge identities over the whole selection before assigning credit, so an
  * alias connecting two co-authors across repositories cannot double-count a line. */
-export function aggregateOwnership(reports: OwnershipReport[], groupBy: GroupBy = "person", selectedContributors: readonly string[] = []) {
+export function aggregateOwnership(reports: OwnershipReport[], groupBy: GroupBy = "person", selectedContributors: readonly string[] = [], accounts?: GithubAccounts) {
   const normalize = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
   const keyOf = (p: Identity) => p.email ? `email:${p.email.toLowerCase()}` : `name:${normalize(p.name)}`;
   const parents = new Map<string, string>();
   const names = new Map<string, string>();
+  const logins = new Map<string, string>();
+  const githubIds = new Map<string, string>();
   const root = (key: string): string => {
     let current = key;
     while (parents.has(current) && parents.get(current) !== current) current = parents.get(current)!;
     return current;
+  };
+  const link = (index: Map<string, string>, token: string, key: string) => {
+    if (!token) return;
+    const existing = index.get(token);
+    if (existing) parents.set(root(key), root(existing));
+    else index.set(token, key);
   };
   const credits = reports.flatMap((r) => r.credits);
   const identities = new Map<string, Identity>();
@@ -78,11 +96,11 @@ export function aggregateOwnership(reports: OwnershipReport[], groupBy: GroupBy 
   for (const p of identities.values()) {
     const key = keyOf(p);
     if (!parents.has(key)) parents.set(key, key);
-    const name = normalize(p.name);
-    if (!name) continue;
-    const existing = names.get(name);
-    if (existing) parents.set(root(key), root(existing));
-    else names.set(name, key);
+    link(names, normalize(p.name), key);
+    const account = linkedAccount(p.email, accounts);
+    if (!account) continue;
+    link(logins, account.login, key);
+    if (account.id) link(githubIds, account.id, key);
   }
   const groupKey = (p: Identity) => groupBy === "person" ? root(keyOf(p)) : groupBy === "email"
     ? p.email.toLowerCase() || normalize(p.name) : normalize(p.name) || p.email.toLowerCase();
@@ -90,10 +108,10 @@ export function aggregateOwnership(reports: OwnershipReport[], groupBy: GroupBy 
   // GitHub login selected elsewhere must include all of that person's aliases.
   const selected = new Set(selectedContributors.map((value) => value.toLowerCase()));
   const selectedPeople = new Set<string>();
-  if (selected.size) for (const p of identities.values()) {
-    if (identitySelections(p).some((value) => selected.has(value.toLowerCase()))) selectedPeople.add(root(keyOf(p)));
+    if (selected.size) for (const p of identities.values()) {
+    if (identitySelections(p, accounts).some((value) => selected.has(value.toLowerCase()))) selectedPeople.add(root(keyOf(p)));
   }
-  const authors = new Map<string, { names: Set<string>; emails: Set<string>; lines: number }>();
+  const authors = new Map<string, { names: Set<string>; emails: Set<string>; logins: Map<string, number>; lines: number }>();
   let totalLines = 0;
   let coauthoredLines = 0;
   const repositoryCounts = reports.map((report) => {
@@ -105,12 +123,17 @@ export function aggregateOwnership(reports: OwnershipReport[], groupBy: GroupBy 
       for (const p of credit.people) {
         const key = groupKey(p);
         if (!key || (selected.size > 0 && !selectedPeople.has(root(keyOf(p))))) continue;
-        const author = authors.get(key) ?? { names: new Set<string>(), emails: new Set<string>(), lines: 0 };
+        const author = authors.get(key) ?? { names: new Set<string>(), emails: new Set<string>(), logins: new Map<string, number>(), lines: 0 };
         if (p.name) author.names.add(p.name);
         if (p.email) author.emails.add(p.email.toLowerCase());
         if (!seen.has(key)) {
           author.lines += credit.lines;
           counts.set(key, (counts.get(key) ?? 0) + credit.lines);
+          const login = credit.people
+            .filter((person) => groupKey(person) === key)
+            .map((person) => linkedAccount(person.email, accounts)?.login)
+            .find((login): login is string => login != null);
+          if (login) author.logins.set(login, (author.logins.get(login) ?? 0) + credit.lines);
         }
         seen.add(key);
         authors.set(key, author);
@@ -125,7 +148,8 @@ export function aggregateOwnership(reports: OwnershipReport[], groupBy: GroupBy 
   const rows = [...authors.entries()].map(([key, a]) => {
     const names = [...a.names].sort();
     const emails = [...a.emails].sort();
-    const name = (groupBy === "person" ? names.find((n) => n.includes(" ")) : null) ?? names[0] ?? emails[0] ?? "Unknown";
+    const login = groupBy === "person" ? preferredLogin(a.logins) : null;
+    const name = login ?? (groupBy === "person" ? names.find((n) => n.includes(" ")) : null) ?? names[0] ?? emails[0] ?? "Unknown";
     return { key, author: groupBy === "email" && emails[0] ? `${name} <${emails[0]}>` : name,
       names, emails, lines: a.lines, share: totalLines ? a.lines / totalLines : 0 };
   }).sort((a, b) => b.lines - a.lines || a.author.localeCompare(b.author));
@@ -139,26 +163,74 @@ export function aggregateOwnership(reports: OwnershipReport[], groupBy: GroupBy 
   return { authors: rows, totalLines, creditedLines: rows.reduce((n, a) => n + a.lines, 0), coauthoredLines, byRepository };
 }
 
-/** GitHub noreply addresses provide an explicit login; other addresses do not. */
-function githubLogin(email: string): string | null {
-  const match = email.match(/^(?:\d+\+)?([^@]+)@users\.noreply\.github\.com$/i);
-  return match?.[1] ?? null;
+/** One GitHub account. The id-less form and `id+login` are the same account, and the id survives a login rename. */
+function githubAccount(email: string): { id: string | null; login: string } | null {
+  const match = email.trim().toLowerCase().match(/^(?:(\d+)\+)?([^@]+)@users\.noreply\.github\.com$/);
+  if (!match?.[2]) return null;
+  return { id: match[1] ?? null, login: match[2] };
 }
 
-function identitySelections(identity: Identity): string[] {
-  return [identity.name, identity.email, githubLogin(identity.email) ?? ""].filter(Boolean);
+/** Noreply addresses carry the account. Other addresses use the commits API map. */
+function linkedAccount(email: string, accounts?: GithubAccounts): { id: string | null; login: string } | null {
+  const parsed = githubAccount(email);
+  if (parsed) return parsed;
+  const resolved = accounts?.get(email.trim().toLowerCase());
+  if (!resolved?.login || !resolved.id) return null;
+  return { id: resolved.id, login: resolved.login };
+}
+
+interface GithubCommitSide {
+  login?: string | null;
+  id?: number | null;
+}
+
+/** The account on one side of a commit. A matching email with no user is a miss.
+ * An email from the other side is left unresolved so the next sync can try again. */
+export function githubUserForCommit(
+  commit: {
+    author: GithubCommitSide | null;
+    committer: GithubCommitSide | null;
+    commit?: { author?: { email?: string | null } | null; committer?: { email?: string | null } | null } | null;
+  } | null,
+  sample: { email: string; role: string },
+): { matched: boolean; account: GithubAccount | null } {
+  if (!commit) return { matched: true, account: null };
+  const committer = sample.role === "committer";
+  const user = committer ? commit.committer : commit.author;
+  const email = (committer ? commit.commit?.committer?.email : commit.commit?.author?.email) ?? "";
+  if (email.trim().toLowerCase() !== sample.email.trim().toLowerCase()) return { matched: false, account: null };
+  const login = user?.login?.trim() ?? "";
+  if (!login || user?.id == null) return { matched: true, account: null };
+  return { matched: true, account: { login, id: String(user.id) } };
+}
+
+/** The login contributions would show. The address with the most surviving lines wins a rename. */
+function preferredLogin(logins: ReadonlyMap<string, number>): string | null {
+  let best: string | null = null;
+  let bestLines = -1;
+  for (const [login, lines] of logins) {
+    if (lines > bestLines || (lines === bestLines && (best == null || login < best))) {
+      best = login;
+      bestLines = lines;
+    }
+  }
+  return best;
+}
+
+function identitySelections(identity: Identity, accounts?: GithubAccounts): string[] {
+  return [identity.name, identity.email, linkedAccount(identity.email, accounts)?.login ?? ""].filter(Boolean);
 }
 
 const DAY = 86_400;
 const normalizeHistoryName = (value: string) => value.trim().replace(/\s+/g, " ").toLowerCase();
 
-function historyAuthorMatches(author: OwnershipHistoryAuthor, selected: ReadonlySet<string>): boolean {
+function historyAuthorMatches(author: OwnershipHistoryAuthor, selected: ReadonlySet<string>, accounts?: GithubAccounts): boolean {
   if (selected.size === 0) return true;
   const values = [
     author.author,
     ...author.names,
     ...author.emails,
-    ...author.emails.map((email) => githubLogin(email) ?? ""),
+    ...author.emails.map((email) => linkedAccount(email, accounts)?.login ?? ""),
   ];
   return values.some((value) => value && selected.has(value.toLowerCase()));
 }
@@ -209,7 +281,7 @@ export function ownershipHistorySeries(
     const day = Math.floor(at / 1000 / DAY) * DAY;
     min = Math.min(min, day);
     max = Math.max(max, day);
-    const authors = point.authors.filter((author) => historyAuthorMatches(author, selected));
+    const authors = point.authors.filter((author) => historyAuthorMatches(author, selected, options.accounts));
     const days = byRepo.get(point.repoId) ?? new Map();
     const existing = days.get(day);
     if (!existing || at >= existing.at) days.set(day, { at, authors });
@@ -279,22 +351,26 @@ export function ownershipHistorySeries(
   };
   const emailOwner = new Map<string, number>();
   const nameOwner = new Map<string, number>();
+  const loginOwner = new Map<string, number>();
+  const githubIdOwner = new Map<string, number>();
+  const claim = (index: Map<string, number>, token: string, row: number) => {
+    if (!token) return;
+    const existing = index.get(token);
+    if (existing == null) index.set(token, row);
+    else union(row, existing);
+  };
   rows.forEach((author, index) => {
     for (const email of author.emails) {
       const key = email.toLowerCase();
       if (!key) continue;
-      const existing = emailOwner.get(key);
-      if (existing == null) emailOwner.set(key, index);
-      else union(index, existing);
+      claim(emailOwner, key, index);
+      const account = linkedAccount(email, options.accounts);
+      if (!account) continue;
+      claim(loginOwner, account.login, index);
+      if (account.id) claim(githubIdOwner, account.id, index);
     }
     const names = author.names.length ? author.names : [author.author];
-    for (const name of names) {
-      const key = normalizeHistoryName(name);
-      if (!key) continue;
-      const existing = nameOwner.get(key);
-      if (existing == null) nameOwner.set(key, index);
-      else union(index, existing);
-    }
+    for (const name of names) claim(nameOwner, normalizeHistoryName(name), index);
   });
   const members = new Map<number, number[]>();
   rows.forEach((_, index) => {
@@ -313,9 +389,18 @@ export function ownershipHistorySeries(
     }
     const nameList = [...names].sort((a, b) => a.localeCompare(b));
     const emailList = [...emails].sort();
+    const loginLines = new Map<string, number>();
+    for (const index of indexes) {
+      const found = new Set<string>();
+      for (const email of rows[index].emails) {
+        const login = linkedAccount(email, options.accounts)?.login;
+        if (login) found.add(login);
+      }
+      for (const login of found) loginLines.set(login, (loginLines.get(login) ?? 0) + rows[index].lines);
+    }
     const key = emailList.length ? `email:${emailList.join("|")}` : `name:${nameList.map(normalizeHistoryName).join("|")}`;
     for (const index of indexes) keyOf.set(find(index), key);
-    labelOf.set(key, nameList.find((name) => name.includes(" ")) ?? nameList[0] ?? emailList[0] ?? "Unknown");
+    labelOf.set(key, preferredLogin(loginLines) ?? nameList.find((name) => name.includes(" ")) ?? nameList[0] ?? emailList[0] ?? "Unknown");
   }
 
   const totals = new Map<number, Map<string, number>>();
@@ -376,15 +461,19 @@ function samplePeriodEnd(
 
 /** Snapshot contributors use the shared selector and selection store. Keep all
  * aliases searchable/selectable, independent of the table's grouping mode. */
-export function ownershipContributors(reports: OwnershipReport[], botPatterns: readonly string[] = []) {
-  const summary = aggregateOwnership(reports);
+export function ownershipContributors(reports: OwnershipReport[], botPatterns: readonly string[] = [], accounts?: GithubAccounts) {
+  const summary = aggregateOwnership(reports, "person", [], accounts);
   const repositoryCounts = new Map<string, number>();
   for (const repo of summary.byRepository) for (const author of repo.authors) {
     repositoryCounts.set(author.key, (repositoryCounts.get(author.key) ?? 0) + 1);
   }
   return summary.authors.map((author) => {
-    const aliases = [...new Set([...author.names, ...author.emails, ...author.emails.map(githubLogin).filter((s): s is string => s != null)])];
-    const login = author.emails.map(githubLogin).find((s) => s != null) ?? author.author;
+    const logins = [...new Set(author.emails.flatMap((email) => {
+      const login = linkedAccount(email, accounts)?.login;
+      return login ? [login] : [];
+    }))];
+    const aliases = [...new Set([...author.names, ...author.emails, ...logins])];
+    const login = logins.includes(author.author) ? author.author : logins[0] ?? author.author;
     return {
       login, aliases, commits: author.lines, commits_all: author.lines,
       repos: repositoryCounts.get(author.key) ?? 0,

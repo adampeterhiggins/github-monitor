@@ -13,7 +13,7 @@
  * series with empty weeks and keeping them would multiply row counts for nothing.
  */
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 export const SCHEMA_SQL = `
 -- One atomic snapshot keeps the summary, revision and incremental file cache aligned.
@@ -43,6 +43,14 @@ CREATE TABLE IF NOT EXISTS line_ownership_history_state (
   revision TEXT NOT NULL,
   target TEXT NOT NULL,
   cache TEXT NOT NULL
+);
+
+-- Git email to the GitHub account on a commit. A null login means GitHub had
+-- no account for that address, so a later sync does not look it up again.
+CREATE TABLE IF NOT EXISTS github_accounts (
+  email TEXT PRIMARY KEY,
+  login TEXT,
+  github_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS meta (

@@ -146,6 +146,26 @@ fn identity_key(p: &Identity) -> String {
         format!("email:{}", p.email)
     }
 }
+
+/// One GitHub account, in whichever noreply spelling a commit used.
+///
+/// `login@users.noreply.github.com` and `id+login@users.noreply.github.com` are
+/// the same account. The numeric id is what stays put when the login is renamed.
+fn github_account(email: &str) -> Option<(Option<String>, String)> {
+    let email = email.trim().to_lowercase();
+    let (local, host) = email.rsplit_once('@')?;
+    if host != "users.noreply.github.com" || local.is_empty() {
+        return None;
+    }
+    match local.split_once('+') {
+        Some((id, login))
+            if !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit()) && !login.is_empty() =>
+        {
+            Some((Some(id.to_owned()), login.to_owned()))
+        }
+        _ => Some((None, local.to_owned())),
+    }
+}
 fn is_bot(p: &Identity) -> bool {
     let text = format!("{} {}", p.name, p.email).to_lowercase();
     text.contains("[bot]") || text.contains("copilot")
@@ -430,17 +450,31 @@ fn aggregate(
         .collect();
     let mut parents = BTreeMap::new();
     let mut by_name = BTreeMap::<String, String>::new();
+    let mut by_login = BTreeMap::<String, String>::new();
+    let mut by_github_id = BTreeMap::<String, String>::new();
+    let link = |parents: &mut BTreeMap<String, String>,
+                index: &mut BTreeMap<String, String>,
+                token: String,
+                key: &str| {
+        if token.is_empty() {
+            return;
+        }
+        if let Some(other) = index.get(&token) {
+            let left = root(parents, other);
+            let right = root(parents, key);
+            parents.insert(right, left);
+        } else {
+            index.insert(token, key.to_owned());
+        }
+    };
     for person in identities {
         let key = identity_key(person);
         parents.entry(key.clone()).or_insert(key.clone());
-        let name = normalize(&person.name);
-        if !name.is_empty() {
-            if let Some(other) = by_name.get(&name) {
-                let left = root(&parents, other);
-                let right = root(&parents, &key);
-                parents.insert(right, left);
-            } else {
-                by_name.insert(name, key);
+        link(&mut parents, &mut by_name, normalize(&person.name), &key);
+        if let Some((id, login)) = github_account(&person.email) {
+            link(&mut parents, &mut by_login, login, &key);
+            if let Some(id) = id {
+                link(&mut parents, &mut by_github_id, id, &key);
             }
         }
     }
@@ -535,10 +569,10 @@ fn aggregate(
                     .map(|e| format!("{name} <{e}>"))
                     .unwrap_or(name),
                 GroupBy::Name => name,
-                GroupBy::Person => names
+                GroupBy::Person => emails
                     .iter()
-                    .find(|n| n.trim().contains(' '))
-                    .cloned()
+                    .find_map(|email| github_account(email).map(|(_, login)| login))
+                    .or_else(|| names.iter().find(|n| n.trim().contains(' ')).cloned())
                     .unwrap_or(name),
             };
             AuthorRow {
@@ -1516,6 +1550,120 @@ pub fn cancel_line_ownership(job_id: String, control: State<'_, ScanControl>) {
     control.cancel(&job_id);
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountSample {
+    email: String,
+    sha: String,
+    role: String,
+}
+
+fn normalize_email(email: &str) -> String {
+    email
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+        .to_lowercase()
+}
+
+/// One commit per git email that does not already name its GitHub account.
+///
+/// Git log is newest first, so the kept commit is the latest use of that email.
+/// The author side wins when an email is used both ways: a lookup then reads
+/// that side of the commit and cannot attach the other person's account.
+fn account_samples(log: &str) -> Vec<AccountSample> {
+    let mut as_author = BTreeMap::<String, String>::new();
+    let mut as_committer = BTreeMap::<String, String>::new();
+    for line in log.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.split('\u{1f}');
+        let sha = parts.next().unwrap_or("");
+        if !is_commit_id(sha) {
+            continue;
+        }
+        let author = normalize_email(parts.next().unwrap_or(""));
+        let committer = normalize_email(parts.next().unwrap_or(""));
+        if !author.is_empty() && github_account(&author).is_none() {
+            as_author.entry(author).or_insert_with(|| sha.to_owned());
+        }
+        if !committer.is_empty() && github_account(&committer).is_none() {
+            as_committer
+                .entry(committer)
+                .or_insert_with(|| sha.to_owned());
+        }
+    }
+    let mut samples = Vec::new();
+    for (email, sha) in &as_author {
+        samples.push(AccountSample {
+            email: email.clone(),
+            sha: sha.clone(),
+            role: "author".into(),
+        });
+    }
+    for (email, sha) in &as_committer {
+        if as_author.contains_key(email) {
+            continue;
+        }
+        samples.push(AccountSample {
+            email: email.clone(),
+            sha: sha.clone(),
+            role: "committer".into(),
+        });
+    }
+    samples
+}
+
+/// Representative commits whose git emails the commits API can match to accounts.
+#[tauri::command]
+pub async fn line_ownership_account_samples(
+    github_repo: String,
+    job_id: String,
+    app: tauri::AppHandle,
+    control: State<'_, ScanControl>,
+) -> Result<Vec<AccountSample>, String> {
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("line-ownership");
+    let active = control.begin(&github_repo, &job_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let repo = cache.join(format!("{}.git", github_repo.to_lowercase()));
+        if !repo.exists() {
+            return Ok(Vec::new());
+        }
+        match git_text_cancel(
+            &repo,
+            &[
+                "log",
+                "--format=%H%x1f%aE%x1f%cE",
+                "--end-of-options",
+                "HEAD",
+            ],
+            &active.cancelled,
+        ) {
+            Ok(log) => Ok(account_samples(&log)),
+            Err(error) => {
+                check_cancel(&active.cancelled)?;
+                let lower = error.to_lowercase();
+                if lower.contains("does not have any commits")
+                    || lower.contains("unknown revision")
+                    || lower.contains("bad revision")
+                    || lower.contains("needed a single revision")
+                {
+                    Ok(Vec::new())
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 fn github_url(full_name: &str) -> Result<String, String> {
     let parts: Vec<_> = full_name.split('/').collect();
     if parts.len() != 2
@@ -2423,6 +2571,76 @@ mod tests {
     }
 
     #[test]
+    fn one_github_account_is_one_person_across_noreply_spellings() {
+        let commits = BTreeMap::from([
+            (
+                "a".into(),
+                CommitLines {
+                    author: Identity {
+                        name: "Nate Higgins".into(),
+                        email: "nathggns@users.noreply.github.com".into(),
+                    },
+                    lines: 5,
+                },
+            ),
+            (
+                "b".into(),
+                CommitLines {
+                    author: Identity {
+                        name: "nathggns".into(),
+                        email: "719814+nathggns@users.noreply.github.com".into(),
+                    },
+                    lines: 11,
+                },
+            ),
+            (
+                "c".into(),
+                CommitLines {
+                    author: Identity {
+                        name: "Old".into(),
+                        email: "719814+oldlogin@users.noreply.github.com".into(),
+                    },
+                    lines: 2,
+                },
+            ),
+        ]);
+        let (authors, total, _) =
+            aggregate(&commits, &BTreeMap::new(), &[], GroupBy::Person, false);
+        assert_eq!(authors.len(), 1);
+        assert_eq!(authors[0].author, "nathggns");
+        assert_eq!(authors[0].lines, 18);
+        assert_eq!(total, 18);
+        let distinct = BTreeMap::from([
+            (
+                "a".into(),
+                CommitLines {
+                    author: Identity {
+                        name: "Nate Higgins".into(),
+                        email: "nathggns@users.noreply.github.com".into(),
+                    },
+                    lines: 5,
+                },
+            ),
+            (
+                "d".into(),
+                CommitLines {
+                    author: Identity {
+                        name: "Someone Else".into(),
+                        email: "9+someone@users.noreply.github.com".into(),
+                    },
+                    lines: 4,
+                },
+            ),
+        ]);
+        assert_eq!(
+            aggregate(&distinct, &BTreeMap::new(), &[], GroupBy::Person, false)
+                .0
+                .len(),
+            2
+        );
+    }
+
+    #[test]
     fn history_joins_a_rewritten_identity_without_absorbing_the_committer() {
         let dir = tempfile::tempdir().unwrap();
         git(dir.path(), &["init", "-b", "main"]).unwrap();
@@ -2445,7 +2663,7 @@ mod tests {
         );
         let report = scan(options(dir.path()), &AtomicBool::new(false), |_| {}).unwrap();
         assert_eq!(report.authors.len(), 1);
-        assert_eq!(report.authors[0].author, "Nate Higgins");
+        assert_eq!(report.authors[0].author, "nathggns");
         assert!(report.authors[0]
             .emails
             .iter()
@@ -2477,7 +2695,7 @@ mod tests {
         );
         let report = scan(options(dir.path()), &AtomicBool::new(false), |_| {}).unwrap();
         assert_eq!(report.authors.len(), 1);
-        assert_eq!(report.authors[0].author, "Nate Higgins");
+        assert_eq!(report.authors[0].author, "nathggns");
     }
 
     #[test]
@@ -2863,5 +3081,28 @@ mod tests {
         assert_eq!(rebuilt.points.len(), 1);
         assert_eq!(rebuilt.points[0].revision, fresh);
         assert_eq!(rebuilt.points[0].total_lines, 1);
+    }
+
+    #[test]
+    fn account_samples_keep_one_commit_per_email_and_skip_noreply() {
+        let author = format!("{:040x}", 1);
+        let later = format!("{:040x}", 2);
+        let committer_only = format!("{:040x}", 3);
+        let log = format!(
+            "{author}\u{1f}Aaron@Gmail.com\u{1f}other@x.com\n{later}\u{1f}aaron@gmail.com\u{1f}committer@x.com\n{committer_only}\u{1f}1+login@users.noreply.github.com\u{1f}solo@x.com\n"
+        );
+        let samples = account_samples(&log);
+        let by_email: BTreeMap<_, _> = samples
+            .iter()
+            .map(|sample| (sample.email.as_str(), sample))
+            .collect();
+        assert_eq!(by_email["aaron@gmail.com"].sha, author);
+        assert_eq!(by_email["aaron@gmail.com"].role, "author");
+        assert_eq!(by_email["other@x.com"].role, "committer");
+        assert_eq!(by_email["other@x.com"].sha, author);
+        assert_eq!(by_email["committer@x.com"].role, "committer");
+        assert_eq!(by_email["solo@x.com"].role, "committer");
+        assert!(!by_email.contains_key("1+login@users.noreply.github.com"));
+        assert_eq!(samples.len(), 4);
     }
 }

@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { bucketLabel } from "../lib/agg/series";
 import { formatDate } from "../lib/agg/weeks";
-import { ownershipHistoryBuckets, ownershipHistorySeries, type OwnershipHistoryPoint, type OwnershipHistorySplit, type OwnershipPeriod, type OwnershipReading, type aggregateOwnership } from "../lib/lineOwnership";
+import { ownershipHistoryBuckets, ownershipHistorySeries, type GithubAccounts, type OwnershipHistoryPoint, type OwnershipHistorySplit, type OwnershipPeriod, type OwnershipReading, type aggregateOwnership } from "../lib/lineOwnership";
 import { HeatMatrix, RankedBars, TimelineArea, type TimelineShape } from "./charts";
 import { ChartCard, DataTable, FilterPopover, LabeledControl, Segmented, full } from "./ui";
 
@@ -78,10 +78,11 @@ function remember<T>(key: string, value: T, set: (value: T) => void) {
 }
 
 /** Daily first-parent history. Person grouping is fixed because that is what was saved. */
-export function OwnershipHistoryChart({ points, selectedLogins, repositories }: {
+export function OwnershipHistoryChart({ points, selectedLogins, repositories, accounts }: {
   points: OwnershipHistoryPoint[];
   selectedLogins: readonly string[];
   repositories: Array<{ id: number; name: string }>;
+  accounts?: GithubAccounts;
 }) {
   const [shape, setShape] = useState<TimelineShape>(() => storedChoice("github-monitor.ownership.shape", ["bar", "area", "line"], "area"));
   const [split, setSplit] = useState<OwnershipHistorySplit>(() => storedChoice("github-monitor.ownership.split", ["people", "repository", "total"], "people"));
@@ -99,8 +100,9 @@ export function OwnershipHistoryChart({ points, selectedLogins, repositories }: 
       split,
       limit: seriesLimit === "all" ? Number.POSITIVE_INFINITY : Number(seriesLimit),
       repoNames,
+      accounts,
     }),
-    [points, selectedLogins, split, seriesLimit, repoNames],
+    [points, selectedLogins, split, seriesLimit, repoNames, accounts],
   );
   const plotted = useMemo(
     () => ownershipHistoryBuckets(data, series.map((item) => item.key), period, reading),
