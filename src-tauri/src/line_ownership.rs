@@ -2,18 +2,23 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{BufRead, Read};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+    Arc, Mutex,
 };
+use std::time::{Duration, Instant};
 use tauri::{ipc::Channel, Manager, State};
+mod process;
+
+type ActiveJobs = Arc<Mutex<BTreeMap<String, (String, Arc<AtomicBool>)>>>;
 
 #[derive(Default)]
 pub struct ScanControl {
-    running: Arc<AtomicBool>,
-    cancelled: Arc<AtomicBool>,
+    active: ActiveJobs,
+    calculation: Arc<Mutex<()>>,
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
@@ -107,6 +112,7 @@ struct Snapshot {
 }
 const SNAPSHOT_VERSION: u32 = 1;
 
+#[cfg(test)]
 fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     let output = Command::new("git")
         .arg("-C")
@@ -122,6 +128,7 @@ fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     Ok(output.stdout)
 }
 
+#[cfg(test)]
 fn git_text(repo: &Path, args: &[&str]) -> Result<String, String> {
     git(repo, args).map(|b| String::from_utf8_lossy(&b).into_owned())
 }
@@ -144,6 +151,7 @@ fn is_bot(p: &Identity) -> bool {
     text.contains("[bot]") || text.contains("copilot")
 }
 
+#[cfg(test)]
 fn parse_blame(text: &str, commits: &mut BTreeMap<String, CommitLines>) {
     let mut sha = "";
     let mut author = Identity::default();
@@ -171,6 +179,118 @@ fn parse_blame(text: &str, commits: &mut BTreeMap<String, CommitLines>) {
             }
         }
     }
+}
+
+fn parse_incremental_reader(
+    reader: &mut impl BufRead,
+) -> Result<BTreeMap<String, CommitLines>, String> {
+    let mut commits = BTreeMap::<String, CommitLines>::new();
+    let mut sha = String::new();
+    let mut bytes = Vec::new();
+    loop {
+        bytes.clear();
+        if reader
+            .read_until(b'\n', &mut bytes)
+            .map_err(|e| e.to_string())?
+            == 0
+        {
+            break;
+        }
+        let line = String::from_utf8_lossy(&bytes);
+        let line = line.trim_end_matches('\n');
+        let mut fields = line.split_whitespace();
+        if let Some(token) = fields.next() {
+            if (token.len() == 40 || token.len() == 64)
+                && token.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                sha = token.to_owned();
+                let count = fields
+                    .nth(2)
+                    .ok_or("Missing blame group size")?
+                    .parse::<u64>()
+                    .map_err(|_| "Invalid blame group size")?;
+                commits.entry(sha.to_owned()).or_default().lines += count;
+                continue;
+            }
+        }
+        if let Some(name) = line.strip_prefix("author ") {
+            commits.entry(sha.to_owned()).or_default().author.name = name.to_owned();
+        } else if let Some(email) = line.strip_prefix("author-mail ") {
+            commits.entry(sha.to_owned()).or_default().author.email = email
+                .trim()
+                .trim_start_matches('<')
+                .trim_end_matches('>')
+                .to_lowercase();
+        }
+    }
+    Ok(commits)
+}
+
+fn git_command(repo: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0");
+    command
+}
+fn git_cancel(repo: &Path, args: &[&str], cancelled: &AtomicBool) -> Result<Vec<u8>, String> {
+    process::output(git_command(repo, args), cancelled)
+}
+
+/// One process reads all changed blobs. Only the binary-detection prefix is
+/// retained; large blobs are drained through a bounded buffer.
+fn binary_blobs(repo: &Path, blobs: &[&str], cancelled: &AtomicBool) -> Result<Vec<bool>, String> {
+    if blobs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input = blobs
+        .iter()
+        .map(|sha| format!("{sha}\n"))
+        .collect::<String>();
+    process::stream(
+        git_command(repo, &["cat-file", "--batch"]),
+        input.as_bytes(),
+        cancelled,
+        |reader| {
+            let mut result = Vec::with_capacity(blobs.len());
+            let mut prefix = [0u8; 8000];
+            for expected in blobs {
+                check_cancel(cancelled)?;
+                let mut header = String::new();
+                reader.read_line(&mut header).map_err(|e| e.to_string())?;
+                let fields: Vec<_> = header.split_whitespace().collect();
+                if fields.len() != 3 || fields[0] != *expected || fields[1] != "blob" {
+                    return Err("Invalid blob batch response".into());
+                }
+                let size = fields[2].parse::<u64>().map_err(|_| "Invalid blob size")?;
+                let count = size.min(prefix.len() as u64) as usize;
+                reader
+                    .read_exact(&mut prefix[..count])
+                    .map_err(|e| e.to_string())?;
+                result.push(prefix[..count].contains(&0));
+                let remaining = size - count as u64;
+                let drained =
+                    std::io::copy(&mut reader.by_ref().take(remaining), &mut std::io::sink())
+                        .map_err(|e| e.to_string())?;
+                if drained != remaining {
+                    return Err("Truncated blob batch response".into());
+                }
+                let mut end = [0];
+                reader.read_exact(&mut end).map_err(|e| e.to_string())?;
+                if end[0] != b'\n' {
+                    return Err("Invalid blob batch delimiter".into());
+                }
+            }
+            Ok(result)
+        },
+    )
+}
+
+fn worker_count() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get().min(4))
 }
 
 fn parse_coauthors(body: &str) -> Vec<Identity> {
@@ -382,12 +502,28 @@ fn scan(
     scan_snapshot(options, None, cancelled, progress).map(|s| s.report)
 }
 
+#[cfg(test)]
 fn scan_snapshot(
     options: ScanOptions,
     previous: Option<&Snapshot>,
     cancelled: &AtomicBool,
     progress: impl Fn(Progress),
 ) -> Result<Snapshot, String> {
+    scan_snapshot_at(options, previous, cancelled, progress, None, worker_count())
+}
+
+fn scan_snapshot_at(
+    options: ScanOptions,
+    previous: Option<&Snapshot>,
+    cancelled: &AtomicBool,
+    progress: impl Fn(Progress),
+    pinned: Option<&str>,
+    workers: usize,
+) -> Result<Snapshot, String> {
+    let git = |repo: &Path, args: &[&str]| git_cancel(repo, args, cancelled);
+    let git_text = |repo: &Path, args: &[&str]| {
+        git(repo, args).map(|b| String::from_utf8_lossy(&b).into_owned())
+    };
     let input = PathBuf::from(&options.repo);
     let bare = git_text(&input, &["rev-parse", "--is-bare-repository"])?;
     let repo = PathBuf::from(
@@ -404,7 +540,9 @@ fn scan_snapshot(
         )?
         .trim_end(),
     );
-    let rev = if options.revision.trim().is_empty() {
+    let rev = if let Some(pinned) = pinned {
+        pinned
+    } else if options.revision.trim().is_empty() {
         "HEAD"
     } else {
         options.revision.trim()
@@ -470,17 +608,18 @@ fn scan_snapshot(
         .chain(options.excludes.iter().map(String::as_str))
         .map(|p| glob::Pattern::new(p).map_err(|e| format!("Invalid exclude pattern {p}: {e}")))
         .collect::<Result<_, _>>()?;
-    let mut args = vec!["ls-tree", "-r", "-z", &revision, "--"];
+    let mut args = vec!["ls-tree", "-r", "-l", "-z", &revision, "--"];
     args.extend(options.pathspecs.iter().map(String::as_str));
     let tree = git(&repo, &args)?;
     let mut files = Vec::new();
+    let mut file_sizes = BTreeMap::new();
     let mut skipped = BTreeMap::<String, usize>::new();
     for entry in tree.split(|b| *b == 0).filter(|e| !e.is_empty()) {
         let entry = std::str::from_utf8(entry)
             .map_err(|_| "A tracked filename is not valid UTF-8; cannot scan it accurately.")?;
         let (meta, path) = entry.split_once('\t').ok_or("Invalid Git tree entry")?;
         let parts: Vec<_> = meta.split_whitespace().collect();
-        if parts.len() != 3 {
+        if parts.len() != 4 {
             return Err("Invalid Git tree metadata".into());
         }
         let file = Path::new(path);
@@ -507,6 +646,10 @@ fn scan_snapshot(
         if let Some(reason) = reason {
             *skipped.entry(reason.into()).or_default() += 1;
         } else {
+            file_sizes.insert(
+                path.to_owned(),
+                parts[3].parse::<u64>().map_err(|_| "Invalid blob size")?,
+            );
             files.push((path.to_owned(), parts[2].to_owned()));
         }
     }
@@ -521,37 +664,106 @@ fn scan_snapshot(
         total,
         phase: "Updating line ownership".into(),
     });
-    for (index, (path, blob)) in files.iter().enumerate() {
-        check_cancel(cancelled)?;
-        let cached = previous
+    let mut jobs = Vec::new();
+    for (path, blob) in &files {
+        if let Some(cached) = previous
             .and_then(|p| p.files.get(path))
-            .filter(|f| f.blob == *blob && !changed.contains(path));
-        let file = if let Some(cached) = cached {
+            .filter(|f| f.blob == *blob && !changed.contains(path))
+        {
             files_reused += 1;
-            cached.clone()
+            cached_files.insert(path.clone(), cached.clone());
         } else {
-            files_recalculated += 1;
-            let content = git(&repo, &["cat-file", "blob", blob])?;
-            let binary = content.iter().take(8000).any(|b| *b == 0);
-            let mut counts = BTreeMap::new();
-            if !binary {
-                let mut args = vec!["blame", "--line-porcelain", "--encoding=utf-8"];
-                if options.ignore_whitespace {
-                    args.push("-w");
+            jobs.push((path.clone(), blob.clone()));
+        }
+    }
+    // Start large files early so they do not become a serial tail at the end.
+    jobs.sort_by(|a, b| file_sizes[&b.0].cmp(&file_sizes[&a.0]).then(a.0.cmp(&b.0)));
+    let blobs: Vec<_> = jobs
+        .iter()
+        .map(|(_, blob)| blob.as_str())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let flags = binary_blobs(&repo, &blobs, cancelled)?;
+    let flags: BTreeMap<_, _> = blobs.into_iter().zip(flags).collect();
+    let binary: Vec<_> = jobs.iter().map(|(_, blob)| flags[blob.as_str()]).collect();
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    // Bound queued results; workers cannot materialize an entire scan ahead of aggregation.
+    let (sender, receiver) = std::sync::mpsc::sync_channel(workers.max(1));
+    let mut last_progress = Instant::now();
+    let result = std::thread::scope(|scope| -> Result<(), String> {
+        for _ in 0..workers.max(1).min(jobs.len()) {
+            let sender = sender.clone();
+            let (jobs, binary, next, stop, repo, revision, options) =
+                (&jobs, &binary, &next, &stop, &repo, &revision, &options);
+            scope.spawn(move || {
+                while !stop.load(Ordering::Relaxed) && !cancelled.load(Ordering::Relaxed) {
+                    let index = next.fetch_add(1, Ordering::Relaxed);
+                    let Some((path, blob)) = jobs.get(index) else {
+                        break;
+                    };
+                    let result = (|| {
+                        let counts = if binary[index] {
+                            BTreeMap::new()
+                        } else {
+                            let mut args = vec!["blame", "--incremental", "--encoding=utf-8"];
+                            if options.ignore_whitespace {
+                                args.push("-w");
+                            }
+                            args.extend([revision, "--", path]);
+                            process::stream(git_command(repo, &args), &[], cancelled, |reader| {
+                                parse_incremental_reader(reader)
+                            })
+                            .map_err(|e| format!("Cannot blame {path}: {e}"))?
+                        };
+                        Ok(CachedFile {
+                            blob: blob.clone(),
+                            binary: binary[index],
+                            counts,
+                        })
+                    })();
+                    if result.is_err() {
+                        stop.store(true, Ordering::Relaxed);
+                    }
+                    if sender.send((path.clone(), result)).is_err() {
+                        break;
+                    }
                 }
-                args.extend([&revision, "--", path]);
-                // A failed file must not advance the durable checkpoint or replace
-                // the previous complete report with silently partial data.
-                let text =
-                    git_text(&repo, &args).map_err(|e| format!("Cannot blame {path}: {e}"))?;
-                parse_blame(&text, &mut counts);
+            });
+        }
+        drop(sender);
+        let mut failure = None;
+        for (path, result) in receiver {
+            match result {
+                Ok(file) => {
+                    cached_files.insert(path, file);
+                    files_recalculated += 1;
+                }
+                Err(error) => {
+                    failure.get_or_insert(error);
+                }
             }
-            CachedFile {
-                blob: blob.clone(),
-                binary,
-                counts,
+            if last_progress.elapsed() >= Duration::from_millis(150) {
+                progress(Progress {
+                    completed: files_reused + files_recalculated,
+                    total,
+                    phase: format!(
+                        "Line ownership: {files_recalculated} recalculated, {files_reused} reused"
+                    ),
+                });
+                last_progress = Instant::now();
             }
-        };
+        }
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        check_cancel(cancelled)?;
+        Ok(())
+    });
+    result?;
+    // Sorted aggregation is deterministic regardless of worker completion order.
+    for file in cached_files.values() {
         if file.binary {
             *skipped.entry("binary".into()).or_default() += 1;
         } else {
@@ -562,14 +774,6 @@ fn scan_snapshot(
                 entry.lines += count.lines;
             }
         }
-        cached_files.insert(path.clone(), file);
-        progress(Progress {
-            completed: index + 1,
-            total,
-            phase: format!(
-                "Line ownership: {files_recalculated} recalculated, {files_reused} reused"
-            ),
-        });
     }
     check_cancel(cancelled)?;
     progress(Progress {
@@ -636,12 +840,134 @@ fn scan_snapshot(
     })
 }
 
+struct ActiveScan {
+    active: ActiveJobs,
+    repository: String,
+    cancelled: Arc<AtomicBool>,
+}
+impl Drop for ActiveScan {
+    fn drop(&mut self) {
+        self.active.lock().unwrap().remove(&self.repository);
+    }
+}
+impl ScanControl {
+    fn cancel(&self, job_id: &str) {
+        for (id, cancelled) in self.active.lock().unwrap().values() {
+            if id == job_id {
+                cancelled.store(true, Ordering::SeqCst);
+            }
+        }
+    }
+    fn begin(&self, repository: &str, job_id: &str) -> Result<ActiveScan, String> {
+        github_url(repository)?;
+        let repository = repository.to_lowercase();
+        let mut active = self.active.lock().map_err(|e| e.to_string())?;
+        if active.contains_key(&repository) {
+            return Err("This repository is already syncing".into());
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        active.insert(repository.clone(), (job_id.into(), cancelled.clone()));
+        Ok(ActiveScan {
+            active: self.active.clone(),
+            repository,
+            cancelled,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CheckpointMetadata {
+    version: u32,
+    revision: String,
+    options: ScanOptions,
+}
+#[derive(Serialize)]
+pub struct PreparedOwnership {
+    revision: String,
+    unchanged: bool,
+}
+fn managed_options(repo: &Path) -> ScanOptions {
+    ScanOptions {
+        repo: repo.to_string_lossy().into_owned(),
+        revision: "HEAD".into(),
+        group_by: GroupBy::Person,
+        pathspecs: vec![],
+        excludes: vec![],
+        include_generated: false,
+        ignore_whitespace: true,
+        exclude_bots: false,
+    }
+}
+fn matches_checkpoint(metadata: Option<&CheckpointMetadata>, repo: &Path, revision: &str) -> bool {
+    metadata.is_some_and(|m| {
+        m.version == SNAPSHOT_VERSION
+            && m.revision == revision
+            && m.options == managed_options(repo)
+    })
+}
+fn head_revision(repo: &Path, cancelled: &AtomicBool) -> Result<String, String> {
+    match git_cancel(repo, &["rev-parse", "--verify", "HEAD^{commit}"], cancelled) {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).trim().to_owned()),
+        Err(error) => {
+            check_cancel(cancelled)?;
+            let refs = git_cancel(
+                repo,
+                &["for-each-ref", "--count=1", "--format=%(objectname)"],
+                cancelled,
+            )?;
+            if refs.is_empty() {
+                Ok(String::new())
+            } else {
+                Err(error)
+            }
+        }
+    }
+}
+#[tauri::command]
+pub async fn prepare_line_ownership(
+    github_repo: String,
+    job_id: String,
+    token: String,
+    metadata: Option<serde_json::Value>,
+    app: tauri::AppHandle,
+    on_progress: Channel<Progress>,
+    control: State<'_, ScanControl>,
+) -> Result<PreparedOwnership, String> {
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("line-ownership");
+    let active = control.begin(&github_repo, &job_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let phase = |message: &str| {
+            let _ = on_progress.send(Progress {
+                completed: 0,
+                total: 0,
+                phase: message.into(),
+            });
+        };
+        phase("Checking default branch");
+        let repo = prepare_github(&cache, &github_repo, Some(&token), &active.cancelled, phase)?;
+        let revision = head_revision(&repo, &active.cancelled)?;
+        let metadata: Option<CheckpointMetadata> =
+            metadata.and_then(|value| serde_json::from_value(value).ok());
+        check_cancel(&active.cancelled)?;
+        Ok(PreparedOwnership {
+            unchanged: matches_checkpoint(metadata.as_ref(), &repo, &revision),
+            revision,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 pub async fn sync_line_ownership(
     github_repo: String,
-    token: String,
+    job_id: String,
+    revision: String,
     previous_json: Option<String>,
-    full: bool,
     app: tauri::AppHandle,
     on_progress: Channel<Progress>,
     control: State<'_, ScanControl>,
@@ -651,24 +977,9 @@ pub async fn sync_line_ownership(
         .app_cache_dir()
         .map_err(|e| e.to_string())?
         .join("line-ownership");
-    if control
-        .running
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err("A line ownership sync is already running".into());
-    }
-    control.cancelled.store(false, Ordering::SeqCst);
-    let running = control.running.clone();
-    let cancelled = control.cancelled.clone();
+    let active = control.begin(&github_repo, &job_id)?;
+    let calculation = control.calculation.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        struct Reset(Arc<AtomicBool>);
-        impl Drop for Reset {
-            fn drop(&mut self) {
-                self.0.store(false, Ordering::SeqCst);
-            }
-        }
-        let _reset = Reset(running);
         let phase = |message: &str| {
             let _ = on_progress.send(Progress {
                 completed: 0,
@@ -676,30 +987,36 @@ pub async fn sync_line_ownership(
                 phase: message.into(),
             });
         };
-        let repo = prepare_github(&cache, &github_repo, Some(&token), &cancelled, phase)?;
-        let options = ScanOptions {
-            repo: repo.to_string_lossy().into_owned(),
-            revision: "HEAD".into(),
-            group_by: GroupBy::Person,
-            pathspecs: vec![],
-            excludes: vec![],
-            include_generated: false,
-            ignore_whitespace: true,
-            exclude_bots: false,
+        phase("Waiting for calculation workers");
+        let _permit = loop {
+            check_cancel(&active.cancelled)?;
+            match calculation.try_lock() {
+                Ok(permit) => break permit,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                Err(error) => return Err(error.to_string()),
+            }
         };
-        let previous: Option<Snapshot> = if full {
-            None
-        } else {
-            previous_json.and_then(|s| serde_json::from_str(&s).ok())
-        };
-        let mut snapshot = if git_text(&repo, &["rev-list", "--all", "--count"])?.trim() == "0" {
+        let repo = cache.join(format!("{}.git", github_repo.to_lowercase()));
+        let options = managed_options(&repo);
+        let previous: Option<Snapshot> = previous_json.and_then(|s| serde_json::from_str(&s).ok());
+        if !revision.is_empty() {
+            if ![40, 64].contains(&revision.len())
+                || !revision.bytes().all(|b| b.is_ascii_hexdigit())
+            {
+                return Err("Invalid prepared revision".into());
+            }
+            update_commit_graph(&repo, &revision, &active.cancelled, phase)?;
+        }
+        let mut snapshot = if revision.is_empty() {
             Snapshot {
                 version: SNAPSHOT_VERSION,
                 files: BTreeMap::new(),
                 coauthors: BTreeMap::new(),
                 report: Report {
                     repo: String::new(),
-                    revision: String::new(),
+                    revision,
                     options,
                     files_blamed: 0,
                     files_skipped: BTreeMap::new(),
@@ -713,11 +1030,18 @@ pub async fn sync_line_ownership(
                 },
             }
         } else {
-            scan_snapshot(options, previous.as_ref(), &cancelled, |event| {
-                let _ = on_progress.send(event);
-            })?
+            scan_snapshot_at(
+                options,
+                previous.as_ref(),
+                &active.cancelled,
+                |event| {
+                    let _ = on_progress.send(event);
+                },
+                Some(&revision),
+                worker_count(),
+            )?
         };
-        check_cancel(&cancelled)?;
+        check_cancel(&active.cancelled)?;
         snapshot.report.repo = format!("https://github.com/{github_repo}");
         serde_json::to_string(&snapshot).map_err(|e| e.to_string())
     })
@@ -725,9 +1049,40 @@ pub async fn sync_line_ownership(
     .map_err(|e| e.to_string())?
 }
 
+fn update_commit_graph(
+    repo: &Path,
+    revision: &str,
+    cancelled: &AtomicBool,
+    phase: impl Fn(&str),
+) -> Result<(), String> {
+    let marker = repo.join("ownership-commit-graph-head");
+    if std::fs::read_to_string(&marker).ok().as_deref() == Some(revision) {
+        return Ok(());
+    }
+    phase("Indexing Git history");
+    // Optional acceleration: unsupported Git versions or index failures must not
+    // prevent a correct scan. Cancellation, however, always stops the job.
+    if git_cancel(
+        repo,
+        &[
+            "commit-graph",
+            "write",
+            "--reachable",
+            "--split",
+            "--changed-paths",
+        ],
+        cancelled,
+    )
+    .is_ok()
+    {
+        let _ = std::fs::write(marker, revision);
+    }
+    check_cancel(cancelled)
+}
+
 #[tauri::command]
-pub fn cancel_line_ownership(control: State<'_, ScanControl>) {
-    control.cancelled.store(true, Ordering::SeqCst);
+pub fn cancel_line_ownership(job_id: String, control: State<'_, ScanControl>) {
+    control.cancel(&job_id);
 }
 
 fn github_url(full_name: &str) -> Result<String, String> {
@@ -749,7 +1104,12 @@ fn github_url(full_name: &str) -> Result<String, String> {
 
 // Authentication exists only in the child environment, never in command-line
 // arguments, saved remote URLs or Git config. Disable interactive helpers.
-fn remote_git(repo: &Path, args: &[&str], token: Option<&str>) -> Result<String, String> {
+fn remote_git(
+    repo: &Path,
+    args: &[&str],
+    token: Option<&str>,
+    cancelled: &AtomicBool,
+) -> Result<String, String> {
     let auth = token
         .filter(|t| !t.is_empty())
         .map(|t| STANDARD.encode(format!("x-access-token:{t}")));
@@ -771,20 +1131,18 @@ fn remote_git(repo: &Path, args: &[&str], token: Option<&str>) -> Result<String,
             .env("GIT_CONFIG_KEY_3", "http.https://github.com/.extraheader")
             .env("GIT_CONFIG_VALUE_3", format!("Authorization: Basic {auth}"));
     }
-    let output = command
-        .output()
-        .map_err(|e| format!("Could not run Git: {e}"))?;
-    if !output.status.success() {
-        let mut message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        if let Some(auth) = auth {
-            message = message.replace(&auth, "[redacted]");
+    match process::output(command, cancelled) {
+        Ok(bytes) => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+        Err(mut message) => {
+            if let Some(auth) = auth {
+                message = message.replace(&auth, "[redacted]");
+            }
+            if let Some(token) = token.filter(|t| !t.is_empty()) {
+                message = message.replace(token, "[redacted]");
+            }
+            Err(format!("Could not download repository: {message}"))
         }
-        if let Some(token) = token.filter(|t| !t.is_empty()) {
-            message = message.replace(token, "[redacted]");
-        }
-        return Err(format!("Could not download repository: {message}"));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn prepare_github(
@@ -810,53 +1168,89 @@ fn prepare_cache(
     std::fs::create_dir_all(repo.parent().ok_or("Invalid cache path")?)
         .map_err(|e| e.to_string())?;
     check_cancel(cancelled)?;
+    progress("Checking default branch");
+    let refs = remote_git(
+        cache,
+        &["ls-remote", "--symref", "--", url, "HEAD"],
+        token,
+        cancelled,
+    )?;
+    let head = refs.lines().find_map(|line| {
+        line.strip_prefix("ref: ")
+            .and_then(|s| s.strip_suffix("\tHEAD"))
+    });
+    let remote_revision = refs.lines().find_map(|line| {
+        line.strip_suffix("\tHEAD")
+            .filter(|s| !s.starts_with("ref: "))
+    });
+    if head.is_none() && remote_revision.is_some() {
+        return Err("Remote default branch is not a symbolic branch".into());
+    }
+    if let Some(head) = head {
+        git_cancel(cache, &["check-ref-format", head], cancelled)?;
+    }
+    if remote_revision.is_none() {
+        let heads = remote_git(
+            cache,
+            &["ls-remote", "--heads", "--", url],
+            token,
+            cancelled,
+        )?;
+        if !heads.trim().is_empty() {
+            return Err("Remote HEAD does not identify a default branch".into());
+        }
+    }
     if !repo.exists() {
-        progress("Cloning full Git history");
-        // A failed clone is never treated as a complete cache on the next run.
+        progress("Cloning default branch history");
         let staging = repo.with_extension("cloning");
         if staging.exists() {
             std::fs::remove_dir_all(&staging).map_err(|e| e.to_string())?;
         }
-        let result = remote_git(
-            cache,
-            &[
-                "clone",
-                "--bare",
-                "--",
-                url,
-                staging.to_str().ok_or("Invalid cache path")?,
-            ],
-            token,
-        );
+        let mut args = vec!["clone", "--bare", "--single-branch", "--no-tags"];
+        if let Some(branch) = head.and_then(|h| h.strip_prefix("refs/heads/")) {
+            args.extend(["--branch", branch]);
+        }
+        args.extend(["--", url, staging.to_str().ok_or("Invalid cache path")?]);
+        let result = remote_git(cache, &args, token, cancelled);
         if result.is_err() {
             let _ = std::fs::remove_dir_all(&staging);
         }
         result?;
         std::fs::rename(&staging, &repo).map_err(|e| e.to_string())?;
-    } else {
-        progress("Updating cached Git history");
-        remote_git(
+    } else if let (Some(head), Some(sha)) = (head, remote_revision) {
+        let exists = git_cancel(
             &repo,
-            &[
-                "fetch",
-                "--force",
-                "--prune",
-                "--",
-                url,
-                "+refs/heads/*:refs/heads/*",
-                "+refs/tags/*:refs/tags/*",
-            ],
-            token,
-        )?;
-    }
-    check_cancel(cancelled)?;
-    // Refresh the default branch as well; a cached HEAD can otherwise go stale.
-    let refs = remote_git(&repo, &["ls-remote", "--symref", "--", url, "HEAD"], token)?;
-    if let Some(head) = refs.lines().find_map(|l| {
-        l.strip_prefix("ref: ")
-            .and_then(|s| s.strip_suffix("\tHEAD"))
-    }) {
-        git(&repo, &["symbolic-ref", "HEAD", head])?;
+            &["cat-file", "-e", &format!("{sha}^{{commit}}")],
+            cancelled,
+        )
+        .is_ok();
+        check_cancel(cancelled)?;
+        if exists {
+            // No transfer is needed even after a branch rename or a rewind when
+            // the advertised commit is already present in the full-history cache.
+            git_cancel(&repo, &["update-ref", head, sha], cancelled)?;
+        } else {
+            progress("Updating default branch history");
+            remote_git(
+                &repo,
+                &[
+                    "fetch",
+                    "--force",
+                    "--no-tags",
+                    "--",
+                    url,
+                    &format!("+{head}:{head}"),
+                ],
+                token,
+                cancelled,
+            )?;
+        }
+        git_cancel(&repo, &["symbolic-ref", "HEAD", head], cancelled)?;
+    } else if !head_revision(&repo, cancelled)?.is_empty() {
+        // An emptied remote must not silently display the old cached branch.
+        return Err(
+            "Remote repository no longer has a default branch; previous snapshot retained".into(),
+        );
     }
     check_cancel(cancelled)?;
     Ok(repo)
@@ -892,6 +1286,251 @@ mod tests {
         git(dir.path(), &["commit", "-m", "Initial\n\nCo-authored-by: Bob Example <bob@example.com>\nCo-authored-by: Alice Example <alice@work.com>"]).unwrap();
         dir
     }
+    #[test]
+    fn parallel_streaming_matches_porcelain_reference_and_batches_binary_detection() {
+        let repo = fixture();
+        fs::write(
+            repo.path().join("space and ü.txt"),
+            "one\ntwo\nthree\nfour\n",
+        )
+        .unwrap();
+        fs::write(repo.path().join("empty.txt"), "").unwrap();
+        fs::write(repo.path().join("binary.data"), b"hello\0world").unwrap();
+        git(repo.path(), &["add", "."]).unwrap();
+        git(
+            repo.path(),
+            &[
+                "commit",
+                "-m",
+                "More files\n\nCo-authored-by: Helper <helper@x>",
+            ],
+        )
+        .unwrap();
+        fs::write(
+            repo.path().join("space and ü.txt"),
+            "one\nchanged\nthree\nchanged again\n",
+        )
+        .unwrap();
+        git(repo.path(), &["add", "."]).unwrap();
+        git(repo.path(), &["commit", "-m", "Noncontiguous blame groups"]).unwrap();
+        let cancelled = AtomicBool::new(false);
+        let reference =
+            scan_snapshot_at(options(repo.path()), None, &cancelled, |_| {}, None, 1).unwrap();
+        for (path, file) in &reference.files {
+            if file.binary {
+                continue;
+            }
+            let output = git_text(
+                repo.path(),
+                &[
+                    "blame",
+                    "--line-porcelain",
+                    "--encoding=utf-8",
+                    "-w",
+                    &reference.report.revision,
+                    "--",
+                    path,
+                ],
+            )
+            .unwrap();
+            let mut counts = BTreeMap::new();
+            parse_blame(&output, &mut counts);
+            assert_eq!(
+                serde_json::to_value(&counts).unwrap(),
+                serde_json::to_value(&file.counts).unwrap()
+            );
+        }
+        for workers in [2, 4, 8] {
+            let parallel = scan_snapshot_at(
+                options(repo.path()),
+                None,
+                &cancelled,
+                |_| {},
+                None,
+                workers,
+            )
+            .unwrap();
+            assert_eq!(
+                serde_json::to_value(&reference).unwrap(),
+                serde_json::to_value(&parallel).unwrap()
+            );
+        }
+        let blob = git_text(repo.path(), &["rev-parse", "HEAD:binary.data"]).unwrap();
+        let empty = git_text(repo.path(), &["rev-parse", "HEAD:empty.txt"]).unwrap();
+        assert_eq!(
+            binary_blobs(
+                repo.path(),
+                &[blob.trim(), empty.trim(), blob.trim()],
+                &cancelled
+            )
+            .unwrap(),
+            vec![true, false, true]
+        );
+        assert!(binary_blobs(repo.path(), &[&"f".repeat(40)], &cancelled).is_err());
+        let sha = "a".repeat(64);
+        let text = format!("{sha} 1 1 2\nauthor Person\nauthor-mail <p@x>\nfilename test\n{sha} 3 5 4\nfilename test\n");
+        let parsed = parse_incremental_reader(&mut std::io::Cursor::new(text)).unwrap();
+        assert_eq!(parsed[&sha].lines, 6);
+        assert_eq!(parsed[&sha].author.name, "Person");
+    }
+
+    #[test]
+    fn metadata_and_job_scopes_do_not_reuse_incompatible_checkpoints_or_cancel_other_repos() {
+        let repo = Path::new("/cache/org/repo.git");
+        let mut metadata = CheckpointMetadata {
+            version: SNAPSHOT_VERSION,
+            revision: "abc".into(),
+            options: managed_options(repo),
+        };
+        assert!(matches_checkpoint(Some(&metadata), repo, "abc"));
+        assert!(!matches_checkpoint(Some(&metadata), repo, "def"));
+        metadata.options.ignore_whitespace = false;
+        assert!(!matches_checkpoint(Some(&metadata), repo, "abc"));
+        metadata.options = managed_options(repo);
+        metadata.version += 1;
+        assert!(!matches_checkpoint(Some(&metadata), repo, "abc"));
+        let control = ScanControl::default();
+        let one = control.begin("org/one", "first").unwrap();
+        let two = control.begin("org/two", "second").unwrap();
+        assert!(control.begin("ORG/ONE", "duplicate").is_err());
+        control.cancel("first");
+        assert!(one.cancelled.load(Ordering::Relaxed));
+        assert!(!two.cancelled.load(Ordering::Relaxed));
+        drop(one);
+        let next = control.begin("org/one", "next").unwrap();
+        control.cancel("first");
+        assert!(!next.cancelled.load(Ordering::Relaxed));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_terminates_git_style_process_groups_and_closes_pipes() {
+        let cancelled = AtomicBool::new(false);
+        let start = Instant::now();
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(Duration::from_millis(80));
+                cancelled.store(true, Ordering::SeqCst);
+            });
+            let mut command = Command::new("/bin/sh");
+            command.args(["-c", "sleep 30 & wait"]);
+            assert_eq!(
+                process::output(command, &cancelled).unwrap_err(),
+                "Scan cancelled"
+            );
+        });
+        assert!(start.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn preparation_skips_unchanged_fetches_and_only_tracks_default_branch() {
+        let origin = fixture();
+        git(origin.path(), &["branch", "unrelated"]).unwrap();
+        git(origin.path(), &["tag", "unneeded-tag"]).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let repo = prepare_cache(
+            cache.path(),
+            "org/repo",
+            origin.path().to_str().unwrap(),
+            None,
+            &cancel,
+            |_| {},
+        )
+        .unwrap();
+        assert!(git(&repo, &["show-ref", "--verify", "refs/heads/unrelated"]).is_err());
+        assert!(git(&repo, &["show-ref", "--verify", "refs/tags/unneeded-tag"]).is_err());
+        let phases = Mutex::new(Vec::new());
+        prepare_cache(
+            cache.path(),
+            "org/repo",
+            origin.path().to_str().unwrap(),
+            None,
+            &cancel,
+            |p| phases.lock().unwrap().push(p.to_owned()),
+        )
+        .unwrap();
+        assert!(!phases
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p.contains("Updating") || p.contains("Cloning")));
+        let revision = head_revision(&repo, &cancel).unwrap();
+        let before = scan_snapshot(options(&repo), None, &cancel, |_| {}).unwrap();
+        update_commit_graph(&repo, &revision, &cancel, |_| {}).unwrap();
+        let after = scan_snapshot(options(&repo), None, &cancel, |_| {}).unwrap();
+        assert_eq!(
+            serde_json::to_value(before).unwrap(),
+            serde_json::to_value(after).unwrap()
+        );
+        update_commit_graph(&repo, &revision, &cancel, |_| {
+            panic!("Index should be reused")
+        })
+        .unwrap();
+    }
+
+    #[test]
+    #[ignore = "Opt-in benchmark using a supplied local clone and NUL-delimited path/blob manifest"]
+    fn benchmark_cached_repository() {
+        let source = std::env::var("OWNERSHIP_BENCH_REPO").unwrap();
+        let manifest = fs::read_to_string(std::env::var("OWNERSHIP_BENCH_FILES").unwrap()).unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let repo = cache.path().join("benchmark.git");
+        git(
+            cache.path(),
+            &[
+                "clone",
+                "--bare",
+                "--shared",
+                "--",
+                &source,
+                repo.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        let mut opts = options(&repo);
+        opts.pathspecs = manifest
+            .split_terminator('\0')
+            .step_by(2)
+            .map(str::to_owned)
+            .collect();
+        let cancel = AtomicBool::new(false);
+        let revision = head_revision(&repo, &cancel).unwrap();
+        let mut baseline = None;
+        for indexed in [false, true] {
+            if indexed {
+                let start = Instant::now();
+                update_commit_graph(&repo, &revision, &cancel, |_| {}).unwrap();
+                println!("BENCH index-build {:.3}", start.elapsed().as_secs_f64());
+            }
+            for workers in [1, 4] {
+                for _ in 0..3 {
+                    let start = Instant::now();
+                    let result = scan_snapshot_at(
+                        opts.clone(),
+                        None,
+                        &cancel,
+                        |_| {},
+                        Some(&revision),
+                        workers,
+                    )
+                    .unwrap();
+                    println!(
+                        "BENCH indexed={indexed} workers={workers} files={} seconds={:.3}",
+                        result.files.len(),
+                        start.elapsed().as_secs_f64()
+                    );
+                    let value = serde_json::to_value(&result).unwrap();
+                    if let Some(expected) = &baseline {
+                        assert_eq!(expected, &value);
+                    } else {
+                        baseline = Some(value);
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn surviving_lines_coauthors_aliases_filters_and_pinned_revision() {
         let dir = fixture();

@@ -746,9 +746,10 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     });
   })();
 
-  // Git ownership has its own serial queue to bound clone/blame CPU and disk use,
-  // while API work continues independently. Every completed repo is durable.
-  const ownershipTask = pool(ownershipTargets, 1, async (repo) => {
+  // Two repository jobs overlap preparation/download with calculation. Rust
+  // admits only one calculation at a time, sharing a bounded file worker pool.
+  // API work continues independently and every completed repository is durable.
+  const ownershipTask = pool(ownershipTargets, 2, async (repo) => {
     if (cancelled()) return;
     attempted++;
     try {

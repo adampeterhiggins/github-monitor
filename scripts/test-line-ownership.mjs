@@ -124,13 +124,14 @@ try {
   for (const statement of lib.splitStatements(lib.SCHEMA_SQL)) sqlite.exec(statement);
   const named = (params) => Object.fromEntries(params.map((v, i) => [String(i + 1), v ?? null]));
   let failWrite = false;
+  let checkpointReads = 0;
   const db = {
-    select: async (sql, params = []) => sqlite.prepare(sql).all(named(params)),
+    select: async (sql, params = []) => { if (sql.startsWith("SELECT snapshot")) checkpointReads++; return sqlite.prepare(sql).all(named(params)); },
     execute: async (sql, params = []) => {
       assert.ok(!/^\s*(BEGIN|COMMIT|ROLLBACK)\b/i.test(sql));
       if (failWrite && sql.includes("INSERT INTO line_ownership")) throw new Error("disk failure");
-      sqlite.prepare(sql).run(named(params));
-      return { rowsAffected: 1 };
+      const result = sqlite.prepare(sql).run(named(params));
+      return { rowsAffected: Number(result.changes) };
     },
   };
   const repos = [1, 2, 3].map((id) => ({ id, name: `repo${id}`, full_name: `org/repo${id}`, archived: id === 3,
@@ -140,22 +141,41 @@ try {
     return new Response(JSON.stringify(repos), { status: 200, headers: { "content-type": "application/json" } });
   };
   const snapshot = (revision, lines = 3) => JSON.stringify({ version: 1, files: { "code.txt": { counts: { [revision]: { lines } } } }, coauthors: {},
-    report: { revision, repo: "org/repo", credits: [{ lines, people: [alice] }], totalLines: lines, creditedLines: lines, coauthoredLines: 0,
+    report: { revision, repo: "org/repo", options: { repo: "/fixture", revision: "HEAD", groupBy: "person", pathspecs: [], excludes: [], includeGenerated: false, ignoreWhitespace: true, excludeBots: false }, credits: [{ lines, people: [alice] }], totalLines: lines, creditedLines: lines, coauthoredLines: 0,
       filesBlamed: 1, filesSkipped: {}, filesReused: 1, filesRecalculated: 0, authors: [] } });
   let calls = [];
   let revision = "a".repeat(40);
-  globalThis.__invoke = async (command, args) => {
+  let preparations = [];
+  let activePreparations = 0;
+  let maxPreparations = 0;
+  const setScanner = (scan) => {
+    globalThis.__invoke = async (command, args) => {
+      if (command === "prepare_line_ownership") {
+        assert.equal(args.token, "fixture-token");
+        assert.ok(args.jobId);
+        preparations.push(args);
+        activePreparations++;
+        maxPreparations = Math.max(maxPreparations, activePreparations);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        activePreparations--;
+        return { revision, unchanged: args.metadata?.revision === revision };
+      }
+      return scan(command, args);
+    };
+  };
+  setScanner(async (command, args) => {
     assert.equal(command, "sync_line_ownership");
-    assert.equal(args.token, "fixture-token");
+    assert.equal(args.revision, revision);
     calls.push(args);
     args.onProgress.onmessage({ completed: 1, total: 1, phase: "Ownership updated" });
     return snapshot(revision);
-  };
+  });
   const options = { db, token: "fixture-token", org: "org", endpoints: ["line_ownership"], repoIds: [1, 2, 3] };
   assert.ok(lib.ALL_ENDPOINTS.includes("line_ownership"));
   await runSync(options);
+  assert.equal(maxPreparations, 2, "two repositories can prepare concurrently");
   assert.equal(calls.length, 2, "normal org sync calculates every selected non-archived repo");
-  assert.ok(calls.every((c) => c.previousJson === null && !c.full));
+  assert.ok(calls.every((c) => c.previousJson === null));
   let rows = await ownershipSnapshots(db, [1, 2, 3]);
   assert.equal(rows.filter((r) => r.report).length, 2);
   assert.equal(rows[0].revision, revision);
@@ -170,14 +190,18 @@ try {
   await runSync({ ...options, mode: "resume" });
   assert.equal(calls.length, 0, "resume skips completed ownership endpoints");
   sqlite.exec("UPDATE line_ownership SET calculated_at = '2020-01-01T00:00:00Z'");
+  preparations = [];
+  checkpointReads = 0;
   await runSync(options);
-  assert.equal(calls.length, 2, "incremental sync checks heads even when inventory timestamps are old");
-  assert.ok(calls.every((c) => JSON.parse(c.previousJson).report.revision === revision));
+  assert.equal(preparations.length, 2, "incremental sync checks heads even when inventory timestamps are old");
+  assert.equal(calls.length, 0, "unchanged heads never invoke calculation");
+  assert.equal(checkpointReads, 0, "unchanged heads never transfer full snapshots");
+  assert.ok(preparations.every((c) => c.metadata.revision === revision));
   assert.equal((await ownershipSnapshots(db, [1]))[0].calculated_at, "2020-01-01T00:00:00Z", "unchanged heads retain calculation time");
   calls = [];
   await runSync({ ...options, mode: "full" });
   assert.equal(calls.length, 2);
-  assert.ok(calls.every((c) => c.full && c.previousJson === null));
+  assert.ok(calls.every((c) => c.previousJson === null));
   assert.notEqual((await ownershipSnapshots(db, [1]))[0].calculated_at, "2020-01-01T00:00:00Z");
   console.log("PASS  sync integration, selection/archives, durable commits, restart, resume, incremental checkpoints and full rebuild");
 
@@ -190,29 +214,36 @@ try {
   assert.match((await ownershipSnapshots(db, [1]))[0].error, /Git fetch failed/);
   let resumed = false;
   revision = "b".repeat(40);
-  globalThis.__invoke = async (_, args) => { resumed = true; assert.ok(args.previousJson); return snapshot(revision); };
+  setScanner(async (_, args) => { resumed = true; assert.ok(args.previousJson); return snapshot(revision); });
   await runSync({ ...options, repoIds: [1], mode: "resume" });
   assert.equal(resumed, true);
   assert.equal((await ownershipSnapshots(db, [1]))[0].revision, revision);
   const latest = await ownershipCheckpoint(db, 1);
   const controller = new AbortController();
   let cancelCalled = false;
-  globalThis.__invoke = async (command) => {
-    if (command === "cancel_line_ownership") { cancelCalled = true; return; }
+  revision = "c".repeat(40);
+  setScanner(async (command, args) => {
+    if (command === "cancel_line_ownership") { assert.ok(args.jobId); cancelCalled = true; return; }
     controller.abort();
     return snapshot("c".repeat(40));
-  };
+  });
   const cancelled = await runSync({ ...options, repoIds: [1], signal: controller.signal });
   assert.equal(cancelled.cancelled, true);
   assert.equal(cancelCalled, true);
   assert.equal(await ownershipCheckpoint(db, 1), latest, "cancellation must not advance the checkpoint");
   assert.equal((await ownershipSnapshots(db, [1]))[0].status, "pending", "cancelled refresh remains resumable");
   failWrite = true;
-  globalThis.__invoke = async () => snapshot("d".repeat(40));
+  revision = "d".repeat(40);
+  setScanner(async () => snapshot(revision));
   const writeFailed = await runSync({ ...options, repoIds: [1] });
   assert.equal(writeFailed.errors.length, 1);
   assert.equal(await ownershipCheckpoint(db, 1), latest, "failed atomic write keeps old cache, SHA and report together");
   failWrite = false;
+  const meta = await lib.ownershipMetadata(db, 1);
+  assert.equal(await lib.touchOwnershipSnapshot(db, 1, meta), true);
+  assert.equal(await lib.touchOwnershipSnapshot(db, 1, meta.replace('"version":1', '"version":999')), false, "stale metadata cannot touch a different snapshot");
+  sqlite.exec("UPDATE line_ownership SET snapshot = 'invalid json' WHERE repo_id = 1");
+  assert.equal(await lib.ownershipMetadata(db, 1), null, "invalid checkpoints rebuild");
   await lib.clearAnalytics(db);
   assert.equal(await ownershipCheckpoint(db, 1), null);
   console.log("PASS  failed fetch/write retention, cancellation, retry and analytics reset");

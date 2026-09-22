@@ -21,6 +21,34 @@ export async function ownershipCheckpoint(db: Database, repoId: number): Promise
   return rows[0]?.snapshot ?? null;
 }
 
+// Extract only the validity fields: unchanged checks never transfer file caches
+// through the WebView. Invalid/legacy snapshots fall back to rebuilding.
+const METADATA = `CASE WHEN json_valid(snapshot) THEN CASE WHEN
+  json_type(snapshot, '$.files') = 'object' AND json_type(snapshot, '$.coauthors') = 'object'
+  AND json_type(snapshot, '$.report.credits') = 'array' THEN json_object(
+  'version', json_extract(snapshot, '$.version'),
+  'revision', json_extract(snapshot, '$.report.revision'),
+  'options', json_extract(snapshot, '$.report.options')) ELSE NULL END ELSE NULL END`;
+
+export async function ownershipMetadata(db: Database, repoId: number): Promise<string | null> {
+  const rows = await db.select<Array<{ metadata: string | null }>>(
+    `SELECT ${METADATA} AS metadata FROM line_ownership WHERE repo_id = $1`, [repoId],
+  );
+  return rows[0]?.metadata ?? null;
+}
+
+/** Compare-and-update prevents a concurrent reset/write from being mistaken for
+ * the snapshot whose remote SHA we checked. Only checked_at changes. */
+export async function touchOwnershipSnapshot(db: Database, repoId: number, metadata: string): Promise<boolean> {
+  return withWriteLock(async () => {
+    const result = await db.execute(
+      `UPDATE line_ownership SET checked_at = $1 WHERE repo_id = $2 AND (${METADATA}) = $3`,
+      [new Date().toISOString(), repoId, metadata],
+    );
+    return result.rowsAffected === 1;
+  });
+}
+
 /** Report, per-file attribution and its exact commit are replaced by ONE atomic
  * statement. A failed/cancelled scan leaves the previous successful snapshot intact. */
 export async function writeOwnershipSnapshot(db: Database, repoId: number, snapshot: string, full: boolean): Promise<void> {

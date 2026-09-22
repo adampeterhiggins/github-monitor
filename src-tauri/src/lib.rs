@@ -5,6 +5,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(line_ownership::ScanControl::default())
         .invoke_handler(tauri::generate_handler![
+            line_ownership::prepare_line_ownership,
             line_ownership::sync_line_ownership,
             line_ownership::cancel_line_ownership,
         ])
