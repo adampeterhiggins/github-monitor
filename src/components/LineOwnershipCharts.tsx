@@ -1,12 +1,46 @@
 import { useMemo, useState } from "react";
-import type { aggregateOwnership } from "../lib/lineOwnership";
-import { HeatMatrix, RankedBars } from "./charts";
+import { formatDate } from "../lib/agg/weeks";
+import { ownershipHistorySeries, type OwnershipHistoryPoint, type aggregateOwnership } from "../lib/lineOwnership";
+import { HeatMatrix, RankedBars, TimelineArea } from "./charts";
 import { ChartCard, DataTable, Segmented, full } from "./ui";
 
 type Summary = ReturnType<typeof aggregateOwnership>;
 const percent = (value: number) => `${value.toFixed(1)}%`;
 const share = (value: number) => percent(value * 100);
 const shortRepo = (name: string) => name.slice(name.lastIndexOf("/") + 1);
+
+/** Daily first-parent history. Person grouping is fixed because that is what was saved. */
+export function OwnershipHistoryChart({ points, selectedLogins }: {
+  points: OwnershipHistoryPoint[];
+  selectedLogins: readonly string[];
+}) {
+  const [values, setValues] = useState<"total" | "share">("total");
+  const { data, series } = useMemo(
+    () => ownershipHistorySeries(points, selectedLogins),
+    [points, selectedLogins],
+  );
+  if (!data.length) return null;
+  return (
+    <ChartCard title="Ownership over time"
+      subtitle="Daily surviving lines on the default branch. Days without commits keep the previous totals. Co-authors each receive full credit, so stacked people can exceed surviving lines. Grouped by person."
+      titleAfter={<Segmented ariaLabel="History measure" value={values} onChange={setValues} options={[{ value: "total", label: "Lines" }, { value: "share", label: "Share" }]} />}
+      table={series.length ? <DataTable rows={data} rowKey={(row) => String(row.week)} maxHeight={420} initialSort={{ key: "day", dir: "asc" }} columns={[
+        { key: "day", header: "Day", render: (row) => formatDate(row.week * 1000), sortValue: (row) => row.week },
+        ...series.map((item) => ({
+          key: item.key,
+          header: item.label,
+          align: "right" as const,
+          render: (row: Record<string, number>) => full(row[item.key] ?? 0),
+          sortValue: (row: Record<string, number>) => row[item.key] ?? 0,
+        })),
+      ]} /> : undefined}>
+      {series.length === 0
+        ? <p className="text-[12px] text-ink-muted">No surviving lines match these filters.</p>
+        : <TimelineArea data={data} series={series} values={values} height={280} withBrush={data.length > 45}
+          valueLabel={values === "share" ? "of credited lines" : "lines"} labelOf={(week) => formatDate(week * 1000)} />}
+    </ChartCard>
+  );
+}
 
 /** All views use the same globally resolved identities and surviving-line base. */
 export function LineOwnershipCharts({ summary, repositories }: {

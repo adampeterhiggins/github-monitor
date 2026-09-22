@@ -230,6 +230,8 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
               Line ownership saves each repository’s commit and surviving-line attribution.
               The first sync downloads full Git history; later syncs fetch new history and
               recalculate touched files. Full re-sync rebuilds the ownership snapshots.
+              Later syncs also record each default-branch commit so ownership can be graphed
+              over time. A full re-sync rebuilds that history.
             </p>
             <div className="grid grid-cols-2 gap-x-4 gap-y-1">
               {ALL_ENDPOINTS.map((e) => (

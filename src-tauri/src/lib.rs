@@ -7,6 +7,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             line_ownership::prepare_line_ownership,
             line_ownership::sync_line_ownership,
+            line_ownership::advance_line_ownership_history,
             line_ownership::cancel_line_ownership,
         ])
         .plugin(tauri_plugin_opener::init())

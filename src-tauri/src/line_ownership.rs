@@ -103,7 +103,7 @@ struct CachedFile {
 
 // Stored with the report in a single SQLite row: the file cache and commit
 // checkpoint become visible atomically, even if a sync is interrupted.
-#[derive(Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct Snapshot {
     version: u32,
     report: Report,
@@ -514,7 +514,15 @@ fn scan_snapshot(
     cancelled: &AtomicBool,
     progress: impl Fn(Progress),
 ) -> Result<Snapshot, String> {
-    scan_snapshot_at(options, previous, cancelled, progress, None, worker_count())
+    scan_snapshot_at(
+        options,
+        previous,
+        cancelled,
+        progress,
+        None,
+        worker_count(),
+        false,
+    )
 }
 
 fn scan_snapshot_at(
@@ -524,6 +532,7 @@ fn scan_snapshot_at(
     progress: impl Fn(Progress),
     pinned: Option<&str>,
     workers: usize,
+    adjacent: bool,
 ) -> Result<Snapshot, String> {
     let git = |repo: &Path, args: &[&str]| git_cancel(repo, args, cancelled);
     let git_text = |repo: &Path, args: &[&str]| {
@@ -579,23 +588,52 @@ fn scan_snapshot_at(
     });
     if let Some(previous) = previous {
         if previous.report.revision != revision {
-            // Include all paths touched in intervening commits, including merges
-            // and changes later reverted to the same blob. Tree diff alone is unsafe.
-            let range = format!("{}..{}", previous.report.revision, revision);
-            let log = git(
-                &repo,
-                &[
-                    "log",
-                    "--format=",
-                    "--name-only",
-                    "-z",
-                    "--full-history",
-                    "-m",
-                    &range,
-                    "--",
-                ],
-            )?;
-            for path in log.split(|b| *b == 0).filter(|p| !p.is_empty()) {
+            let diff = if adjacent {
+                // The history walk steps one first-parent commit. A restore then
+                // has a different blob from its parent, so the tree diff is enough.
+                let parent = git_text(
+                    &repo,
+                    &[
+                        "rev-parse",
+                        "--verify",
+                        "--end-of-options",
+                        &format!("{revision}^"),
+                    ],
+                )?;
+                if parent.trim() != previous.report.revision {
+                    return Err("Ownership history can only reuse the parent commit".into());
+                }
+                git(
+                    &repo,
+                    &[
+                        "diff-tree",
+                        "--no-commit-id",
+                        "-r",
+                        "-z",
+                        "--name-only",
+                        &previous.report.revision,
+                        &revision,
+                    ],
+                )?
+            } else {
+                // Include all paths touched in intervening commits, including merges
+                // and changes later reverted to the same blob. Tree diff alone is unsafe.
+                let range = format!("{}..{}", previous.report.revision, revision);
+                git(
+                    &repo,
+                    &[
+                        "log",
+                        "--format=",
+                        "--name-only",
+                        "-z",
+                        "--full-history",
+                        "-m",
+                        &range,
+                        "--",
+                    ],
+                )?
+            };
+            for path in diff.split(|b| *b == 0).filter(|p| !p.is_empty()) {
                 changed.insert(
                     std::str::from_utf8(path)
                         .map_err(|_| "Non-UTF-8 changed path")?
@@ -845,6 +883,224 @@ fn scan_snapshot_at(
     })
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryAuthor {
+    author: String,
+    names: Vec<String>,
+    emails: Vec<String>,
+    lines: u64,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryPoint {
+    revision: String,
+    committed_at: String,
+    total_lines: u64,
+    coauthored_lines: u64,
+    authors: Vec<HistoryAuthor>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HistoryBatch {
+    points: Vec<HistoryPoint>,
+    checkpoint: String,
+    reset: bool,
+    done: bool,
+    completed: usize,
+    total: usize,
+}
+
+fn history_point(snapshot: &Snapshot, committed_at: String) -> HistoryPoint {
+    HistoryPoint {
+        revision: snapshot.report.revision.clone(),
+        committed_at,
+        total_lines: snapshot.report.total_lines,
+        coauthored_lines: snapshot.report.coauthored_lines,
+        authors: snapshot
+            .report
+            .authors
+            .iter()
+            .map(|author| HistoryAuthor {
+                author: author.author.clone(),
+                names: author.names.clone(),
+                emails: author.emails.clone(),
+                lines: author.lines,
+            })
+            .collect(),
+    }
+}
+
+fn git_text_cancel(repo: &Path, args: &[&str], cancelled: &AtomicBool) -> Result<String, String> {
+    git_cancel(repo, args, cancelled).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// First-parent commits after `from`, oldest first, with committer timestamps.
+fn first_parent_commits(
+    repo: &Path,
+    from: Option<&str>,
+    target: &str,
+    cancelled: &AtomicBool,
+) -> Result<Vec<(String, String)>, String> {
+    let range = match from {
+        Some(from) => format!("{from}..{target}"),
+        None => target.to_owned(),
+    };
+    let log = git_text_cancel(
+        repo,
+        &[
+            "log",
+            "--first-parent",
+            "--reverse",
+            "--format=%H%x1f%cI",
+            &range,
+        ],
+        cancelled,
+    )?;
+    let mut commits = Vec::new();
+    for line in log.lines().filter(|line| !line.is_empty()) {
+        let (sha, date) = line
+            .split_once('\u{1f}')
+            .ok_or("Invalid ownership history line")?;
+        if !is_commit_id(sha) {
+            return Err("Invalid ownership history commit".into());
+        }
+        commits.push((sha.to_owned(), date.to_owned()));
+    }
+    Ok(commits)
+}
+
+/// Walk the default branch one commit at a time. Each point stores person totals.
+/// The returned checkpoint is the file cache at the last commit in this batch.
+fn advance_history(
+    options: ScanOptions,
+    previous: Option<Snapshot>,
+    target: &str,
+    batch_limit: usize,
+    cancelled: &AtomicBool,
+    progress: impl Fn(Progress),
+) -> Result<HistoryBatch, String> {
+    if target.is_empty() {
+        return Ok(HistoryBatch {
+            points: Vec::new(),
+            checkpoint: String::new(),
+            reset: false,
+            done: true,
+            completed: 0,
+            total: 0,
+        });
+    }
+    if !is_commit_id(target) {
+        return Err("Invalid prepared revision".into());
+    }
+    let usable = previous.filter(|snapshot| {
+        snapshot.version == SNAPSHOT_VERSION
+            && snapshot.report.options == options
+            && is_commit_id(&snapshot.report.revision)
+    });
+    let cursor = usable
+        .as_ref()
+        .map(|snapshot| snapshot.report.revision.clone());
+    let commits = first_parent_commits(
+        Path::new(&options.repo),
+        cursor.as_deref(),
+        target,
+        cancelled,
+    )?;
+    let continues = if let Some(cursor) = cursor.as_deref() {
+        if cursor == target {
+            true
+        } else if let Some((sha, _)) = commits.first() {
+            match git_text_cancel(
+                Path::new(&options.repo),
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--end-of-options",
+                    &format!("{sha}^"),
+                ],
+                cancelled,
+            ) {
+                Ok(parent) => parent.trim() == cursor,
+                Err(error) => {
+                    check_cancel(cancelled)?;
+                    let _ = error;
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    let (reset, mut cache, commits) = if continues {
+        (false, usable, commits)
+    } else if cursor.is_some() {
+        (
+            true,
+            None,
+            first_parent_commits(Path::new(&options.repo), None, target, cancelled)?,
+        )
+    } else {
+        (true, None, commits)
+    };
+    let total_text = git_text_cancel(
+        Path::new(&options.repo),
+        &["rev-list", "--count", "--first-parent", target],
+        cancelled,
+    )?;
+    let total = total_text
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| "Invalid commit count")?;
+    let completed_base = total.saturating_sub(commits.len());
+    let take = batch_limit.clamp(1, 100).min(commits.len());
+    let mut points = Vec::with_capacity(take);
+    for (sha, committed_at) in commits.iter().take(take) {
+        check_cancel(cancelled)?;
+        let completed = completed_base + points.len();
+        progress(Progress {
+            completed,
+            total,
+            phase: format!("Ownership history {completed}/{total}"),
+        });
+        let snapshot = scan_snapshot_at(
+            options.clone(),
+            cache.as_ref(),
+            cancelled,
+            |_| {},
+            Some(sha),
+            worker_count(),
+            cache.is_some(),
+        )?;
+        points.push(history_point(&snapshot, committed_at.clone()));
+        cache = Some(snapshot);
+    }
+    let done = points.len() == commits.len();
+    if done {
+        progress(Progress {
+            completed: total,
+            total,
+            phase: format!("Ownership history {total}/{total}"),
+        });
+    }
+    let checkpoint = match &cache {
+        Some(snapshot) => serde_json::to_string(snapshot).map_err(|e| e.to_string())?,
+        None => String::new(),
+    };
+    Ok(HistoryBatch {
+        points,
+        checkpoint,
+        reset,
+        done,
+        completed: completed_base + take,
+        total,
+    })
+}
+
 struct ActiveScan {
     active: ActiveJobs,
     repository: String,
@@ -1051,11 +1307,58 @@ pub async fn sync_line_ownership(
                 },
                 Some(&revision),
                 worker_count(),
+                false,
             )?
         };
         check_cancel(&active.cancelled)?;
         snapshot.report.repo = format!("https://github.com/{github_repo}");
         serde_json::to_string(&snapshot).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn advance_line_ownership_history(
+    github_repo: String,
+    job_id: String,
+    revision: String,
+    previous_json: Option<String>,
+    app: tauri::AppHandle,
+    on_progress: Channel<Progress>,
+    control: State<'_, ScanControl>,
+) -> Result<HistoryBatch, String> {
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("line-ownership");
+    let active = control.begin(&github_repo, &job_id)?;
+    let calculation = control.calculation.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit = loop {
+            check_cancel(&active.cancelled)?;
+            match calculation.try_lock() {
+                Ok(permit) => break permit,
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
+            }
+        };
+        let repo = cache.join(format!("{}.git", github_repo.to_lowercase()));
+        let options = managed_options(&repo);
+        let previous = previous_json.and_then(|value| serde_json::from_str(&value).ok());
+        advance_history(
+            options,
+            previous,
+            &revision,
+            25,
+            &active.cancelled,
+            |event| {
+                let _ = on_progress.send(event);
+            },
+        )
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1372,8 +1675,16 @@ mod tests {
         git(repo.path(), &["add", "."]).unwrap();
         git(repo.path(), &["commit", "-m", "Noncontiguous blame groups"]).unwrap();
         let cancelled = AtomicBool::new(false);
-        let reference =
-            scan_snapshot_at(options(repo.path()), None, &cancelled, |_| {}, None, 1).unwrap();
+        let reference = scan_snapshot_at(
+            options(repo.path()),
+            None,
+            &cancelled,
+            |_| {},
+            None,
+            1,
+            false,
+        )
+        .unwrap();
         for (path, file) in &reference.files {
             if file.binary {
                 continue;
@@ -1406,6 +1717,7 @@ mod tests {
                 |_| {},
                 None,
                 workers,
+                false,
             )
             .unwrap();
             assert_eq!(
@@ -1581,8 +1893,16 @@ mod tests {
         )
         .unwrap();
         let cancelled = AtomicBool::new(false);
-        let reference =
-            scan_snapshot_at(options(dir.path()), None, &cancelled, |_| {}, None, 1).unwrap();
+        let reference = scan_snapshot_at(
+            options(dir.path()),
+            None,
+            &cancelled,
+            |_| {},
+            None,
+            1,
+            false,
+        )
+        .unwrap();
         assert_eq!(reference.report.revision.len(), 64);
         for (path, file) in &reference.files {
             let output = git_text(
@@ -1605,8 +1925,16 @@ mod tests {
                 serde_json::to_value(&file.counts).unwrap()
             );
         }
-        let parallel =
-            scan_snapshot_at(options(dir.path()), None, &cancelled, |_| {}, None, 4).unwrap();
+        let parallel = scan_snapshot_at(
+            options(dir.path()),
+            None,
+            &cancelled,
+            |_| {},
+            None,
+            4,
+            false,
+        )
+        .unwrap();
         assert_eq!(
             serde_json::to_value(&reference).unwrap(),
             serde_json::to_value(&parallel).unwrap()
@@ -1772,6 +2100,7 @@ mod tests {
                         |_| {},
                         Some(&revision),
                         workers,
+                        false,
                     )
                     .unwrap();
                     println!(
@@ -2181,5 +2510,164 @@ mod tests {
             github_url("org/repo.name").unwrap(),
             "https://github.com/org/repo.name.git"
         );
+    }
+
+    fn head_sha(repo: &Path) -> String {
+        git_text(repo, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+    fn history_batch(repo: &Path, previous: Option<Snapshot>, limit: usize) -> HistoryBatch {
+        advance_history(
+            options(repo),
+            previous,
+            &head_sha(repo),
+            limit,
+            &AtomicBool::new(false),
+            |_| {},
+        )
+        .unwrap()
+    }
+    fn saved_cache(batch: &HistoryBatch) -> Snapshot {
+        serde_json::from_str(&batch.checkpoint).unwrap()
+    }
+    fn commit_all(repo: &Path, message: &str) {
+        git(repo, &["add", "."]).unwrap();
+        git(repo, &["commit", "-m", message]).unwrap();
+    }
+    fn assert_same_people(point: &HistoryPoint, report: &Report) {
+        let people = |authors: &[AuthorRow]| {
+            authors
+                .iter()
+                .map(|author| {
+                    (
+                        author.author.clone(),
+                        author.names.clone(),
+                        author.emails.clone(),
+                        author.lines,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let historic = point
+            .authors
+            .iter()
+            .map(|author| {
+                (
+                    author.author.clone(),
+                    author.names.clone(),
+                    author.emails.clone(),
+                    author.lines,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(point.total_lines, report.total_lines);
+        assert_eq!(point.coauthored_lines, report.coauthored_lines);
+        assert_eq!(historic, people(&report.authors));
+    }
+
+    #[test]
+    fn history_reuses_untouched_files_resumes_and_matches_a_full_scan() {
+        let dir = fixture();
+        let repo = dir.path();
+        let first = history_batch(repo, None, 10);
+        assert!(first.reset);
+        assert!(first.done);
+        assert_eq!(first.points.len(), 1);
+        fs::write(repo.join("code.txt"), "changed\ntwo\nthree\n").unwrap();
+        commit_all(repo, "Edit code");
+        let partial = history_batch(repo, None, 1);
+        assert!(!partial.done);
+        assert_eq!(partial.points.len(), 1);
+        let resumed = history_batch(repo, Some(saved_cache(&partial)), 10);
+        assert!(!resumed.reset);
+        assert!(resumed.done);
+        assert_eq!(resumed.points.len(), 1);
+        let step = saved_cache(&resumed);
+        assert_eq!(step.report.files_recalculated, 1);
+        assert!(step.report.files_reused >= 1);
+        fs::write(repo.join("package-lock.json"), "still generated\n").unwrap();
+        commit_all(repo, "Touch a generated file");
+        let skipped = history_batch(repo, Some(step), 10);
+        assert_eq!(saved_cache(&skipped).report.files_recalculated, 0);
+        assert_same_people(
+            skipped.points.last().unwrap(),
+            &scan(options(repo), &AtomicBool::new(false), |_| {}).unwrap(),
+        );
+    }
+
+    #[test]
+    fn history_credits_a_restored_line_to_the_restoring_commit() {
+        let dir = fixture();
+        let repo = dir.path();
+        let initial = history_batch(repo, None, 10);
+        fs::write(repo.join("code.txt"), "temporary\ntwo\nthree\n").unwrap();
+        commit_all(repo, "Temporary change");
+        fs::write(repo.join("code.txt"), "one\ntwo\nthree\n").unwrap();
+        git(repo, &["add", "."]).unwrap();
+        git(
+            repo,
+            &[
+                "commit",
+                "--author",
+                "Carol <carol@example.com>",
+                "-m",
+                "Restore content",
+            ],
+        )
+        .unwrap();
+        let updated = history_batch(repo, Some(saved_cache(&initial)), 10);
+        assert!(!updated.reset);
+        assert_eq!(updated.points.len(), 2);
+        assert!(updated.points[1]
+            .authors
+            .iter()
+            .any(|author| { author.author == "Carol" && author.lines == 1 }));
+        assert_same_people(
+            updated.points.last().unwrap(),
+            &scan(options(repo), &AtomicBool::new(false), |_| {}).unwrap(),
+        );
+    }
+
+    #[test]
+    fn history_keeps_the_first_parent_tree_across_a_merge() {
+        let dir = fixture();
+        let repo = dir.path();
+        let initial = history_batch(repo, None, 10);
+        let before = initial.points[0].total_lines;
+        git(repo, &["checkout", "-b", "feature"]).unwrap();
+        fs::write(repo.join("code.txt"), "feature\ntwo\nthree\n").unwrap();
+        commit_all(repo, "Feature");
+        git(repo, &["checkout", "main"]).unwrap();
+        git(repo, &["merge", "-s", "ours", "feature", "-m", "Keep main"]).unwrap();
+        let merged = history_batch(repo, Some(saved_cache(&initial)), 10);
+        assert!(!merged.reset);
+        assert_eq!(merged.points.len(), 1);
+        assert_eq!(saved_cache(&merged).report.files_recalculated, 0);
+        assert_eq!(merged.points[0].total_lines, before);
+        assert_same_people(
+            &merged.points[0],
+            &scan(options(repo), &AtomicBool::new(false), |_| {}).unwrap(),
+        );
+    }
+
+    #[test]
+    fn history_restarts_when_the_cached_commit_is_not_an_ancestor() {
+        let dir = fixture();
+        let repo = dir.path();
+        let initial = history_batch(repo, None, 10);
+        git(repo, &["checkout", "--orphan", "fresh"]).unwrap();
+        git(repo, &["reset", "-q"]).unwrap();
+        fs::write(repo.join("other.txt"), "fresh\n").unwrap();
+        git(repo, &["add", "other.txt"]).unwrap();
+        git(repo, &["commit", "-m", "Fresh root"]).unwrap();
+        let fresh = head_sha(repo);
+        let rebuilt = history_batch(repo, Some(saved_cache(&initial)), 10);
+        assert!(rebuilt.reset);
+        assert!(rebuilt.done);
+        assert_eq!(rebuilt.points.len(), 1);
+        assert_eq!(rebuilt.points[0].revision, fresh);
+        assert_eq!(rebuilt.points[0].total_lines, 1);
     }
 }

@@ -116,6 +116,61 @@ try {
   assert.equal(aggregateOwnership(githubReports, "person", ["unrelated"]).authors.length, 0);
   console.log("PASS  shared contributor contributorOptions, bot deselection, empty selection, alias/GitHub matching and filtered chart totals");
 
+  const historyAuthor = (author, email, lines, names = [author]) => ({ author, names, emails: [email], lines });
+  const aliceHistory = (lines) => historyAuthor("Alice", "alice@x", lines);
+  const gap = lib.ownershipHistorySeries([
+    { repoId: 1, committedAt: "2020-01-01T00:00:00Z", authors: [aliceHistory(3)] },
+    { repoId: 1, committedAt: "2020-01-03T00:00:00Z", authors: [aliceHistory(5)] },
+  ], []);
+  assert.equal(gap.data.length, 3, "missing days stay on the chart");
+  assert.equal(gap.data[1].week - gap.data[0].week, 86400);
+  assert.equal(gap.data[1][gap.series[0].key], 3, "a day without a commit keeps the previous total");
+  assert.equal(gap.data[2][gap.series[0].key], 5);
+  const sameDay = lib.ownershipHistorySeries([
+    { repoId: 1, committedAt: "2020-01-02T00:30:00Z", authors: [aliceHistory(1)] },
+    { repoId: 1, committedAt: "2020-01-01T20:30:00-05:00", authors: [aliceHistory(8)] },
+  ], []);
+  assert.equal(sameDay.data.length, 1, "commits on one UTC day collapse");
+  assert.equal(sameDay.data[0][sameDay.series[0].key], 8, "the later commit of the day wins");
+  const selected = lib.ownershipHistorySeries([{
+    repoId: 1, committedAt: "2020-01-02T00:00:00Z",
+    authors: [aliceHistory(4), historyAuthor("Bob", "bob@x", 6)],
+  }], ["Alice"]);
+  assert.equal(selected.series.length, 1);
+  assert.equal(selected.data[0][selected.series[0].key], 4, "the contributor selection drops other people");
+  assert.equal(lib.ownershipHistorySeries([{
+    repoId: 1, committedAt: "2020-01-02T00:00:00Z", authors: [aliceHistory(4)],
+  }], [lib.NO_CONTRIBUTORS]).series.length, 0);
+  const nine = Array.from({ length: 9 }, (_, i) => historyAuthor(`Person ${String(i).padStart(2, "0")}`, `p${i}@x`, 20 - i));
+  const folded = lib.ownershipHistorySeries([{ repoId: 1, committedAt: "2020-01-02T00:00:00Z", authors: nine }], []);
+  assert.equal(folded.series.length, 9);
+  assert.equal(folded.series[8].key, "other");
+  assert.equal(folded.series[8].slot, null);
+  assert.equal(folded.data[0][folded.series[8].key], 12, "the ninth person is Other");
+  assert.equal(folded.data[0][folded.series[0].key], 20);
+  for (const item of folded.series) assert.equal(typeof folded.data[0][item.key], "number");
+  const summed = lib.ownershipHistorySeries([
+    { repoId: 1, committedAt: "2020-01-02T00:00:00Z", authors: [historyAuthor("Alice", "alice@x", 3)] },
+    { repoId: 2, committedAt: "2020-01-02T12:00:00Z", authors: [historyAuthor("A.", "alice@x", 4, ["A."])] },
+    { repoId: 2, committedAt: "2020-01-04T00:00:00Z", authors: [historyAuthor("Alice Smith", "other@x", 1, ["Alice Smith"])] },
+  ], []);
+  assert.equal(summed.series.length, 2, "a shared email is one person and a different name stays separate");
+  assert.equal(summed.data[0][summed.series[0].key], 7, "the same email sums across repositories");
+  assert.equal(summed.data[1][summed.series[0].key], 7, "an untouched repository keeps its lines on later days");
+  const sharedName = lib.ownershipHistorySeries([
+    { repoId: 1, committedAt: "2020-01-02T00:00:00Z", authors: [historyAuthor("Alice", "a@x", 2, ["Alice Smith"])] },
+    { repoId: 2, committedAt: "2020-01-02T00:00:00Z", authors: [historyAuthor("Alice Smith", "b@x", 3, ["Alice Smith"])] },
+  ], []);
+  assert.equal(sharedName.series.length, 1);
+  assert.equal(sharedName.data[0][sharedName.series[0].key], 5, "a shared name merges people across repositories");
+  const githubHistory = lib.ownershipHistorySeries([{
+    repoId: 1, committedAt: "2020-01-02T00:00:00Z",
+    authors: [historyAuthor("Alice Smith", "123+alice-dev@users.noreply.github.com", 6, ["Alice Smith"])],
+  }], ["ALICE-DEV"]);
+  assert.equal(githubHistory.series.length, 1);
+  assert.equal(githubHistory.data[0][githubHistory.series[0].key], 6);
+  console.log("PASS  ownership history series carry-forward, daily collapse, selection, Other and cross-repo identity");
+
   console.log("PASS  chart cells share global identities and totals; shared bot patterns cover aliases, model variants, email usernames and built-ins");
 
 
@@ -144,6 +199,7 @@ try {
     report: { revision, repo: "org/repo", options: { repo: "/fixture", revision: "HEAD", groupBy: "person", pathspecs: [], excludes: [], includeGenerated: false, ignoreWhitespace: true, excludeBots: false }, credits: [{ lines, people: [alice] }], totalLines: lines, creditedLines: lines, coauthoredLines: 0,
       filesBlamed: 1, filesSkipped: {}, filesReused: 1, filesRecalculated: 0, authors: [] } });
   let calls = [];
+  let historyCalls = [];
   let revision = "a".repeat(40);
   let preparations = [];
   let activePreparations = 0;
@@ -160,6 +216,17 @@ try {
         activePreparations--;
         return { revision, unchanged: args.metadata?.revision === revision };
       }
+      if (command === "advance_line_ownership_history") {
+        historyCalls.push(args);
+        args.onProgress?.onmessage?.({ completed: 1, total: 1, phase: "Ownership history 1/1" });
+        return {
+          points: [{ revision: args.revision, committedAt: "2020-01-02T00:00:00Z", totalLines: 3, coauthoredLines: 0,
+            authors: [{ author: "Alice", names: ["Alice"], emails: ["alice@x"], lines: 3 }] }],
+          checkpoint: snapshot(args.revision),
+          reset: !args.previousJson,
+          done: true, completed: 1, total: 1,
+        };
+      }
       return scan(command, args);
     };
   };
@@ -175,7 +242,10 @@ try {
   await runSync(options);
   assert.equal(maxPreparations, 2, "two repositories can prepare concurrently");
   assert.equal(calls.length, 2, "normal org sync calculates every selected non-archived repo");
+  assert.equal(historyCalls.length, 2, "each calculated repository records its commit history");
   assert.ok(calls.every((c) => c.previousJson === null));
+  assert.ok(historyCalls.every((c) => c.previousJson == null));
+  assert.equal((await lib.ownershipHistory(db, [1, 2, 3])).length, 2);
   let rows = await ownershipSnapshots(db, [1, 2, 3]);
   assert.equal(rows.filter((r) => r.report).length, 2);
   assert.equal(rows[0].revision, revision);
@@ -187,21 +257,28 @@ try {
   sqlite = new DatabaseSync(databasePath);
   assert.equal(await ownershipCheckpoint(db, 1), saved, "checkpoint persists across application restarts");
   calls = [];
+  const historyBeforeResume = historyCalls.length;
   await runSync({ ...options, mode: "resume" });
   assert.equal(calls.length, 0, "resume skips completed ownership endpoints");
+  assert.equal(historyCalls.length, historyBeforeResume, "resume does not walk history again");
   sqlite.exec("UPDATE line_ownership SET calculated_at = '2020-01-01T00:00:00Z'");
   preparations = [];
   checkpointReads = 0;
+  const historyBeforeIncremental = historyCalls.length;
   await runSync(options);
   assert.equal(preparations.length, 2, "incremental sync checks heads even when inventory timestamps are old");
   assert.equal(calls.length, 0, "unchanged heads never invoke calculation");
+  assert.equal(historyCalls.length, historyBeforeIncremental, "history already at this commit is left untouched");
   assert.equal(checkpointReads, 0, "unchanged heads never transfer full snapshots");
   assert.ok(preparations.every((c) => c.metadata.revision === revision));
   assert.equal((await ownershipSnapshots(db, [1]))[0].calculated_at, "2020-01-01T00:00:00Z", "unchanged heads retain calculation time");
   calls = [];
+  const historyBeforeFull = historyCalls.length;
   await runSync({ ...options, mode: "full" });
   assert.equal(calls.length, 2);
+  assert.equal(historyCalls.length, historyBeforeFull + 2, "full re-sync rebuilds commit history");
   assert.ok(calls.every((c) => c.previousJson === null));
+  assert.ok(historyCalls.slice(historyBeforeFull).every((c) => c.previousJson == null));
   assert.notEqual((await ownershipSnapshots(db, [1]))[0].calculated_at, "2020-01-01T00:00:00Z");
   console.log("PASS  sync integration, selection/archives, durable commits, restart, resume, incremental checkpoints and full rebuild");
 
@@ -244,8 +321,31 @@ try {
   assert.equal(await lib.touchOwnershipSnapshot(db, 1, meta.replace('"version":1', '"version":999')), false, "stale metadata cannot touch a different snapshot");
   sqlite.exec("UPDATE line_ownership SET snapshot = 'invalid json' WHERE repo_id = 1");
   assert.equal(await lib.ownershipMetadata(db, 1), null, "invalid checkpoints rebuild");
+  assert.ok((await lib.ownershipHistory(db, [1])).length > 0);
   await lib.clearAnalytics(db);
   assert.equal(await ownershipCheckpoint(db, 1), null);
+  assert.equal((await lib.ownershipHistory(db, [1])).length, 0, "analytics reset clears commit history");
+  const older = "e".repeat(40);
+  const later = "f".repeat(40);
+  const point = (sha, committedAt, lines) => ({
+    revision: sha, committedAt, totalLines: lines, coauthoredLines: 0,
+    authors: [{ author: "Alice", names: ["Alice"], emails: ["alice@x"], lines }],
+  });
+  await lib.writeOwnershipHistory(db, 1, older, {
+    reset: true, done: false, checkpoint: snapshot(older), points: [point(older, "2020-06-01T01:00:00Z", 1)],
+  });
+  await lib.writeOwnershipHistory(db, 1, later, {
+    reset: false, done: true, checkpoint: snapshot(later),
+    points: [
+      point("ab".repeat(20), "2020-06-01T21:00:00+02:00", 4),
+      point(later, "2020-06-01T20:00:00Z", 7),
+    ],
+  });
+  const daily = await lib.ownershipHistory(db, [1]);
+  assert.equal(daily.length, 1, "the last commit of a UTC day is the chart point, including offset timestamps");
+  assert.equal(daily[0].authors[0].lines, 7);
+  assert.equal(daily[0].committedAt, "2020-06-01T20:00:00Z");
+  assert.equal(await lib.ownershipHistoryCovers(db, 1, later), true);
   console.log("PASS  failed fetch/write retention, cancellation, retry and analytics reset");
 } finally {
   sqlite?.close();

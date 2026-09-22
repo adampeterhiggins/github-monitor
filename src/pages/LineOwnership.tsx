@@ -2,13 +2,13 @@ import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useApp } from "../lib/state/app";
 import { PageShell } from "../components/PageShell";
-import { LineOwnershipCharts } from "../components/LineOwnershipCharts";
+import { LineOwnershipCharts, OwnershipHistoryChart } from "../components/LineOwnershipCharts";
 import { UserFilter } from "../components/UserFilter";
 import { RepoFilter } from "../components/RepoFilter";
 import { Button, Callout, Card, CardHeader, DataTable, EmptyState, Spinner, StatTile, full } from "../components/ui";
 import { aggregateOwnership, ownershipContributors, downloadOwnership, type GroupBy, type OwnershipReport } from "../lib/lineOwnership";
 import { NO_CONTRIBUTORS } from "../lib/contributorSelection";
-import { ownershipSnapshots } from "../lib/db/lineOwnership";
+import { ownershipHistory, ownershipSnapshots } from "../lib/db/lineOwnership";
 
 export function LineOwnership() {
   const db = useApp((s) => s.db);
@@ -25,7 +25,14 @@ export function LineOwnership() {
     // Completed repositories become visible while the rest of the org syncs.
     refetchInterval: syncing ? 5000 : false,
   });
+  const history = useQuery({
+    queryKey: ["line-ownership-history", repoIds.join(","), syncing],
+    enabled: db != null && repoIds.length > 0,
+    queryFn: () => ownershipHistory(db!, repoIds),
+    refetchInterval: syncing ? 5000 : false,
+  });
   const rows = repoIds.length ? snapshots.data ?? [] : [];
+  const historyPoints = repoIds.length ? history.data ?? [] : [];
   const chartRepositories = useMemo(() => rows.filter((r) => r.report != null).map((r) => ({ id: r.repo_id, name: r.full_name })), [rows]);
   const reports = useMemo(() => rows.map((r) => r.report).filter((r): r is OwnershipReport => r != null), [rows]);
   const contributors = useMemo(() => ownershipContributors(reports, botPatterns), [reports, botPatterns]);
@@ -52,6 +59,7 @@ export function LineOwnership() {
       </div>}>
       {syncing && <div role="status" className="flex items-center gap-2 text-[12px] text-ink-secondary"><Spinner /> Sync in progress. Completed repositories appear as they are saved.</div>}
       {snapshots.error && <Callout tone="critical">Could not load ownership: {snapshots.error.message}</Callout>}
+      {history.error && <Callout tone="critical">Could not load ownership history: {history.error.message}</Callout>}
       {snapshots.isLoading && <div role="status"><Spinner /> Loading saved ownership…</div>}
       {!repoIds.length ? <EmptyState title="No repositories selected" body="Choose repositories in the filter above." /> : !snapshots.isLoading && !reports.length ?
         <EmptyState title="No line ownership synced yet" body="Run Sync now in Settings & sync. Line ownership is calculated and saved for every selected repository alongside the other analytics. Full re-sync rebuilds it from scratch." /> : null}
@@ -67,6 +75,8 @@ export function LineOwnership() {
           <StatTile label="Co-authored lines" value={full(summary.coauthoredLines)} hint={`${full(summary.creditedLines)} person-line credits`} />
           <StatTile label="Repositories" value={`${full(reports.length)} / ${full(repoIds.length)}`} hint="With a saved ownership snapshot" />
         </div>
+        {historyPoints.length === 0 && !history.isLoading && <p className="text-[12px] text-ink-muted">Ownership history builds during sync. The daily chart appears once each default-branch commit has been recorded.</p>}
+        {historyPoints.length > 0 && <OwnershipHistoryChart points={historyPoints} selectedLogins={selectedLogins} />}
         <LineOwnershipCharts summary={summary} repositories={chartRepositories} />
         <p className="text-[12px] text-ink-muted">Person grouping merges shared names and emails across repositories. Use Email to separate people who share a name. The contributor selector shares selections with other pages; Deselect bots removes detected bots from that selection.</p>
       </>}

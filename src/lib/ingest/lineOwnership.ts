@@ -1,6 +1,6 @@
 import type Database from "@tauri-apps/plugin-sql";
 import { Channel, invoke } from "@tauri-apps/api/core";
-import { ownershipCheckpoint, ownershipMetadata, touchOwnershipSnapshot, writeOwnershipSnapshot } from "../db/lineOwnership";
+import { clearOwnershipHistory, ownershipCheckpoint, ownershipHistoryCache, ownershipHistoryCovers, ownershipMetadata, touchOwnershipSnapshot, writeOwnershipHistory, writeOwnershipSnapshot, type OwnershipHistoryBatch } from "../db/lineOwnership";
 
 interface Progress { completed: number; total: number; phase: string }
 export async function syncOwnershipRepo(options: {
@@ -33,18 +33,36 @@ export async function syncOwnershipRepo(options: {
       githubRepo: fullName, jobId, token, metadata, onProgress: progressChannel(),
     });
     aborted();
-    if (!full && prepared.unchanged && metadataJson && await touchOwnershipSnapshot(db, repoId, metadataJson)) {
-      aborted();
+    const headUnchanged = !full && prepared.unchanged && metadataJson != null && metadata != null
+      && await touchOwnershipSnapshot(db, repoId, metadataJson);
+    if (headUnchanged) {
       options.onProgress?.({ completed: 0, total: 0, phase: "Ownership unchanged" });
-      return;
+    } else {
+      const previousJson = full ? null : await ownershipCheckpoint(db, repoId);
+      aborted();
+      const snapshot = await invoke<string>("sync_line_ownership", {
+        githubRepo: fullName, jobId, revision: prepared.revision, previousJson, onProgress: progressChannel(),
+      });
+      aborted();
+      await writeOwnershipSnapshot(db, repoId, snapshot, full);
     }
-    const previousJson = full ? null : await ownershipCheckpoint(db, repoId);
     aborted();
-    const snapshot = await invoke<string>("sync_line_ownership", {
-      githubRepo: fullName, jobId, revision: prepared.revision, previousJson, onProgress: progressChannel(),
-    });
-    aborted();
-    await writeOwnershipSnapshot(db, repoId, snapshot, full);
+    // The current snapshot is already saved. History continues from its own
+    // checkpoint, and a full rebuild drops the old points only after that save.
+    if (!full && headUnchanged && await ownershipHistoryCovers(db, repoId, prepared.revision)) return;
+    if (full) await clearOwnershipHistory(db, repoId);
+    for (let step = 0; step < 100_000; step++) {
+      aborted();
+      const cache = await ownershipHistoryCache(db, repoId);
+      const batch = await invoke<OwnershipHistoryBatch>("advance_line_ownership_history", {
+        githubRepo: fullName, jobId, revision: prepared.revision, previousJson: cache, onProgress: progressChannel(),
+      });
+      aborted();
+      if (!batch.done && (!batch.checkpoint || batch.points.length === 0)) throw new Error("Ownership history made no progress");
+      await writeOwnershipHistory(db, repoId, prepared.revision, batch);
+      if (batch.done) return;
+    }
+    throw new Error("Ownership history did not finish");
   } catch (error) {
     aborted();
     throw error;

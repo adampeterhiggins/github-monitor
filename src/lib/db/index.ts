@@ -297,6 +297,8 @@ export async function getSyncState(
 export async function clearAnalytics(db: Database): Promise<void> {
   const tables = [
     "line_ownership",
+    "line_ownership_history",
+    "line_ownership_history_state",
     "contributor_weeks",
     "commit_activity",
     "participation",

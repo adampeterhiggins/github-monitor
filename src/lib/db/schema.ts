@@ -13,7 +13,7 @@
  * series with empty weeks and keeping them would multiply row counts for nothing.
  */
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 export const SCHEMA_SQL = `
 -- One atomic snapshot keeps the summary, revision and incremental file cache aligned.
@@ -23,6 +23,26 @@ CREATE TABLE IF NOT EXISTS line_ownership (
   calculated_at TEXT NOT NULL,
   checked_at TEXT NOT NULL,
   snapshot TEXT NOT NULL
+);
+
+-- One small row per default-branch commit. The file cache stays singular, in
+-- line_ownership_history_state, and is replaced as the walk advances.
+CREATE TABLE IF NOT EXISTS line_ownership_history (
+  repo_id INTEGER NOT NULL,
+  revision TEXT NOT NULL,
+  committed_at TEXT NOT NULL,
+  total_lines INTEGER NOT NULL,
+  coauthored_lines INTEGER NOT NULL,
+  authors_json TEXT NOT NULL,
+  PRIMARY KEY (repo_id, revision)
+);
+CREATE INDEX IF NOT EXISTS idx_line_ownership_history_repo_time
+  ON line_ownership_history (repo_id, committed_at);
+CREATE TABLE IF NOT EXISTS line_ownership_history_state (
+  repo_id INTEGER PRIMARY KEY,
+  revision TEXT NOT NULL,
+  target TEXT NOT NULL,
+  cache TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS meta (

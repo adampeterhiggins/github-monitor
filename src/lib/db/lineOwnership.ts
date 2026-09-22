@@ -1,7 +1,7 @@
 import type Database from "@tauri-apps/plugin-sql";
-import type { OwnershipReport } from "../lineOwnership";
+import type { OwnershipHistoryAuthor, OwnershipHistoryPoint, OwnershipReport } from "../lineOwnership";
 import { Params } from "./params";
-import { withWriteLock } from ".";
+import { bulkInsert, withWriteLock } from ".";
 
 export interface OwnershipSnapshotRow {
   repo_id: number;
@@ -79,4 +79,98 @@ export async function ownershipSnapshots(db: Database, repoIds: number[]): Promi
      WHERE r.id IN (${ids}) ORDER BY r.full_name`, p.values,
   );
   return rows.map(({ report_json, ...row }) => ({ ...row, report: report_json ? JSON.parse(report_json) as OwnershipReport : null }));
+}
+
+export interface OwnershipHistoryBatch {
+  points: Array<{
+    revision: string;
+    committedAt: string;
+    totalLines: number;
+    coauthoredLines: number;
+    authors: OwnershipHistoryAuthor[];
+  }>;
+  checkpoint: string;
+  reset: boolean;
+  done: boolean;
+}
+
+/** The rolling file cache for the history walk. An empty checkpoint means start over. */
+export async function ownershipHistoryCache(db: Database, repoId: number): Promise<string | null> {
+  const rows = await db.select<Array<{ cache: string }>>(
+    "SELECT cache FROM line_ownership_history_state WHERE repo_id = $1", [repoId],
+  );
+  const cache = rows[0]?.cache;
+  return cache ? cache : null;
+}
+
+/** True when the saved walk already ends at this default-branch commit. */
+export async function ownershipHistoryCovers(db: Database, repoId: number, revision: string): Promise<boolean> {
+  const rows = await db.select<Array<{ revision: string }>>(
+    "SELECT revision FROM line_ownership_history_state WHERE repo_id = $1", [repoId],
+  );
+  return rows[0]?.revision === revision;
+}
+
+export async function clearOwnershipHistory(db: Database, repoId: number): Promise<void> {
+  await withWriteLock(async () => {
+    await db.execute("DELETE FROM line_ownership_history WHERE repo_id = $1", [repoId]);
+    await db.execute("DELETE FROM line_ownership_history_state WHERE repo_id = $1", [repoId]);
+  });
+}
+
+/** Points are written before the cursor moves, so a crash retries this batch. */
+export async function writeOwnershipHistory(
+  db: Database, repoId: number, target: string, batch: OwnershipHistoryBatch,
+): Promise<void> {
+  await withWriteLock(async () => {
+    if (batch.reset) {
+      await db.execute("DELETE FROM line_ownership_history WHERE repo_id = $1", [repoId]);
+      await db.execute("DELETE FROM line_ownership_history_state WHERE repo_id = $1", [repoId]);
+    }
+    await bulkInsert(db, {
+      table: "line_ownership_history",
+      columns: ["repo_id", "revision", "committed_at", "total_lines", "coauthored_lines", "authors_json"],
+      rows: batch.points.map((point) => [
+        repoId, point.revision, point.committedAt, point.totalLines, point.coauthoredLines,
+        JSON.stringify(point.authors),
+      ]),
+      conflictColumns: ["repo_id", "revision"],
+      onConflict: "replace",
+    });
+    const cursor = batch.points.length
+      ? batch.points[batch.points.length - 1].revision
+      : batch.done ? target : null;
+    if (cursor == null) return;
+    await db.execute(
+      `INSERT INTO line_ownership_history_state (repo_id, revision, target, cache)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (repo_id) DO UPDATE SET
+         revision = excluded.revision, target = excluded.target, cache = excluded.cache`,
+      [repoId, cursor, target, batch.checkpoint],
+    );
+  });
+}
+
+/** Last saved point per repository per UTC day. Days with no commit are filled in later. */
+export async function ownershipHistory(db: Database, repoIds: number[]): Promise<OwnershipHistoryPoint[]> {
+  if (!repoIds.length) return [];
+  const p = new Params();
+  const rows = await db.select<Array<{ repo_id: number; committed_at: string; authors_json: string }>>(
+    `SELECT repo_id, committed_at, authors_json FROM (
+       SELECT repo_id, committed_at, authors_json,
+         ROW_NUMBER() OVER (
+           PARTITION BY repo_id, date(committed_at)
+           ORDER BY datetime(committed_at) DESC, revision DESC
+         ) AS rn
+       FROM line_ownership_history
+       WHERE repo_id IN ${p.in(repoIds)}
+     ) WHERE rn = 1
+     ORDER BY committed_at, repo_id`,
+    p.values,
+  );
+  return rows.map((row) => ({
+    repoId: row.repo_id,
+    committedAt: row.committed_at,
+    authors: JSON.parse(row.authors_json) as OwnershipHistoryAuthor[],
+  }));
 }
