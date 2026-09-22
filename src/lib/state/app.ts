@@ -44,6 +44,7 @@ interface AppState {
    * "every contributor", not "none". Repositories are an explicit opt-in list,
    * whereas a contributor filter is a narrowing applied on top — so the default
    * of "no logins chosen" has to mean unfiltered, or every page would start blank.
+   * NO_CONTRIBUTORS represents an explicit empty selection after deselection.
    */
   selectedLogins: string[];
 

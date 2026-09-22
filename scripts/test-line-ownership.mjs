@@ -11,7 +11,7 @@ const work = mkdtempSync(join(tmpdir(), "gm-ownership-"));
 let sqlite;
 try {
   const output = join(work, "ownership.cjs");
-  const modules = ["src/lib/lineOwnership.ts", "src/lib/db/lineOwnership.ts", "src/lib/db/index.ts", "src/lib/db/schema.ts", "src/lib/ingest/sync.ts"];
+  const modules = ["src/lib/lineOwnership.ts", "src/lib/contributorSelection.ts", "src/lib/db/lineOwnership.ts", "src/lib/db/index.ts", "src/lib/db/schema.ts", "src/lib/ingest/sync.ts"];
   await build({
     stdin: { contents: modules.map((path) => `export * from ${JSON.stringify(resolve(path))};`).join("\n"), resolveDir: process.cwd() },
     bundle: true, platform: "node", format: "cjs", outfile: output,
@@ -25,6 +25,10 @@ try {
   });
   const lib = createRequire(import.meta.url)(output);
   const { aggregateOwnership, ownershipCsv, ownershipSnapshots, ownershipCheckpoint, runSync } = lib;
+  const withoutBots = (reports, groupBy, patterns = []) => {
+    const contributors = lib.ownershipContributors(reports, patterns);
+    return aggregateOwnership(reports, groupBy, lib.deselectContributors([], contributors, contributors.filter((c) => c.isBot)));
+  };
   const alice = { name: "Alice", email: "alice@x" };
   const alias = { name: "Alias", email: "work@x" };
   const bot = { name: "robot[bot]", email: "bot@x" };
@@ -35,8 +39,8 @@ try {
   assert.equal(merged.creditedLines, 7, "cross-repo alias merging must not double-credit co-authored lines");
   assert.equal(aggregateOwnership(reports, "email").creditedLines, 12);
   const bots = [{ credits: [{ lines: 3, people: [bot] }, { lines: 4, people: [bot, alice] }] }];
-  assert.equal(aggregateOwnership(bots, "person", true).totalLines, 4);
-  assert.equal(aggregateOwnership(bots, "person", true).creditedLines, 4);
+  assert.equal(withoutBots(bots, "person").totalLines, 4);
+  assert.equal(withoutBots(bots, "person").creditedLines, 4);
   assert.equal(aggregateOwnership([]).totalLines, 0);
   const csv = ownershipCsv({ totalLines: 3, authors: [
     { author: 'Name, "Quoted"', lines: 3, share: 1, emails: ["person@example.com"] },
@@ -58,7 +62,7 @@ try {
     { credits: [{ lines: 1, people: [{ name: "Claude", email: "noreply@anthropic.com" }] }] },
   ];
   for (const group of ["person", "email", "name"]) {
-    const filtered = aggregateOwnership(agentReports, group, true, ["claude", "cursoragent"]);
+    const filtered = withoutBots(agentReports, group, ["claude", "cursoragent"]);
     assert.equal(filtered.authors.length, 1, `${group}: exact configured aliases cover model-name variants and email usernames`);
     assert.equal(filtered.totalLines, 9, "human coauthored lines remain; bot-only lines leave the denominator");
     assert.equal(filtered.coauthoredLines, 0);
@@ -66,17 +70,52 @@ try {
     assert.equal(filtered.byRepository[1].authors.length, 0);
     assert.equal(filtered.byRepository[1].totalLines, 0);
   }
-  assert.equal(aggregateOwnership(agentReports, "person", true).authors.length, 3, "AI names are governed by the same user patterns, not guessed by this page");
+  assert.equal(withoutBots(agentReports, "person").authors.length, 3, "AI names are governed by the same user patterns, not guessed by this page");
   const onlyFable = [{ credits: [{ lines: 3, people: [{ name: "Claude Fable 5", email: "noreply@anthropic.com" }] }] }];
-  assert.equal(aggregateOwnership(onlyFable, "person", true, ["CLAUDE*"]).authors.length, 0);
-  assert.equal(aggregateOwnership(onlyFable, "person", false, ["CLAUDE*"]).authors.length, 1, "unchecked filter never hides bots");
-  assert.equal(aggregateOwnership(onlyFable, "person", true, []).authors.length, 1, "changing saved patterns recomputes classification");
+  assert.equal(withoutBots(onlyFable, "person", ["CLAUDE*"]).authors.length, 0);
+  assert.equal(aggregateOwnership(onlyFable, "person").authors.length, 1, "All contributors includes bots");
+  assert.equal(withoutBots(onlyFable, "person", []).authors.length, 1, "changing saved patterns recomputes classification");
   const builtinBots = [{ credits: [
     { lines: 2, people: [{ name: "build-bot", email: "build@example.com" }] },
     { lines: 3, people: [{ name: "Automation", email: "123+dependabot[bot]@users.noreply.github.com" }] },
     { lines: 5, people: [{ name: "Abbott", email: "abbott@example.com" }] },
   ] }];
-  assert.equal(aggregateOwnership(builtinBots, "person", true).totalLines, 5);
+  assert.equal(withoutBots(builtinBots, "person").totalLines, 5);
+  const contributorOptions = lib.ownershipContributors(agentReports, ["claude", "cursoragent"]);
+  assert.equal(contributorOptions.length, 3, "the selector groups aliases as people");
+  const agentOptions = contributorOptions.filter((c) => c.isBot);
+  assert.equal(agentOptions.length, 2);
+  const humans = lib.deselectContributors([], contributorOptions, agentOptions);
+  assert.deepEqual(humans, ["Alice"], "Deselect bots names the remaining contributors from All");
+  for (const group of ["person", "email", "name"]) {
+    const selected = aggregateOwnership(agentReports, group, humans);
+    assert.equal(selected.totalLines, 9);
+    assert.equal(selected.creditedLines, 9);
+    assert.equal(selected.coauthoredLines, 0);
+    assert.equal(selected.byRepository[1].totalLines, 0);
+    assert.ok(selected.authors.every((a) => a.names.includes("Alice")));
+    const claude = aggregateOwnership(agentReports, group, ["CLAUDE"]);
+    assert.equal(claude.totalLines, 10, "alias selections include model variants in all groupings");
+    assert.equal(claude.coauthoredLines, 0);
+  }
+  assert.deepEqual(lib.deselectContributors(["CLAUDE", "Alice"], contributorOptions, agentOptions), ["Alice"], "bot deselection recognises selected aliases");
+  const none = lib.deselectContributors(["Claude"], contributorOptions, agentOptions);
+  assert.deepEqual(none, [lib.NO_CONTRIBUTORS]);
+  assert.equal(aggregateOwnership(agentReports, "person", none).totalLines, 0, "deselecting the last bot must not reset to All");
+  assert.equal(aggregateOwnership(agentReports, "person", []).totalLines, 14, "All contributors restores bot credit too");
+  assert.equal(aggregateOwnership(agentReports, "person", ["missing-user"]).totalLines, 0, "unmatched saved selections never fall back to All");
+  const githubReports = [{ credits: [
+    { lines: 6, people: [{ name: "Alice Smith", email: "123+alice-dev@users.noreply.github.com" }] },
+    { lines: 3, people: [{ name: "Alice Smith", email: "alice@company.com" }, bot] },
+  ] }];
+  const githubOptions = lib.ownershipContributors(githubReports);
+  assert.equal(githubOptions.find((c) => !c.isBot).login, "alice-dev");
+  for (const group of ["person", "email", "name"]) {
+    assert.equal(aggregateOwnership(githubReports, group, ["ALICE-DEV"]).totalLines, 9, "GitHub selections include the person's other emails");
+  }
+  assert.equal(aggregateOwnership(githubReports, "person", ["unrelated"]).authors.length, 0);
+  console.log("PASS  shared contributor contributorOptions, bot deselection, empty selection, alias/GitHub matching and filtered chart totals");
+
   console.log("PASS  chart cells share global identities and totals; shared bot patterns cover aliases, model variants, email usernames and built-ins");
 
 

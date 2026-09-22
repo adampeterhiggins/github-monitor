@@ -26,7 +26,7 @@ export type GroupBy = "person" | "email" | "name";
 
 /** Merge identities over the whole selection before assigning credit, so an
  * alias connecting two co-authors across repositories cannot double-count a line. */
-export function aggregateOwnership(reports: OwnershipReport[], groupBy: GroupBy = "person", excludeBots = false, botPatterns: readonly string[] = []) {
+export function aggregateOwnership(reports: OwnershipReport[], groupBy: GroupBy = "person", selectedContributors: readonly string[] = []) {
   const normalize = (s: string) => s.trim().replace(/\s+/g, " ").toLowerCase();
   const keyOf = (p: Identity) => p.email ? `email:${p.email.toLowerCase()}` : `name:${normalize(p.name)}`;
   const parents = new Map<string, string>();
@@ -50,17 +50,12 @@ export function aggregateOwnership(reports: OwnershipReport[], groupBy: GroupBy 
   }
   const groupKey = (p: Identity) => groupBy === "person" ? root(keyOf(p)) : groupBy === "email"
     ? p.email.toLowerCase() || normalize(p.name) : normalize(p.name) || p.email.toLowerCase();
-  // Match every alias before crediting lines. A configured `claude` alias also
-  // identifies `Claude Fable 5` when both use the same email, in every grouping.
-  const botEmails = new Set<string>();
-  const botKeys = new Set<string>();
-  if (excludeBots) {
-    for (const p of identities.values()) {
-      if (p.email && isBotIdentity(p, botPatterns)) botEmails.add(p.email.toLowerCase());
-    }
-    for (const p of identities.values()) {
-      if (isBotIdentity(p, botPatterns) || (p.email && botEmails.has(p.email.toLowerCase()))) botKeys.add(groupKey(p));
-    }
+  // Resolve selection as people before applying the presentation grouping. A
+  // GitHub login selected elsewhere must include all of that person's aliases.
+  const selected = new Set(selectedContributors.map((value) => value.toLowerCase()));
+  const selectedPeople = new Set<string>();
+  if (selected.size) for (const p of identities.values()) {
+    if (identitySelections(p).some((value) => selected.has(value.toLowerCase()))) selectedPeople.add(root(keyOf(p)));
   }
   const authors = new Map<string, { names: Set<string>; emails: Set<string>; lines: number }>();
   let totalLines = 0;
@@ -73,7 +68,7 @@ export function aggregateOwnership(reports: OwnershipReport[], groupBy: GroupBy 
       const seen = new Set<string>();
       for (const p of credit.people) {
         const key = groupKey(p);
-        if (!key || botKeys.has(key)) continue;
+        if (!key || (selected.size > 0 && !selectedPeople.has(root(keyOf(p))))) continue;
         const author = authors.get(key) ?? { names: new Set<string>(), emails: new Set<string>(), lines: 0 };
         if (p.name) author.names.add(p.name);
         if (p.email) author.emails.add(p.email.toLowerCase());
@@ -106,6 +101,36 @@ export function aggregateOwnership(reports: OwnershipReport[], groupBy: GroupBy 
     })).sort((a, b) => b.lines - a.lines || a.author.localeCompare(b.author)),
   }));
   return { authors: rows, totalLines, creditedLines: rows.reduce((n, a) => n + a.lines, 0), coauthoredLines, byRepository };
+}
+
+/** GitHub noreply addresses provide an explicit login; other addresses do not. */
+function githubLogin(email: string): string | null {
+  const match = email.match(/^(?:\d+\+)?([^@]+)@users\.noreply\.github\.com$/i);
+  return match?.[1] ?? null;
+}
+
+function identitySelections(identity: Identity): string[] {
+  return [identity.name, identity.email, githubLogin(identity.email) ?? ""].filter(Boolean);
+}
+
+/** Snapshot contributors use the shared selector and selection store. Keep all
+ * aliases searchable/selectable, independent of the table's grouping mode. */
+export function ownershipContributors(reports: OwnershipReport[], botPatterns: readonly string[] = []) {
+  const summary = aggregateOwnership(reports);
+  const repositoryCounts = new Map<string, number>();
+  for (const repo of summary.byRepository) for (const author of repo.authors) {
+    repositoryCounts.set(author.key, (repositoryCounts.get(author.key) ?? 0) + 1);
+  }
+  return summary.authors.map((author) => {
+    const aliases = [...new Set([...author.names, ...author.emails, ...author.emails.map(githubLogin).filter((s): s is string => s != null)])];
+    const login = author.emails.map(githubLogin).find((s) => s != null) ?? author.author;
+    return {
+      login, aliases, commits: author.lines, commits_all: author.lines,
+      repos: repositoryCounts.get(author.key) ?? 0,
+      isBot: author.names.some((name) => isBotIdentity({ name, email: "" }, botPatterns)) ||
+        author.emails.some((email) => isBotIdentity({ name: "", email }, botPatterns)),
+    };
+  });
 }
 
 export function ownershipCsv(report: { authors: OwnershipAuthor[]; totalLines: number }): string {

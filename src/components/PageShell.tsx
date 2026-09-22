@@ -25,7 +25,7 @@ export function PageShell({
   children: ReactNode;
   filters?: boolean;
   filterExtra?: ReactNode;
-  /** Custom filter row for snapshot views without a date or GitHub-login dimension. */
+  /** Custom filter row for snapshot views without a date dimension. */
   filterContent?: ReactNode;
   requiresData?: boolean;
   userFilter?: UserFilterSupport;

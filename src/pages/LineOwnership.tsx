@@ -3,9 +3,11 @@ import { useQuery } from "@tanstack/react-query";
 import { useApp } from "../lib/state/app";
 import { PageShell } from "../components/PageShell";
 import { LineOwnershipCharts } from "../components/LineOwnershipCharts";
+import { UserFilter } from "../components/UserFilter";
 import { RepoFilter } from "../components/RepoFilter";
 import { Button, Callout, Card, CardHeader, DataTable, EmptyState, Spinner, StatTile, full } from "../components/ui";
-import { aggregateOwnership, downloadOwnership, type GroupBy, type OwnershipReport } from "../lib/lineOwnership";
+import { aggregateOwnership, ownershipContributors, downloadOwnership, type GroupBy, type OwnershipReport } from "../lib/lineOwnership";
+import { NO_CONTRIBUTORS } from "../lib/contributorSelection";
 import { ownershipSnapshots } from "../lib/db/lineOwnership";
 
 export function LineOwnership() {
@@ -14,7 +16,7 @@ export function LineOwnership() {
   const syncing = useApp((s) => s.syncing);
   const botPatterns = useApp((s) => s.botPatterns);
   const [groupBy, setGroupBy] = useState<GroupBy>("person");
-  const [excludeBots, setExcludeBots] = useState(false);
+  const selectedLogins = useApp((s) => s.selectedLogins);
   const repoIds = [...selectedRepoIds].sort((a, b) => a - b);
   const snapshots = useQuery({
     queryKey: ["line-ownership", repoIds.join(","), syncing],
@@ -26,24 +28,25 @@ export function LineOwnership() {
   const rows = repoIds.length ? snapshots.data ?? [] : [];
   const chartRepositories = useMemo(() => rows.filter((r) => r.report != null).map((r) => ({ id: r.repo_id, name: r.full_name })), [rows]);
   const reports = useMemo(() => rows.map((r) => r.report).filter((r): r is OwnershipReport => r != null), [rows]);
-  const summary = useMemo(() => aggregateOwnership(reports, groupBy, excludeBots, botPatterns), [reports, groupBy, excludeBots, botPatterns]);
+  const contributors = useMemo(() => ownershipContributors(reports, botPatterns), [reports, botPatterns]);
+  const summary = useMemo(() => aggregateOwnership(reports, groupBy, selectedLogins), [reports, groupBy, selectedLogins]);
   const filteredLinesByRepo = useMemo(() => new Map(chartRepositories.map((r, i) => [r.id, summary.byRepository[i].totalLines])), [chartRepositories, summary]);
   const missing = rows.filter((r) => !r.report).length;
   const failed = rows.filter((r) => r.status === "error").length;
   const exportReport = { authors: summary.authors, totalLines: summary.totalLines, creditedLines: summary.creditedLines,
-    coauthoredLines: summary.coauthoredLines, groupBy, excludeBots, botPatterns, repositories: rows.map((r) => ({
+    coauthoredLines: summary.coauthoredLines, groupBy, selectedContributors: selectedLogins.length ? selectedLogins.filter((login) => login !== NO_CONTRIBUTORS) : null, repositories: rows.map((r) => ({
     repository: r.full_name, revision: r.revision, calculatedAt: r.calculated_at, checkedAt: r.checked_at, status: r.status, totalLines: filteredLinesByRepo.get(r.repo_id) ?? null,
   })) };
   return (
     <PageShell title="Line ownership" subtitle="Who owns the surviving code across your organisation" filters={false} requiresData={false}
       filterContent={<div className="flex flex-wrap items-center gap-3 border-b border-hairline bg-plane px-5 py-2.5">
         <RepoFilter />
+        <UserFilter support="full" snapshot={{ contributors, isLoading: snapshots.isLoading }} />
         <label className="flex items-center gap-2 text-[12px] text-ink-secondary">Group by
           <select className="rounded-md border border-hairline bg-surface px-2 py-1 text-ink" value={groupBy} onChange={(e) => setGroupBy(e.target.value as GroupBy)}>
             <option value="person">Person</option><option value="email">Email</option><option value="name">Name</option>
           </select>
         </label>
-        <label className="text-[12px] text-ink-secondary" title="Uses the shared bot patterns from Settings → Bots and agents, matched against every name and email alias."><input type="checkbox" checked={excludeBots} onChange={(e) => setExcludeBots(e.target.checked)} /> Exclude bots</label>
         {reports.length > 0 && <><Button onClick={() => downloadOwnership(exportReport, "csv")}>Export CSV</Button><Button onClick={() => downloadOwnership(exportReport, "json")}>Export JSON</Button></>}
         <span className="ml-auto text-[11px] text-ink-muted">Latest synced default branches</span>
       </div>}>
@@ -65,7 +68,7 @@ export function LineOwnership() {
           <StatTile label="Repositories" value={`${full(reports.length)} / ${full(repoIds.length)}`} hint="With a saved ownership snapshot" />
         </div>
         <LineOwnershipCharts summary={summary} repositories={chartRepositories} />
-        <p className="text-[12px] text-ink-muted">Person grouping merges shared names and emails across repositories. Use Email to separate people who share a name. Exclude bots uses the same built-in rules and saved patterns as the other pages.</p>
+        <p className="text-[12px] text-ink-muted">Person grouping merges shared names and emails across repositories. Use Email to separate people who share a name. The contributor selector shares selections with other pages; Deselect bots removes detected bots from that selection.</p>
       </>}
       {rows.length > 0 && <Card>
         <CardHeader title="Repository snapshots" subtitle="Saved commit and last successful calculation for each repository. Sync changes updates touched files; Full re-sync rebuilds all ownership." />
@@ -76,7 +79,7 @@ export function LineOwnership() {
           { key: "calculated", header: "Calculated", render: (r) => r.calculated_at ? new Date(r.calculated_at).toLocaleString() : "—", sortValue: (r) => r.calculated_at ?? "" },
           { key: "status", header: "Last sync", render: (r) => <span title={r.error ?? (r.checked_at ? `Checked ${new Date(r.checked_at).toLocaleString()}` : undefined)}>{r.status === "error" ? `Failed${r.report ? " · showing saved data" : ""}: ${r.error ?? "Unknown error"}` : r.status === "pending" ? `${syncing ? "Updating" : "Interrupted"}${r.report ? " · showing saved data" : ""}` : r.report ? "Synced" : "Not yet synced"}</span> },
         ]} />
-        <p className="mt-3 text-[12px] text-ink-muted">Line totals follow the grouping and bot filters. Attribution ignores whitespace-only edits. Generated files, binaries, symlinks and submodules are excluded. {full(reports.reduce((n, r) => n + Object.values(r.filesSkipped).reduce((a, b) => a + b, 0), 0))} files skipped across these snapshots.</p>
+        <p className="mt-3 text-[12px] text-ink-muted">Line totals follow the grouping and contributor filters. Attribution ignores whitespace-only edits. Generated files, binaries, symlinks and submodules are excluded. {full(reports.reduce((n, r) => n + Object.values(r.filesSkipped).reduce((a, b) => a + b, 0), 0))} files skipped across these snapshots.</p>
       </Card>}
     </PageShell>
   );

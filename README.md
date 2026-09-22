@@ -88,26 +88,28 @@ trailers are loaded only for commits not already cached. An unchanged head requi
 no new blame work. Git transfers and blame run independently of the API sync queue.
 
 The **Line ownership** page shows surviving-line credit across the selected
-repositories, with Person/Email/Name grouping, bot exclusion and CSV/JSON export.
+repositories, with Person/Email/Name grouping, the shared contributor selector and CSV/JSON export.
 Ranked bars show the top owners and repository concentration. A people × repositories
 heatmap switches between credited lines and share within each repository, with
 expand controls, hover details and complete table alternatives. All charts use the
-same grouping and bot filter as the totals; co-author shares remain based on unique
+same grouping and contributor selection as the totals; co-author shares remain based on unique
 surviving lines rather than being normalized into a 100% stack.
 Identity merging happens across the entire selection before co-author credit is
-counted, so connected aliases cannot credit the same line twice. Bot exclusion uses
-the same built-in rules and saved patterns as the contributor filter, matching Git
-names, email usernames and every alias of an identity. For example, a configured
-`claude` alias also excludes `Claude Fable 5` when they share an email, while
-`claude*` matches model-name variants directly. Changes take effect immediately
-without a re-sync. Each distinct
-co-author gets full credit, so shares can sum above 100%. Bot exclusion removes
-bot-only lines from the share base. Generated files, binary files, symlinks and
-submodules are skipped, and attribution ignores whitespace-only edits.
+counted, so connected aliases cannot credit the same line twice. Contributor
+selections are shared with other pages and can be saved, searched or cleared.
+**Deselect bots** uses the same built-in rules and saved patterns to remove detected
+bots from the selection; it is not a separate filter. Names, email usernames and
+aliases are checked, so a configured `claude` alias also identifies `Claude Fable 5`
+when they share an email. GitHub noreply addresses link Git authors to their logins;
+other authors remain selectable by name or email. Selection applies to every alias
+before Person/Email/Name grouping, and changes take effect without re-syncing.
+Each distinct selected co-author gets full credit, so shares can sum above 100%.
+Lines with no selected authors leave the share base. Generated files, binary files,
+symlinks and submodules are skipped, and attribution ignores whitespace-only edits.
 
 Repository snapshots show the calculated commit and timestamp, including stale
 saved results when a refresh fails. This is a latest-snapshot view, with no date
-range or GitHub-login filter. The existing **Ownership** page continues to measure
+range filter. The existing **Ownership** page continues to measure
 commit concentration.
 
 Managed bare clones live under the app’s cache directory in `line-ownership/`.
