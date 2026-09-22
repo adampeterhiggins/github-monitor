@@ -3,7 +3,7 @@ import { bucketLabel } from "../lib/agg/series";
 import { formatDate } from "../lib/agg/weeks";
 import { ownershipHistoryBuckets, ownershipHistorySeries, type OwnershipHistoryPoint, type OwnershipHistorySplit, type OwnershipPeriod, type OwnershipReading, type aggregateOwnership } from "../lib/lineOwnership";
 import { HeatMatrix, RankedBars, TimelineArea, type TimelineShape } from "./charts";
-import { ChartCard, DataTable, FilterPopover, LabeledControl, Segmented, ViewSelector, full } from "./ui";
+import { ChartCard, DataTable, FilterPopover, LabeledControl, Segmented, full } from "./ui";
 
 type Summary = ReturnType<typeof aggregateOwnership>;
 const percent = (value: number) => `${value.toFixed(1)}%`;
@@ -39,10 +39,10 @@ const HISTORY_READINGS: Array<{ value: OwnershipReading; label: string }> = [
   { value: "period", label: "Per period" },
 ];
 const HISTORY_PERIODS: Array<{ value: OwnershipPeriod; label: string }> = [
-  { value: "day", label: "Daily" },
-  { value: "week", label: "Weekly" },
-  { value: "month", label: "Monthly" },
-  { value: "quarter", label: "Quarterly" },
+  { value: "day", label: "Day" },
+  { value: "week", label: "Week" },
+  { value: "month", label: "Month" },
+  { value: "quarter", label: "Quarter" },
 ];
 const PERIOD_SPAN = { day: "day", week: "week", month: "month", quarter: "quarter" } as const;
 
@@ -115,15 +115,19 @@ export function OwnershipHistoryChart({ points, selectedLogins, repositories }: 
     return next;
   });
   if (!data.length) return null;
-  const changed = shape !== "area" || split !== "people" || seriesLimit !== "8" || stackMode !== "stacked" || values !== "total";
+  const changed = shape !== "area" || split !== "people" || seriesLimit !== "8" || stackMode !== "stacked" || values !== "total" || reading !== "cumulative" || period !== "day";
   const periodLabel = (week: number) => period === "day" ? formatDate(week * 1000) : bucketLabel(week, period);
   return (
     <ChartCard title="Ownership over time"
       subtitle={`Credited lines on the default branch. ${historyCaption(reading, period)} Co-authors each receive full credit, so stacked people can exceed surviving lines.`}
-      titleAfter={<>
-        <ViewSelector ariaLabel="ownership reading" value={reading} options={HISTORY_READINGS} onChange={chooseReading} keyboardNav />
-        <ViewSelector ariaLabel="aggregation period" value={period} options={HISTORY_PERIODS} onChange={choosePeriod} />
+      titleAfter={
         <FilterPopover active={changed} width={356}>
+        <LabeledControl label="Reading">
+          <Segmented ariaLabel="Ownership reading" variant="bare" stretch value={reading} options={HISTORY_READINGS} onChange={chooseReading} />
+        </LabeledControl>
+        <LabeledControl label="Period">
+          <Segmented ariaLabel="Aggregation period" variant="bare" stretch value={period} options={HISTORY_PERIODS} onChange={choosePeriod} />
+        </LabeledControl>
         <Segmented ariaLabel="Chart shape" stretch value={shape} options={HISTORY_SHAPES} onChange={(value) => remember("github-monitor.ownership.shape", value, setShape)} />
         <LabeledControl label="Split by">
           <Segmented ariaLabel="Split ownership" variant="bare" stretch value={split} options={HISTORY_SPLITS} onChange={(value) => remember("github-monitor.ownership.split", value, setSplit)} />
@@ -134,8 +138,8 @@ export function OwnershipHistoryChart({ points, selectedLogins, repositories }: 
         {seriesLimit === "all" && !singleSeries ? <p className="px-0.5 text-[11px] text-ink-muted">Past eight series the colours repeat — the legend and tooltip still name each one.</p> : null}
         <Segmented ariaLabel="Stacking" stretch value={stackMode} options={HISTORY_STACKS} disabled={singleSeries} onChange={(value) => remember("github-monitor.ownership.stackMode", value, setStackMode)} />
         <Segmented ariaLabel="Values" stretch value={values} options={HISTORY_VALUES} disabled={singleSeries} onChange={(value) => remember("github-monitor.ownership.valueMode", value, setValues)} />
-      </FilterPopover>
-      </>}
+        </FilterPopover>
+      }
       table={series.length ? <DataTable rows={plotted} rowKey={(row) => String(row.week)} maxHeight={420} initialSort={{ key: "day", dir: "asc" }} columns={[
         { key: "day", header: "Period", render: (row) => periodLabel(row.week), sortValue: (row) => row.week },
         ...series.map((item) => ({

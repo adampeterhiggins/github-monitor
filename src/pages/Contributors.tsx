@@ -46,7 +46,6 @@ import {
   MenuButton,
   Modal,
   Segmented,
-  ViewSelector,
   compact,
   full,
 } from "../components/ui";
@@ -60,7 +59,7 @@ type Breakdown = "none" | "contributor" | "repository";
  */
 type TimelineView = "cumulative" | Granularity;
 
-/* Module-level so the view selector's key handler is not re-bound every render. */
+/* Module-level so the timeline row is not rebuilt on every render. */
 
 const TIMELINE_VIEWS: Array<{ value: TimelineView; label: string }> = [
   { value: "cumulative", label: "Cumulative" },
@@ -244,7 +243,7 @@ export function Contributors() {
   // weekly series — which also keeps the brush, since that needs weeks.
   const granularity: Granularity = cumulative ? "week" : view;
 
-  /** Stable, so the view selector's key handler is bound once. */
+  /** Stable across renders of the options panel. */
   const chooseView = useCallback((v: TimelineView) => {
     localStorage.setItem("github-monitor.cumulative", String(v === "cumulative"));
     if (v !== "cumulative") localStorage.setItem("github-monitor.granularity", v);
@@ -654,25 +653,25 @@ export function Contributors() {
    * Stacking is not counted on its own: it only takes effect with a breakdown,
    * which is flagged anyway.
    */
-  const viewChanged = breakdown !== "none" || shape !== "bar";
+  const viewChanged = breakdown !== "none" || shape !== "bar" || view !== "week";
 
   /**
    * The controls a contributor card carries when it is opened full screen.
    *
    * The cards follow the page's timeline view, so this is the headline chart's
-   * pair of controls with its breakdown swapped for the two that belong to the
+   * options with its breakdown swapped for the two that belong to the
    * cards — how each one is split, and whether they share a scale. Cheap to build
    * once here and hand to every card: only the open one ever renders it.
    */
   const cardControls = (
-    <>
-      <ViewSelector<TimelineView>
-        ariaLabel="timeline view"
-        value={view}
-        options={TIMELINE_VIEWS}
-        onChange={chooseView}
-      />
-      <FilterPopover active={shape !== "bar" || cardSplit !== "none"} width={356}>
+    <FilterPopover active={shape !== "bar" || cardSplit !== "none" || view !== "week"} width={420}>
+        <Segmented<TimelineView>
+          ariaLabel="Timeline"
+          stretch
+          value={view}
+          onChange={chooseView}
+          options={TIMELINE_VIEWS}
+        />
         <Segmented<TimelineShape>
           ariaLabel="Chart shape"
           stretch
@@ -737,8 +736,7 @@ export function Contributors() {
             options={SCALES_SHORT}
           />
         </LabeledControl>
-      </FilterPopover>
-    </>
+    </FilterPopover>
   );
 
   const grandTotal = cards.reduce((a, c) => a + c[metric], 0);
@@ -794,15 +792,14 @@ export function Contributors() {
           }
           loading={loading}
           titleAfter={
-            <>
-              <ViewSelector<TimelineView>
-                ariaLabel="timeline view"
-                value={view}
-                options={TIMELINE_VIEWS}
-                onChange={chooseView}
-                keyboardNav
-              />
-              <FilterPopover active={viewChanged} width={356}>
+              <FilterPopover active={viewChanged} width={420}>
+                <Segmented<TimelineView>
+                  ariaLabel="Timeline"
+                  stretch
+                  value={view}
+                  onChange={chooseView}
+                  options={TIMELINE_VIEWS}
+                />
                 <Segmented<TimelineShape>
                   ariaLabel="Chart shape"
                   stretch
@@ -856,7 +853,6 @@ export function Contributors() {
                   options={VALUE_MODES}
                 />
               </FilterPopover>
-            </>
           }
           actions={
             <>

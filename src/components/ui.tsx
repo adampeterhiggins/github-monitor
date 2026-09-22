@@ -512,14 +512,14 @@ function Arrow({
   );
 }
 
-/* ── Filter popover ─────────────────────────────────────────────────────────
+/* ── Options popover ────────────────────────────────────────────────────────
    The rest of the chart's controls, behind one icon. The dot marks a view that
-   differs from the default, so a filtered chart never looks like a plain one. */
+   differs from the default, so a customised chart never looks like a plain one. */
 
 export function FilterPopover({
   children,
   active,
-  label = "Chart options",
+  label = "Customise",
   align = "left",
   width = 300,
 }: {
@@ -549,11 +549,14 @@ export function FilterPopover({
         )}
       >
         <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true">
-          <g fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <path d="M3 6h18" />
-            <path d="M7 12h10" />
-            <path d="M10 18h4" />
-          </g>
+          <path
+            d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
         </svg>
         {active ? (
           <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-accent" />
