@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useApp } from "../lib/state/app";
 import { PageShell } from "../components/PageShell";
 import { LineOwnershipCharts, OwnershipHistoryChart } from "../components/LineOwnershipCharts";
@@ -26,12 +26,15 @@ export function LineOwnership() {
     queryFn: () => ownershipSnapshots(db!, repoIds),
     // Completed repositories become visible while the rest of the org syncs.
     refetchInterval: syncing ? 5000 : false,
+    // A new repository selection is a new query. Hold the previous chart until it arrives.
+    placeholderData: keepPreviousData,
   });
   const history = useQuery({
     queryKey: ["line-ownership-history", repoIds.join(","), syncing],
     enabled: db != null && repoIds.length > 0,
     queryFn: () => ownershipHistory(db!, repoIds),
     refetchInterval: syncing ? 5000 : false,
+    placeholderData: keepPreviousData,
   });
   const accounts = useQuery({
     queryKey: ["github-accounts", syncing],
@@ -85,8 +88,8 @@ export function LineOwnership() {
           <StatTile label="Repositories" value={`${full(reports.length)} / ${full(repoIds.length)}`} hint="With a saved ownership snapshot" />
         </div>
         {historyPoints.length === 0 && !history.isLoading && <p className="text-[12px] text-ink-muted">Ownership history builds during sync. The daily chart appears once each default-branch commit has been recorded.</p>}
-        {historyPoints.length > 0 && <OwnershipHistoryChart points={historyPoints} selectedLogins={selectedLogins} accounts={accountMap} repositories={rows.map((row) => ({ id: row.repo_id, name: row.full_name }))} />}
-        <LineOwnershipCharts summary={summary} repositories={chartRepositories} />
+        {historyPoints.length > 0 && <OwnershipHistoryChart points={historyPoints} selectedLogins={selectedLogins} accounts={accountMap} loading={history.isFetching} repositories={rows.map((row) => ({ id: row.repo_id, name: row.full_name }))} />}
+        <LineOwnershipCharts summary={summary} repositories={chartRepositories} loading={snapshots.isFetching} />
         <p className="text-[12px] text-ink-muted">Person grouping merges shared names, emails, and GitHub accounts across repositories. Use Email to separate people who share a name. The contributor selector shares selections with other pages; Deselect bots removes detected bots from that selection.</p>
       </>}
       {rows.length > 0 && <Card>

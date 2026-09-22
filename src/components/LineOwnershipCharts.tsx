@@ -78,11 +78,12 @@ function remember<T>(key: string, value: T, set: (value: T) => void) {
 }
 
 /** Daily first-parent history. Person grouping is fixed because that is what was saved. */
-export function OwnershipHistoryChart({ points, selectedLogins, repositories, accounts }: {
+export function OwnershipHistoryChart({ points, selectedLogins, repositories, accounts, loading }: {
   points: OwnershipHistoryPoint[];
   selectedLogins: readonly string[];
   repositories: Array<{ id: number; name: string }>;
   accounts?: GithubAccounts;
+  loading?: boolean;
 }) {
   const [shape, setShape] = useState<TimelineShape>(() => storedChoice("github-monitor.ownership.shape", ["bar", "area", "line"], "area"));
   const [split, setSplit] = useState<OwnershipHistorySplit>(() => storedChoice("github-monitor.ownership.split", ["people", "repository", "total"], "people"));
@@ -120,7 +121,7 @@ export function OwnershipHistoryChart({ points, selectedLogins, repositories, ac
   const changed = shape !== "area" || split !== "people" || seriesLimit !== "8" || stackMode !== "stacked" || values !== "total" || reading !== "cumulative" || period !== "day";
   const periodLabel = (week: number) => period === "day" ? formatDate(week * 1000) : bucketLabel(week, period);
   return (
-    <ChartCard title="Ownership over time"
+    <ChartCard title="Ownership over time" loading={loading}
       subtitle={`Credited lines on the default branch. ${historyCaption(reading, period)} Co-authors each receive full credit, so stacked people can exceed surviving lines.`}
       titleAfter={
         <FilterPopover active={changed} width={356}>
@@ -162,10 +163,11 @@ export function OwnershipHistoryChart({ points, selectedLogins, repositories, ac
 }
 
 /** All views use the same globally resolved identities and surviving-line base. */
-export function LineOwnershipCharts({ summary, repositories }: {
+export function LineOwnershipCharts({ summary, repositories, loading }: {
   summary: Summary;
   /** Same order as the reports passed to aggregateOwnership. */
   repositories: Array<{ id: number; name: string }>;
+  loading?: boolean;
 }) {
   const [measure, setMeasure] = useState<"share" | "lines">("share");
   const [limit, setLimit] = useState<"12" | "24" | "all">("12");
@@ -191,7 +193,7 @@ export function LineOwnershipCharts({ summary, repositories }: {
 
   return <>
     <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-      <ChartCard title="Top owners"
+      <ChartCard title="Top owners" loading={loading}
         subtitle={`${topAuthors.length < summary.authors.length ? `Top ${topAuthors.length} of ${full(summary.authors.length)} identities` : "Every credited identity"} · share of surviving lines`}
         table={<DataTable rows={summary.authors} rowKey={(a) => a.key} maxHeight={400} initialSort={{ key: "lines", dir: "desc" }} empty="No surviving lines match these filters." columns={[
           { key: "author", header: "Author", render: (a) => a.author, sortValue: (a) => a.author },
@@ -202,7 +204,7 @@ export function LineOwnershipCharts({ summary, repositories }: {
         <RankedBars data={topAuthors.map((a) => ({ name: a.author, value: a.share * 100 }))} height={360}
           domain={[0, 100]} showAxis labelWidth={160} truncateLabels valueLabel="of surviving lines" valueFormatter={percent} />
       </ChartCard>
-      <ChartCard title="Repository concentration"
+      <ChartCard title="Repository concentration" loading={loading}
         subtitle="Highest top-owner shares · all repositories are available in the table"
         table={<DataTable rows={repoRows} rowKey={(r) => r.id} maxHeight={400} initialSort={{ key: "share", dir: "desc" }} columns={[
           { key: "repo", header: "Repository", render: (r) => r.name, sortValue: (r) => r.name },
@@ -216,7 +218,7 @@ export function LineOwnershipCharts({ summary, repositories }: {
       </ChartCard>
     </div>
     <p className="text-[12px] text-ink-muted">Co-authors each receive full credit, so author shares can add up to more than 100%. Repository concentration shows one person’s share of that repository’s surviving lines.</p>
-    <ChartCard title="People × repositories"
+    <ChartCard title="People × repositories" loading={loading}
       subtitle={`${full(matrix.people.length)} of ${full(summary.authors.length)} identities · ${full(matrix.repos.length)} of ${full(repoRows.filter((r) => r.totalLines > 0).length)} repositories with lines · ${measure === "share" ? "colour shows share within each repository" : "colour shows credited lines"}`}
       titleAfter={<div className="flex flex-wrap gap-2">
         <Segmented ariaLabel="Heatmap measure" value={measure} onChange={setMeasure} options={[{ value: "share", label: "Share" }, { value: "lines", label: "Lines" }]} />
