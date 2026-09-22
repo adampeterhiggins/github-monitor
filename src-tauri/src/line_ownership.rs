@@ -110,7 +110,7 @@ struct Snapshot {
     files: BTreeMap<String, CachedFile>,
     coauthors: BTreeMap<String, Vec<Identity>>,
 }
-const SNAPSHOT_VERSION: u32 = 1;
+const SNAPSHOT_VERSION: u32 = 2;
 
 #[cfg(test)]
 fn git(repo: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
@@ -333,9 +333,92 @@ fn root(parents: &BTreeMap<String, String>, key: &str) -> String {
     current.to_owned()
 }
 
+/// Author, committer and trailer identities from every reachable commit.
+///
+/// Blame only sees lines that still exist. An older commit can be the only place
+/// a name and an email occur together, and that pair is what joins the two.
+/// A commit's author and committer are recorded separately: on a merge or rebase
+/// they are often different people.
+fn history_aliases(
+    repo: &Path,
+    revision: &str,
+    cancelled: &AtomicBool,
+) -> Result<Vec<Identity>, String> {
+    let with_trailers = git_text_cancel(
+        repo,
+        &[
+            "log",
+            "--format=%x1e%aN%x1f%aE%x1f%cN%x1f%cE%x1f%(trailers:only,unfold)",
+            "--end-of-options",
+            revision,
+        ],
+        cancelled,
+    );
+    let log = match with_trailers {
+        Ok(log) => log,
+        Err(error) => {
+            check_cancel(cancelled)?;
+            git_text_cancel(
+                repo,
+                &[
+                    "log",
+                    "--format=%x1e%aN%x1f%aE%x1f%cN%x1f%cE",
+                    "--end-of-options",
+                    revision,
+                ],
+                cancelled,
+            )
+            .map_err(|_| error)?
+        }
+    };
+    let mut seen = BTreeSet::new();
+    let mut aliases = Vec::new();
+    let mut push = |name: &str, email: &str| {
+        let name = name.trim();
+        let email = email
+            .trim()
+            .trim_start_matches('<')
+            .trim_end_matches('>')
+            .to_lowercase();
+        if name.is_empty() && email.is_empty() {
+            return;
+        }
+        if seen.insert((name.to_owned(), email.clone())) {
+            aliases.push(Identity {
+                name: name.to_owned(),
+                email,
+            });
+        }
+    };
+    for record in log.split('\u{1e}') {
+        if record.trim().is_empty() {
+            continue;
+        }
+        let mut parts = record.splitn(5, '\u{1f}');
+        let author_name = parts.next().unwrap_or("");
+        let author_email = parts.next().unwrap_or("");
+        let committer_name = parts.next().unwrap_or("");
+        let committer_email = parts.next().unwrap_or("");
+        let trailers = parts.next().unwrap_or("");
+        push(author_name, author_email);
+        push(committer_name, committer_email);
+        for line in trailers.lines() {
+            let Some((_, rest)) = line.split_once(':') else {
+                continue;
+            };
+            let Some((name, email)) = rest.trim().rsplit_once('<') else {
+                continue;
+            };
+            push(name, email);
+        }
+    }
+    Ok(aliases)
+}
+
 fn aggregate(
     commits: &BTreeMap<String, CommitLines>,
     coauthors: &BTreeMap<String, Vec<Identity>>,
+    aliases: &[Identity],
     group: GroupBy,
     exclude_bots: bool,
 ) -> (Vec<AuthorRow>, u64, u64) {
@@ -343,6 +426,7 @@ fn aggregate(
         .values()
         .map(|c| &c.author)
         .chain(coauthors.values().flatten())
+        .chain(aliases)
         .collect();
     let mut parents = BTreeMap::new();
     let mut by_name = BTreeMap::<String, String>::new();
@@ -414,6 +498,20 @@ fn aggregate(
         }
         if seen.len() > 1 {
             coauthored += commit.lines;
+        }
+    }
+    // Historical aliases name the person but do not own the surviving lines.
+    if matches!(group, GroupBy::Person) {
+        for person in aliases {
+            let Some(credit) = credits.get_mut(&root(&parents, &identity_key(person))) else {
+                continue;
+            };
+            if !person.name.is_empty() {
+                credit.names.entry(person.name.clone()).or_default();
+            }
+            if !person.email.is_empty() {
+                credit.emails.entry(person.email.clone()).or_default();
+            }
         }
     }
     fn ranked(counts: BTreeMap<String, u64>) -> Vec<String> {
@@ -522,9 +620,11 @@ fn scan_snapshot(
         None,
         worker_count(),
         false,
+        None,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn scan_snapshot_at(
     options: ScanOptions,
     previous: Option<&Snapshot>,
@@ -533,6 +633,7 @@ fn scan_snapshot_at(
     pinned: Option<&str>,
     workers: usize,
     adjacent: bool,
+    known_aliases: Option<&[Identity]>,
 ) -> Result<Snapshot, String> {
     let git = |repo: &Path, args: &[&str]| git_cancel(repo, args, cancelled);
     let git_text = |repo: &Path, args: &[&str]| {
@@ -576,6 +677,13 @@ fn scan_snapshot_at(
     if git_text(&repo, &["rev-parse", "--is-shallow-repository"])?.trim() == "true" {
         return Err("This clone has shallow history. Fetch its full history (git fetch --unshallow) before scanning.".into());
     }
+    let owned_aliases;
+    let aliases: &[Identity] = if let Some(aliases) = known_aliases {
+        aliases
+    } else {
+        owned_aliases = history_aliases(&repo, &revision, cancelled)?;
+        &owned_aliases
+    };
     let mut changed = BTreeSet::new();
     let previous = previous.filter(|p| {
         p.version == SNAPSHOT_VERSION
@@ -850,8 +958,13 @@ fn scan_snapshot_at(
         }
     }
     check_cancel(cancelled)?;
-    let (authors, total_lines, coauthored_lines) =
-        aggregate(&commits, &coauthors, options.group_by, options.exclude_bots);
+    let (authors, total_lines, coauthored_lines) = aggregate(
+        &commits,
+        &coauthors,
+        aliases,
+        options.group_by,
+        options.exclude_bots,
+    );
     let credits = commits
         .iter()
         .map(|(sha, count)| LineCredit {
@@ -1058,6 +1171,13 @@ fn advance_history(
         .map_err(|_| "Invalid commit count")?;
     let completed_base = total.saturating_sub(commits.len());
     let take = batch_limit.clamp(1, 100).min(commits.len());
+    // One pass over the branch, reused for every commit in the batch. Logging
+    // again per commit would re-read the same history each time.
+    let known_aliases = if take == 0 {
+        Vec::new()
+    } else {
+        history_aliases(Path::new(&options.repo), target, cancelled)?
+    };
     let mut points = Vec::with_capacity(take);
     for (sha, committed_at) in commits.iter().take(take) {
         check_cancel(cancelled)?;
@@ -1075,6 +1195,7 @@ fn advance_history(
             Some(sha),
             worker_count(),
             cache.is_some(),
+            Some(&known_aliases),
         )?;
         points.push(history_point(&snapshot, committed_at.clone()));
         cache = Some(snapshot);
@@ -1308,6 +1429,7 @@ pub async fn sync_line_ownership(
                 Some(&revision),
                 worker_count(),
                 false,
+                None,
             )?
         };
         check_cancel(&active.cancelled)?;
@@ -1683,6 +1805,7 @@ mod tests {
             None,
             1,
             false,
+            None,
         )
         .unwrap();
         for (path, file) in &reference.files {
@@ -1718,6 +1841,7 @@ mod tests {
                 None,
                 workers,
                 false,
+                None,
             )
             .unwrap();
             assert_eq!(
@@ -1901,6 +2025,7 @@ mod tests {
             None,
             1,
             false,
+            None,
         )
         .unwrap();
         assert_eq!(reference.report.revision.len(), 64);
@@ -1933,6 +2058,7 @@ mod tests {
             None,
             4,
             false,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -2101,6 +2227,7 @@ mod tests {
                         Some(&revision),
                         workers,
                         false,
+                        None,
                     )
                     .unwrap();
                     println!(
@@ -2267,7 +2394,7 @@ mod tests {
                 )
             })
             .collect();
-        let (authors, total, _) = aggregate(&commits, &BTreeMap::new(), GroupBy::Person, true);
+        let (authors, total, _) = aggregate(&commits, &BTreeMap::new(), &[], GroupBy::Person, true);
         assert_eq!(total, 4);
         assert_eq!(authors.len(), 1);
         assert_eq!(authors[0].lines, 4);
@@ -2278,14 +2405,81 @@ mod tests {
                 email: "h@x".into(),
             }],
         )]);
-        assert_eq!(aggregate(&commits, &coauthors, GroupBy::Person, true).1, 5);
         assert_eq!(
-            aggregate(&commits, &coauthors, GroupBy::Name, false)
+            aggregate(&commits, &coauthors, &[], GroupBy::Person, true).1,
+            5
+        );
+        assert_eq!(
+            aggregate(&commits, &coauthors, &[], GroupBy::Name, false)
                 .0
                 .len(),
             4
         );
     }
+
+    fn commit_as(repo: &Path, author: &str, message: &str) {
+        git(repo, &["add", "code.txt"]).unwrap();
+        git(repo, &["commit", "--author", author, "-m", message]).unwrap();
+    }
+
+    #[test]
+    fn history_joins_a_rewritten_identity_without_absorbing_the_committer() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-b", "main"]).unwrap();
+        git(dir.path(), &["config", "user.name", "Alice Example"]).unwrap();
+        git(dir.path(), &["config", "user.email", "alice@example.com"]).unwrap();
+        git(dir.path(), &["config", "commit.gpgsign", "false"]).unwrap();
+        fs::write(dir.path().join("code.txt"), "old\n").unwrap();
+        commit_as(dir.path(), "Nate Higgins <nate@x.com>", "Old");
+        fs::write(dir.path().join("code.txt"), "bridge\n").unwrap();
+        commit_as(
+            dir.path(),
+            "Nate Higgins <1+nathggns@users.noreply.github.com>",
+            "Bridge",
+        );
+        fs::write(dir.path().join("code.txt"), "final\n").unwrap();
+        commit_as(
+            dir.path(),
+            "nathggns <1+nathggns@users.noreply.github.com>",
+            "Final",
+        );
+        let report = scan(options(dir.path()), &AtomicBool::new(false), |_| {}).unwrap();
+        assert_eq!(report.authors.len(), 1);
+        assert_eq!(report.authors[0].author, "Nate Higgins");
+        assert!(report.authors[0]
+            .emails
+            .iter()
+            .any(|email| email == "nate@x.com"));
+        assert!(report.authors[0]
+            .emails
+            .iter()
+            .any(|email| email.contains("nathggns")));
+        assert!(!report.authors[0]
+            .emails
+            .iter()
+            .any(|email| email == "alice@example.com"));
+    }
+
+    #[test]
+    fn a_sign_off_joins_identities_whose_lines_were_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "-b", "main"]).unwrap();
+        git(dir.path(), &["config", "user.name", "Alice Example"]).unwrap();
+        git(dir.path(), &["config", "user.email", "alice@example.com"]).unwrap();
+        git(dir.path(), &["config", "commit.gpgsign", "false"]).unwrap();
+        fs::write(dir.path().join("code.txt"), "old\n").unwrap();
+        commit_as(dir.path(), "Nate Higgins <nate@x.com>", "Old");
+        fs::write(dir.path().join("code.txt"), "final\n").unwrap();
+        commit_as(
+            dir.path(),
+            "nathggns <1+nathggns@users.noreply.github.com>",
+            "Final\n\nSigned-off-by: Nate Higgins <1+nathggns@users.noreply.github.com>\n",
+        );
+        let report = scan(options(dir.path()), &AtomicBool::new(false), |_| {}).unwrap();
+        assert_eq!(report.authors.len(), 1);
+        assert_eq!(report.authors[0].author, "Nate Higgins");
+    }
+
     #[test]
     fn managed_clone_refreshes_history_and_default_branch_without_saving_credentials() {
         let origin = fixture();

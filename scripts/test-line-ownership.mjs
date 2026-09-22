@@ -197,20 +197,25 @@ try {
     { week: seconds("2020-01-31T00:00:00Z"), a: 9 },
     { week: seconds("2020-02-01T00:00:00Z"), a: 4 },
   ];
-  assert.equal(lib.ownershipHistoryBuckets(levels, ["a"], "cumulative").length, 5);
-  const weekly = lib.ownershipHistoryBuckets(levels, ["a"], "week");
+  assert.equal(lib.ownershipHistoryBuckets(levels, ["a"], "day", "cumulative").length, 5);
+  const weekly = lib.ownershipHistoryBuckets(levels, ["a"], "week", "cumulative");
   assert.equal(weekly.length, 3);
   assert.equal(weekly[0].week, seconds("2019-12-29T00:00:00Z"));
   assert.equal(weekly[0].a, 5, "a week keeps its last day rather than summing the stock");
   assert.equal(weekly[1].a, 8);
   assert.equal(weekly[2].a, 4);
-  const monthly = lib.ownershipHistoryBuckets(levels, ["a"], "month");
+  const monthly = lib.ownershipHistoryBuckets(levels, ["a"], "month", "cumulative");
   assert.equal(monthly.length, 2);
   assert.equal(monthly[0].a, 9);
   assert.equal(monthly[1].a, 4);
-  const quarterly = lib.ownershipHistoryBuckets(levels, ["a"], "quarter");
+  const quarterly = lib.ownershipHistoryBuckets(levels, ["a"], "quarter", "cumulative");
   assert.equal(quarterly.length, 1);
   assert.equal(quarterly[0].a, 4);
+  const weeklyChange = lib.ownershipHistoryBuckets(levels, ["a"], "week", "period");
+  assert.equal(weeklyChange.length, 3);
+  assert.equal(weeklyChange[0].a, 5, "the first period is the change from an empty tree");
+  assert.equal(weeklyChange[1].a, 3);
+  assert.equal(weeklyChange[2].a, -4, "a later period can lose lines");
   console.log("PASS  ownership history series carry-forward, daily collapse, selection, Other and cross-repo identity");
 
   console.log("PASS  chart cells share global identities and totals; shared bot patterns cover aliases, model variants, email usernames and built-ins");

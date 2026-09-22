@@ -46,8 +46,11 @@ export interface OwnershipHistorySeries {
 
 export type OwnershipHistorySplit = "people" | "repository" | "total";
 
-/** Cumulative keeps every day. The others keep the last day in each bucket. */
-export type OwnershipTimeline = "cumulative" | Granularity;
+/** How the chart reads a stock: the level owned, or the change during the period. */
+export type OwnershipReading = "cumulative" | "period";
+
+/** How wide each point is. Independent of whether the point is a level or a change. */
+export type OwnershipPeriod = "day" | Granularity;
 
 export interface OwnershipHistorySeriesOptions {
   /** Series drawn on their own before the rest become Other. Defaults to eight. */
@@ -331,17 +334,39 @@ export function ownershipHistorySeries(
   return rankHistorySeries(totals, labelOf, limit);
 }
 
-/** Keep the last day in each week, month or quarter. Summing a stock would
- * count the same lines once per day. */
+/** Sample the stock at the end of each period, then optionally turn those levels
+ * into the change since the previous point. Summing a stock would count the
+ * same lines once per day. The first change is measured from zero, which is the
+ * empty tree the history walk starts from. */
 export function ownershipHistoryBuckets(
   rows: ReadonlyArray<Record<string, number>>,
   keys: readonly string[],
-  view: OwnershipTimeline,
+  period: OwnershipPeriod,
+  reading: OwnershipReading = "cumulative",
 ): Array<Record<string, number>> {
-  if (view === "cumulative" || rows.length === 0) return [...rows];
+  if (rows.length === 0) return [];
+  const levels = period === "day" ? rows.map((row) => {
+    const next: Record<string, number> = { week: row.week };
+    for (const key of keys) next[key] = row[key] ?? 0;
+    return next;
+  }) : samplePeriodEnd(rows, keys, period);
+  if (reading === "cumulative") return levels;
+  return levels.map((row, index) => {
+    const previous = levels[index - 1];
+    const next: Record<string, number> = { week: row.week };
+    for (const key of keys) next[key] = (row[key] ?? 0) - (previous?.[key] ?? 0);
+    return next;
+  });
+}
+
+function samplePeriodEnd(
+  rows: ReadonlyArray<Record<string, number>>,
+  keys: readonly string[],
+  period: Granularity,
+): Array<Record<string, number>> {
   const buckets = new Map<number, Record<string, number>>();
   for (const row of rows) {
-    const start = view === "week" ? weekStart(row.week * 1000) : bucketStart(row.week, view);
+    const start = period === "week" ? weekStart(row.week * 1000) : bucketStart(row.week, period);
     const next: Record<string, number> = { week: start };
     for (const key of keys) next[key] = row[key] ?? 0;
     buckets.set(start, next);

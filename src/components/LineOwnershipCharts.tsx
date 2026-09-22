@@ -1,7 +1,7 @@
 import { useCallback, useMemo, useState } from "react";
 import { bucketLabel } from "../lib/agg/series";
 import { formatDate } from "../lib/agg/weeks";
-import { ownershipHistoryBuckets, ownershipHistorySeries, type OwnershipHistoryPoint, type OwnershipHistorySplit, type OwnershipTimeline, type aggregateOwnership } from "../lib/lineOwnership";
+import { ownershipHistoryBuckets, ownershipHistorySeries, type OwnershipHistoryPoint, type OwnershipHistorySplit, type OwnershipPeriod, type OwnershipReading, type aggregateOwnership } from "../lib/lineOwnership";
 import { HeatMatrix, RankedBars, TimelineArea, type TimelineShape } from "./charts";
 import { ChartCard, DataTable, FilterPopover, LabeledControl, Segmented, ViewSelector, full } from "./ui";
 
@@ -34,18 +34,38 @@ const HISTORY_VALUES = [
   { value: "total" as const, label: "Totals" },
   { value: "share" as const, label: "Share" },
 ];
-const HISTORY_VIEWS: Array<{ value: OwnershipTimeline; label: string }> = [
+const HISTORY_READINGS: Array<{ value: OwnershipReading; label: string }> = [
   { value: "cumulative", label: "Cumulative" },
-  { value: "week", label: "Per week" },
-  { value: "month", label: "Per month" },
-  { value: "quarter", label: "Per quarter" },
+  { value: "period", label: "Per period" },
 ];
-const HISTORY_PERIOD = {
-  cumulative: "Days without commits keep the previous totals.",
-  week: "Each point is the last day of that week.",
-  month: "Each point is the last day of that month.",
-  quarter: "Each point is the last day of that quarter.",
-} as const;
+const HISTORY_PERIODS: Array<{ value: OwnershipPeriod; label: string }> = [
+  { value: "day", label: "Daily" },
+  { value: "week", label: "Weekly" },
+  { value: "month", label: "Monthly" },
+  { value: "quarter", label: "Quarterly" },
+];
+const PERIOD_SPAN = { day: "day", week: "week", month: "month", quarter: "quarter" } as const;
+
+function historyCaption(reading: OwnershipReading, period: OwnershipPeriod): string {
+  const span = PERIOD_SPAN[period];
+  if (reading === "period") return `Each point is how many lines were gained or lost that ${span}.`;
+  if (period === "day") return "Each point is the lines owned that day. Days without commits keep the previous totals.";
+  return `Each point is the lines owned on the last day of that ${span}.`;
+}
+
+/** The old menu stored the bucket size in the same key as cumulative. Those
+ * choices were end-of-period levels, so they come back as cumulative. */
+function storedTimeline(): { reading: OwnershipReading; period: OwnershipPeriod } {
+  const savedReading = localStorage.getItem("github-monitor.ownership.reading");
+  const reading: OwnershipReading = savedReading === "period" ? "period" : "cumulative";
+  const savedPeriod = localStorage.getItem("github-monitor.ownership.period");
+  if (savedPeriod === "day" || savedPeriod === "week" || savedPeriod === "month" || savedPeriod === "quarter") {
+    return { reading, period: savedPeriod };
+  }
+  const legacy = localStorage.getItem("github-monitor.ownership.timeline");
+  const period: OwnershipPeriod = legacy === "week" || legacy === "month" || legacy === "quarter" ? legacy : "day";
+  return { reading, period };
+}
 
 function storedChoice<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
   const value = localStorage.getItem(key);
@@ -68,9 +88,11 @@ export function OwnershipHistoryChart({ points, selectedLogins, repositories }: 
   const [seriesLimit, setSeriesLimit] = useState(() => storedChoice("github-monitor.ownership.seriesLimit", ["4", "6", "8", "all"], "8"));
   const [stackMode, setStackMode] = useState<"stacked" | "overlaid">(() => storedChoice("github-monitor.ownership.stackMode", ["stacked", "overlaid"], "stacked"));
   const [values, setValues] = useState<"total" | "share">(() => storedChoice("github-monitor.ownership.valueMode", ["total", "share"], "total"));
-  const [view, setView] = useState<OwnershipTimeline>(() => storedChoice("github-monitor.ownership.timeline", ["cumulative", "week", "month", "quarter"], "cumulative"));
+  const [reading, setReading] = useState<OwnershipReading>(() => storedTimeline().reading);
+  const [period, setPeriod] = useState<OwnershipPeriod>(() => storedTimeline().period);
   const [activeKeys, setActiveKeys] = useState<Set<string>>(() => new Set());
-  const chooseView = useCallback((value: OwnershipTimeline) => remember("github-monitor.ownership.timeline", value, setView), []);
+  const chooseReading = useCallback((value: OwnershipReading) => remember("github-monitor.ownership.reading", value, setReading), []);
+  const choosePeriod = useCallback((value: OwnershipPeriod) => remember("github-monitor.ownership.period", value, setPeriod), []);
   const repoNames = useMemo(() => new Map(repositories.map((repo) => [repo.id, repo.name])), [repositories]);
   const { data, series } = useMemo(
     () => ownershipHistorySeries(points, selectedLogins, {
@@ -81,8 +103,8 @@ export function OwnershipHistoryChart({ points, selectedLogins, repositories }: 
     [points, selectedLogins, split, seriesLimit, repoNames],
   );
   const plotted = useMemo(
-    () => ownershipHistoryBuckets(data, series.map((item) => item.key), view),
-    [data, series, view],
+    () => ownershipHistoryBuckets(data, series.map((item) => item.key), period, reading),
+    [data, series, period, reading],
   );
   const singleSeries = split === "total";
   const toggleKey = (key: string) => setActiveKeys((prev) => {
@@ -94,12 +116,13 @@ export function OwnershipHistoryChart({ points, selectedLogins, repositories }: 
   });
   if (!data.length) return null;
   const changed = shape !== "area" || split !== "people" || seriesLimit !== "8" || stackMode !== "stacked" || values !== "total";
-  const periodLabel = (week: number) => view === "cumulative" ? formatDate(week * 1000) : bucketLabel(week, view);
+  const periodLabel = (week: number) => period === "day" ? formatDate(week * 1000) : bucketLabel(week, period);
   return (
     <ChartCard title="Ownership over time"
-      subtitle={`Credited lines on the default branch. ${HISTORY_PERIOD[view]} Co-authors each receive full credit, so stacked people can exceed surviving lines.`}
+      subtitle={`Credited lines on the default branch. ${historyCaption(reading, period)} Co-authors each receive full credit, so stacked people can exceed surviving lines.`}
       titleAfter={<>
-        <ViewSelector ariaLabel="timeline view" value={view} options={HISTORY_VIEWS} onChange={chooseView} keyboardNav />
+        <ViewSelector ariaLabel="ownership reading" value={reading} options={HISTORY_READINGS} onChange={chooseReading} keyboardNav />
+        <ViewSelector ariaLabel="aggregation period" value={period} options={HISTORY_PERIODS} onChange={choosePeriod} />
         <FilterPopover active={changed} width={356}>
         <Segmented ariaLabel="Chart shape" stretch value={shape} options={HISTORY_SHAPES} onChange={(value) => remember("github-monitor.ownership.shape", value, setShape)} />
         <LabeledControl label="Split by">
@@ -127,7 +150,7 @@ export function OwnershipHistoryChart({ points, selectedLogins, repositories }: 
         ? <p className="text-[12px] text-ink-muted">No surviving lines match these filters.</p>
         : <TimelineArea data={plotted} series={series} shape={shape} stackMode={stackMode} values={values} height={280}
           withBrush={plotted.length > 45} activeKeys={activeKeys} onToggleKey={toggleKey}
-          valueLabel={values === "share" ? "of credited lines" : "lines"} labelOf={periodLabel} />}
+          valueLabel={values === "share" ? (reading === "period" ? "of that period's change" : "of credited lines") : "lines"} labelOf={periodLabel} />}
     </ChartCard>
   );
 }

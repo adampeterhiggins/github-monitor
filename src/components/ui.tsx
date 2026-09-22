@@ -582,11 +582,13 @@ export function Checkbox({
   indeterminate,
   onChange,
   label,
+  disabled = false,
 }: {
   checked: boolean;
   indeterminate?: boolean;
   onChange: (checked: boolean) => void;
   label: ReactNode;
+  disabled?: boolean;
 }) {
   const id = useId();
   const ref = useRef<HTMLInputElement>(null);
@@ -595,12 +597,13 @@ export function Checkbox({
   }, [indeterminate, checked]);
 
   return (
-    <label htmlFor={id} className="flex cursor-pointer items-center gap-2 text-[12px] text-ink">
+    <label htmlFor={id} className={clsx("flex items-center gap-2 text-[12px] text-ink", disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer")}>
       <input
         id={id}
         ref={ref}
         type="checkbox"
         checked={checked}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.checked)}
         className="h-3.5 w-3.5 shrink-0 accent-[var(--accent)]"
       />
