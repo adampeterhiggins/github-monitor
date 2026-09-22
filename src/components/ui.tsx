@@ -512,14 +512,14 @@ function Arrow({
   );
 }
 
-/* ── Filter popover ─────────────────────────────────────────────────────────
+/* ── Options popover ────────────────────────────────────────────────────────
    The rest of the chart's controls, behind one icon. The dot marks a view that
-   differs from the default, so a filtered chart never looks like a plain one. */
+   differs from the default, so a customised chart never looks like a plain one. */
 
 export function FilterPopover({
   children,
   active,
-  label = "Chart options",
+  label = "Customise",
   align = "left",
   width = 300,
 }: {
@@ -549,11 +549,14 @@ export function FilterPopover({
         )}
       >
         <svg width="15" height="15" viewBox="0 0 24 24" aria-hidden="true">
-          <g fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-            <path d="M3 6h18" />
-            <path d="M7 12h10" />
-            <path d="M10 18h4" />
-          </g>
+          <path
+            d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
         </svg>
         {active ? (
           <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-accent" />
@@ -582,11 +585,13 @@ export function Checkbox({
   indeterminate,
   onChange,
   label,
+  disabled = false,
 }: {
   checked: boolean;
   indeterminate?: boolean;
   onChange: (checked: boolean) => void;
   label: ReactNode;
+  disabled?: boolean;
 }) {
   const id = useId();
   const ref = useRef<HTMLInputElement>(null);
@@ -595,12 +600,13 @@ export function Checkbox({
   }, [indeterminate, checked]);
 
   return (
-    <label htmlFor={id} className="flex cursor-pointer items-center gap-2 text-[12px] text-ink">
+    <label htmlFor={id} className={clsx("flex items-center gap-2 text-[12px] text-ink", disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer")}>
       <input
         id={id}
         ref={ref}
         type="checkbox"
         checked={checked}
+        disabled={disabled}
         onChange={(e) => onChange(e.target.checked)}
         className="h-3.5 w-3.5 shrink-0 accent-[var(--accent)]"
       />
@@ -1017,7 +1023,7 @@ export function Modal({
           />
           {/* Charts carry a legend under them, so the height offered leaves room
               for one; a legend long enough to need more than that scrolls. */}
-          <div ref={bodyRef} className="min-h-0 flex-1 overflow-auto overscroll-contain">
+          <div ref={bodyRef} className="min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-contain">
             {bodyHeight > 0 ? children(Math.max(200, bodyHeight - 52)) : null}
           </div>
         </Card>

@@ -1745,7 +1745,7 @@ export async function repoEndpointStatus(
 export interface OutstandingWork {
   /** (repo, endpoint) pairs a previous run finished. */
   complete: number;
-  /** GitHub was still computing these; retrying usually succeeds. */
+  /** Interrupted work or statistics GitHub was still computing. */
   pending: number;
   /** Failed for some other reason. */
   errored: number;

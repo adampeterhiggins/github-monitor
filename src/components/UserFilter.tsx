@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { useApp } from "../lib/state/app";
 import { useScope, useScopedQuery, type UserFilterSupport } from "../lib/hooks";
 import { listContributors } from "../lib/db/queries";
+import { contributorKeys as keys, deselectContributors, NO_CONTRIBUTORS } from "../lib/contributorSelection";
 import { isBot } from "../lib/bots";
 import { Button, Checkbox, Dropdown, DropdownRow, compact, full } from "./ui";
 import { SavedSelections } from "./SavedSelections";
@@ -28,7 +29,20 @@ const SORTS: Array<{ id: UserSort; label: string }> = [
 const SORT_KEY = "github-monitor.userSort";
 const HIDE_KEY = "github-monitor.userHideInactive";
 
-export function UserFilter({ support }: { support: UserFilterSupport }) {
+export interface ContributorOption {
+  login: string;
+  commits: number;
+  commits_all: number;
+  repos: number;
+  aliases?: string[];
+  isBot?: boolean;
+}
+
+export function UserFilter({ support, snapshot }: {
+  support: UserFilterSupport;
+  /** Snapshot pages reuse contributor selection without a date/activity window. */
+  snapshot?: { contributors: ContributorOption[]; isLoading: boolean };
+}) {
   const scope = useScope();
   const selected = useApp((s) => s.selectedLogins);
   const setSelectedLogins = useApp((s) => s.setSelectedLogins);
@@ -56,18 +70,18 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
     "contributor-list",
     scope,
     (db) => listContributors(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek),
-    { staleTime: 5 * 60_000 },
+    { staleTime: 5 * 60_000, enabled: snapshot == null },
   );
 
-  const all = contributors.data ?? [];
+  const all: ContributorOption[] = snapshot?.contributors ?? contributors.data ?? [];
   const selectedSet = useMemo(() => new Set(selected.map((l) => l.toLowerCase())), [selected]);
 
   const botPatterns = useApp((s) => s.botPatterns);
   const bots = useMemo(
-    () => all.filter((c) => isBot(c.login, botPatterns)),
+    () => all.filter((c) => c.isBot ?? isBot(c.login, botPatterns)),
     [all, botPatterns],
   );
-  const botSet = useMemo(() => new Set(bots.map((c) => c.login.toLowerCase())), [bots]);
+  const botSet = useMemo(() => new Set(bots.flatMap(keys)), [bots]);
 
   /**
    * Bots currently in scope, which is not the same as bots in the selection: an
@@ -75,17 +89,17 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
    * when nothing is selected too.
    */
   const botsInScope = useMemo(
-    () => (selected.length === 0 ? bots : bots.filter((c) => selectedSet.has(c.login.toLowerCase()))),
+    () => (selected.length === 0 ? bots : bots.filter((c) => keys(c).some((key) => selectedSet.has(key)))),
     [bots, selected.length, selectedSet],
   );
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     const rows = all
-      .filter((c) => (q ? c.login.toLowerCase().includes(q) : true))
+      .filter((c) => (q ? keys(c).some((key) => key.includes(q)) : true))
       // Hides on activity alone; see the note in RepoFilter. Exempting selected
       // contributors made the control a no-op whenever most people were selected.
-      .filter((c) => !hideInactive || Number(c.commits) > 0);
+      .filter((c) => snapshot != null || !hideInactive || Number(c.commits) > 0);
 
     return [...rows].sort((a, b) => {
       if (sort === "name") return a.login.localeCompare(b.login);
@@ -96,16 +110,16 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
       const diff = Number(b.commits) - Number(a.commits);
       return diff !== 0 ? diff : a.login.localeCompare(b.login);
     });
-  }, [all, query, hideInactive, selectedSet, sort]);
+  }, [all, query, hideInactive, selectedSet, sort, snapshot]);
 
   const hidden = useMemo(
-    () => (hideInactive ? all.filter((c) => Number(c.commits) === 0) : []),
-    [all, hideInactive],
+    () => (!snapshot && hideInactive ? all.filter((c) => Number(c.commits) === 0) : []),
+    [all, hideInactive, snapshot],
   );
 
   /** Hidden but still selected, so still scoping every page. */
   const hiddenSelected = useMemo(
-    () => hidden.filter((c) => selectedSet.has(c.login.toLowerCase())),
+    () => hidden.filter((c) => keys(c).some((key) => selectedSet.has(key))),
     [hidden, selectedSet],
   );
 
@@ -120,13 +134,16 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
     );
   }
 
+  const noneSelected = selected.length === 1 && selected[0] === NO_CONTRIBUTORS;
   const label = (() => {
+    if (noneSelected) return "No contributors";
     if (selected.length === 0) return "All contributors";
     if (selected.length === 1) return selected[0];
     return `${full(selected.length)} contributors`;
   })();
 
   const apply = (logins: string[]) => setSelectedLogins(logins);
+  const sortLabel = (id: UserSort) => snapshot && id === "commits" ? "Surviving lines" : SORTS.find((s) => s.id === id)!.label;
 
   return (
     <Dropdown
@@ -165,7 +182,7 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
             ) : null}
             <Button
               variant="ghost"
-              title="The ten contributors with the most commits in the selected period"
+              title={snapshot ? "The ten contributors with the most surviving lines" : "The ten contributors with the most commits in the selected period"}
               onClick={() => apply(visible.slice(0, 10).map((c) => c.login))}
             >
               Top 10
@@ -179,11 +196,7 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
                   : `Exclude ${botsInScope.map((c) => c.login).join(", ")}. Add your own patterns in Settings & sync.`
               }
               onClick={() => {
-                /* From "everyone", excluding bots means naming the people instead:
-                   an empty selection means unfiltered, so there is no state that
-                   says "all but these". */
-                const base = selected.length === 0 ? all.map((c) => c.login) : selected;
-                apply(base.filter((l) => !botSet.has(l.toLowerCase())));
+                apply(deselectContributors(selected, all, bots));
               }}
             >
               Deselect bots{botsInScope.length > 0 ? ` (${full(botsInScope.length)})` : ""}
@@ -192,7 +205,7 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
 
           <div className="mt-2 flex items-center justify-between gap-2">
             <Dropdown
-              label={`Sort: ${SORTS.find((s) => s.id === sort)!.label}`}
+              label={`Sort: ${sortLabel(sort)}`}
               width={190}
               align="left"
             >
@@ -207,13 +220,13 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
                         close();
                       }}
                     >
-                      {s.label}
+                      {sortLabel(s.id)}
                     </DropdownRow>
                   ))}
                 </div>
               )}
             </Dropdown>
-            <Checkbox
+            {!snapshot && <Checkbox
               checked={hideInactive}
               onChange={applyHide}
               label={
@@ -221,7 +234,7 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
                   Hide inactive{hidden.length > 0 ? ` (${full(hidden.length)})` : ""}
                 </span>
               }
-            />
+            />}
           </div>
         </div>
 
@@ -247,18 +260,18 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
         <SavedSelections
           kind="contributors"
           currentValues={selected}
-          suggested={`${selected.length} contributors`}
+          suggested={noneSelected ? "No contributors" : `${selected.length} contributors`}
           onApply={(values) => apply(values.map(String))}
         />
 
         <div className="overflow-y-auto p-1.5">
-          {contributors.isLoading ? (
+          {(snapshot?.isLoading ?? contributors.isLoading) ? (
             <p className="px-1.5 py-3 text-center text-[12px] text-ink-secondary">Loading…</p>
           ) : visible.length === 0 ? (
             <p className="px-1.5 py-3 text-center text-[12px] text-ink-secondary">
               {all.length === 0
                 ? "No contributor data cached yet — run a sync first."
-                : hideInactive
+                : !snapshot && hideInactive
                   ? "Nobody committed in this period. Untick “Hide inactive” to see everyone."
                   : "No contributors match"}
             </p>
@@ -269,17 +282,17 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
                 <div key={c.login} className="flex items-center gap-2 px-1.5 py-[3px]">
                   <div className="min-w-0 flex-1">
                     <Checkbox
-                      checked={selectedSet.has(c.login.toLowerCase())}
+                      checked={keys(c).some((key) => selectedSet.has(key))}
                       onChange={() =>
                         apply(
-                          selectedSet.has(c.login.toLowerCase())
-                            ? selected.filter((l) => l.toLowerCase() !== c.login.toLowerCase())
-                            : [...selected, c.login],
+                          keys(c).some((key) => selectedSet.has(key))
+                            ? deselectContributors(selected, all, [c])
+                            : [...selected.filter((l) => l !== NO_CONTRIBUTORS), c.login],
                         )
                       }
                       label={
                         <span className="flex min-w-0 items-center gap-1.5">
-                          <span className="truncate">{c.login}</span>
+                          <span className="truncate" title={c.aliases?.join(" · ")}>{c.login}</span>
                           {myLogin && c.login.toLowerCase() === myLogin.toLowerCase() ? (
                             <span className="shrink-0 text-[9px] uppercase text-ink-muted">you</span>
                           ) : null}
@@ -299,7 +312,7 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
                     className="shrink-0 text-[10px] tabular text-ink-muted"
                     title={
                       periodCommits > 0
-                        ? `${full(periodCommits)} commits across ${full(Number(c.repos))} repositories in this period`
+                        ? `${full(periodCommits)} ${snapshot ? "surviving lines" : "commits"} across ${full(Number(c.repos))} repositories${snapshot ? "" : " in this period"}`
                         : `No commits in this period; ${full(Number(c.commits_all))} all time`
                     }
                   >
@@ -317,7 +330,7 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
 
         <div className="flex items-center justify-between border-t border-hairline px-2.5 py-1.5">
           <span className="text-[11px] text-ink-muted">
-            {selected.length === 0 ? "No filter applied" : `${full(selected.length)} selected`}
+            {noneSelected ? "0 selected" : selected.length === 0 ? "No filter applied" : `${full(selected.length)} selected`}
           </span>
           {selected.length > 0 ? (
             <Button variant="ghost" onClick={() => apply([])}>

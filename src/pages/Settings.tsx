@@ -235,7 +235,7 @@ function SyncProblemsCard() {
                     : undefined
                 }
               >
-                {r.status === "pending" ? "Still computing on GitHub" : (r.error ?? r.status)}
+                {r.status === "pending" && r.endpoint !== "line_ownership" ? "Still computing on GitHub" : (r.error ?? r.status)}
               </span>
             ),
           },
@@ -256,7 +256,7 @@ function SyncProblemsCard() {
                   disabled={repoSync.busy}
                   onClick={() => void repoSync.retryPair(r.repo_id, r.endpoint as EndpointId)}
                   title={
-                    r.status === "pending"
+                    r.status === "pending" && r.endpoint !== "line_ownership"
                       ? "Ask GitHub again — it may have finished computing by now"
                       : "Retry just this item"
                   }

@@ -1625,6 +1625,8 @@ dependencies = [
 name = "github-monitor"
 version = "0.2.2"
 dependencies = [
+ "base64 0.22.1",
+ "glob",
  "serde",
  "serde_json",
  "tauri",
@@ -1636,6 +1638,7 @@ dependencies = [
  "tauri-plugin-sql",
  "tauri-plugin-store",
  "tauri-plugin-updater",
+ "tempfile",
 ]
 
 [[package]]

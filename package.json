@@ -20,10 +20,11 @@
     "verify:aggregation": "node scripts/verify-aggregation.mjs",
     "test:queries": "node scripts/test-queries.mjs",
     "test:themes": "node scripts/test-themes.mjs",
-    "check": "npm run typecheck && npm run test:queries && npm run test:themes && npm run check:workflows",
+    "check": "npm run typecheck && npm run test:queries && npm run test:line-ownership && npm run test:themes && npm run check:workflows",
     "release:prepare": "node scripts/set-version.mjs",
     "release:manifest": "node scripts/build-update-manifest.mjs",
-    "check:workflows": "node scripts/lint-workflows.mjs"
+    "check:workflows": "node scripts/lint-workflows.mjs",
+    "test:line-ownership": "node scripts/test-line-ownership.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",

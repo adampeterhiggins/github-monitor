@@ -5,7 +5,7 @@ organisation instead of one repository at a time. Every page GitHub offers per r
 is here, with **repository turned into a filter** you slice by — plus a
 **contributor filter**, which GitHub has no equivalent of.
 
-Tauri v2 shell (real `.app`, WKWebView, ~10 MB) with all logic in TypeScript.
+Tauri v2 shell (real `.app`, WKWebView, ~10 MB) with analytics in TypeScript and local Git scanning in Rust.
 
 ## Install
 
@@ -60,9 +60,68 @@ and the app says so rather than rendering blank charts.
 | Actions usage | `actions/runs` | Wall-clock elapsed, not billable minutes |
 | Actions performance | `actions/runs` | p50/p90/p99 duration, failure rates |
 | Ownership | `contributor_weeks` | Bus factor, concentration over time, people × repositories matrix — no GitHub equivalent |
+| Line ownership | Synced `git blame` snapshots | Org-wide surviving lines, co-author credit and identity merging; incremental Git-backed sync |
 | People | `contributor_weeks` + PRs | One person across the org, not across all of GitHub |
 | Roster | `contributor_weeks` | Arrivals, last-seen, and repositories left cold |
 | Scorecard | several | One ranked table joining concentration, health, alerts, open PRs, lead time, views |
+
+## Line ownership
+
+Line ownership is included in **Settings & sync → Sync now / Sync changes** by
+default. It runs for the same selected repositories as the other analytics, with
+the same archived-repository controls. **Full re-sync** rebuilds all selected
+ownership snapshots, and **Resume** retries unfinished repositories.
+
+The first sync downloads full Git history using the saved GitHub token. Subsequent
+syncs fetch only missing Git objects and inspect the new default-branch head. Each
+repository’s exact commit SHA, calculation/check timestamps, report, and per-file
+attribution cache are saved together in one atomic SQLite upsert. The page reads
+these saved results across the selected repositories, including after app restarts.
+A failure or cancellation retains the previous complete snapshot and checkpoint.
+
+Incremental calculation reuses untouched files, recalculates files touched by the
+intervening history and removes deleted files. It examines every intervening commit,
+not just the final tree diff: a change followed by a revert can restore identical
+content with different attribution. Rewritten history, a missing/incompatible cache,
+changes to `.mailmap`, and full re-sync trigger a complete calculation. New co-author
+trailers are loaded only for commits not already cached. An unchanged head requires
+no new blame work. Git transfers and blame run independently of the API sync queue.
+
+The **Line ownership** page shows surviving-line credit across the selected
+repositories, with Person/Email/Name grouping, the shared contributor selector and CSV/JSON export.
+Ranked bars show the top owners and repository concentration. A people × repositories
+heatmap switches between credited lines and share within each repository, with
+expand controls, hover details and complete table alternatives. All charts use the
+same grouping and contributor selection as the totals; co-author shares remain based on unique
+surviving lines rather than being normalized into a 100% stack.
+Identity merging happens across the entire selection before co-author credit is
+counted, so connected aliases cannot credit the same line twice. Contributor
+selections are shared with other pages and can be saved, searched or cleared.
+**Deselect bots** uses the same built-in rules and saved patterns to remove detected
+bots from the selection; it is not a separate filter. Names, email usernames and
+aliases are checked, so a configured `claude` alias also identifies `Claude Fable 5`
+when they share an email. GitHub noreply addresses link Git authors to their logins;
+other authors remain selectable by name or email. Selection applies to every alias
+before Person/Email/Name grouping, and changes take effect without re-syncing.
+Each distinct selected co-author gets full credit, so shares can sum above 100%.
+Lines with no selected authors leave the share base. Generated files, binary files,
+symlinks and submodules are skipped, and attribution ignores whitespace-only edits.
+
+Repository snapshots show the calculated commit and timestamp, including stale
+saved results when a refresh fails. This is a latest-snapshot view, with no date
+range filter. The existing **Ownership** page continues to measure
+commit concentration.
+
+Managed bare clones live under the app’s cache directory in `line-ownership/`.
+Credentials are passed only to the Git process, never stored in clone config.
+Git must be installed; cancellation stops after the current Git operation. Clearing
+the analytics cache clears ownership snapshots and forces a fresh calculation on
+the next sync, while existing clones can be reused.
+
+Run the native Git-fixture tests with
+`cargo test --locked --manifest-path src-tauri/Cargo.toml --lib`.
+`npm run test:line-ownership` tests sync integration, durable checkpoints, failure
+recovery, org-wide aggregation and exports against a real SQLite database.
 
 ## Releasing and updating
 

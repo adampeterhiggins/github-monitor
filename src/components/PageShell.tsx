@@ -14,6 +14,7 @@ export function PageShell({
   children,
   filters = true,
   filterExtra,
+  filterContent,
   requiresData = true,
   userFilter = "full",
   /** Shown when a contributor filter is active but this page can only partly honour it. */
@@ -24,6 +25,8 @@ export function PageShell({
   children: ReactNode;
   filters?: boolean;
   filterExtra?: ReactNode;
+  /** Custom filter row for snapshot views without a date dimension. */
+  filterContent?: ReactNode;
   requiresData?: boolean;
   userFilter?: UserFilterSupport;
   partialUserNote?: ReactNode;
@@ -39,7 +42,7 @@ export function PageShell({
 
   // One description of the row, mounted here and again by anything that covers the
   // page with a chart — an expanded one keeps the filters it was scoped by.
-  const filterBar = filters ? <FilterBar extra={filterExtra} userFilter={userFilter} /> : null;
+  const filterBar = filterContent ?? (filters ? <FilterBar extra={filterExtra} userFilter={userFilter} /> : null);
 
   return (
     <PageFilters value={filterBar}>
