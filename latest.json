@@ -1,15 +1,15 @@
 {
-  "version": "0.2.2",
-  "notes": "## What's Changed\n* Split Settings & sync into subpages behind a dedicated sidebar by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/9\n\n\n**Full Changelog**: https://github.com/adampeterhiggins/github-monitor/compare/v0.2.1...v0.2.2",
-  "pub_date": "2026-09-13T11:50:12Z",
+  "version": "0.2.3",
+  "notes": "## What's Changed\n* Add synced line ownership with charts and shared bot filtering by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/10\n\n\n**Full Changelog**: https://github.com/adampeterhiggins/github-monitor/compare/v0.2.2...v0.2.3",
+  "pub_date": "2026-09-22T15:44:29Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUo3YmtNQ09WZjFxekFoV2tTb0pHYXB0UForcjZFenF4dHFqQVFIYXdrdmdwTXhTWXBoeWlsVno4Zk5IaThYNWZiRXpYdGtxL1NqR0QvY2ZKTitBbFFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5MzAwMTU5CWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negovUkxLZjEvcmJIUldGWHFTS2VzOHEyT216cG9RRVB0UC9GWldZYXFpK0F1RW5IUEEwa0o4b2o5aE9oUEQrWG1KK1NnU1dZSG1qWTBaaXFVQW56Q0FCUT09Cg==",
-      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/561127598"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUx4TGYwaWZGMzlkRWNXdXpyaGdvZDc0SjJoWHRrcWczTWVCK2VJK1Y5UkZrdm9KVFlRamN2NHRON1prTjNhcjI3Mno0cEpITHZ6dS8ydVVsMDJvZVFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwMDkxODYxCWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negprZXBIY2MydHltOGNwc2JURlFuS1NLL1VqNU5vcGl0RDU1c2czbEllaTJkMXhyajNsUmFOSTNxREFhdWhBbnZqSERic0tXUGM3cXdvWG1ncEtBS3RDQT09Cg==",
+      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/581710440"
     },
     "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUo3YmtNQ09WZjFxekFoV2tTb0pHYXB0UForcjZFenF4dHFqQVFIYXdrdmdwTXhTWXBoeWlsVno4Zk5IaThYNWZiRXpYdGtxL1NqR0QvY2ZKTitBbFFVPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzg5MzAwMTU5CWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negovUkxLZjEvcmJIUldGWHFTS2VzOHEyT216cG9RRVB0UC9GWldZYXFpK0F1RW5IUEEwa0o4b2o5aE9oUEQrWG1KK1NnU1dZSG1qWTBaaXFVQW56Q0FCUT09Cg==",
-      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/561127598"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUx4TGYwaWZGMzlkRWNXdXpyaGdvZDc0SjJoWHRrcWczTWVCK2VJK1Y5UkZrdm9KVFlRamN2NHRON1prTjNhcjI3Mno0cEpITHZ6dS8ydVVsMDJvZVFvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwMDkxODYxCWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negprZXBIY2MydHltOGNwc2JURlFuS1NLL1VqNU5vcGl0RDU1c2czbEllaTJkMXhyajNsUmFOSTNxREFhdWhBbnZqSERic0tXUGM3cXdvWG1ncEtBS3RDQT09Cg==",
+      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/581710440"
     }
   }
 }
