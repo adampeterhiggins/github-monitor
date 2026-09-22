@@ -264,13 +264,30 @@ function rankHistorySeries(
   return { data, series };
 }
 
-/** Daily stacked series. Each repository keeps its last commit through days with
- * none, and people who share a name or email are one series across repositories. */
-export function ownershipHistorySeries(
+/** Daily stocks, joined once. Split, series limit and period are applied later,
+ * so those controls do not walk the history again. */
+export interface PreparedOwnershipHistory {
+  days: number[];
+  people: Map<number, Map<string, number>>;
+  personLabels: Map<string, string>;
+  repositories: Map<number, Map<number, number>>;
+}
+
+const EMPTY_HISTORY: PreparedOwnershipHistory = {
+  days: [],
+  people: new Map(),
+  personLabels: new Map(),
+  repositories: new Map(),
+};
+
+/** Carry each repository's last commit across days without one, and join people
+ * who share a name, email or GitHub account. Repository totals are kept beside
+ * the people totals so a later split can choose either without repeating this. */
+export function prepareOwnershipHistory(
   points: readonly OwnershipHistoryPoint[],
   selectedLogins: readonly string[] = [],
-  options: OwnershipHistorySeriesOptions = {},
-): OwnershipHistorySeries {
+  accounts?: GithubAccounts,
+): PreparedOwnershipHistory {
   const selected = selectedLogins.length ? new Set(selectedLogins.map((value) => value.toLowerCase())) : new Set<string>();
   const byRepo = new Map<number, Map<number, { at: number; authors: OwnershipHistoryAuthor[] }>>();
   let min = Infinity;
@@ -281,15 +298,13 @@ export function ownershipHistorySeries(
     const day = Math.floor(at / 1000 / DAY) * DAY;
     min = Math.min(min, day);
     max = Math.max(max, day);
-    const authors = point.authors.filter((author) => historyAuthorMatches(author, selected, options.accounts));
+    const authors = point.authors.filter((author) => historyAuthorMatches(author, selected, accounts));
     const days = byRepo.get(point.repoId) ?? new Map();
     const existing = days.get(day);
     if (!existing || at >= existing.at) days.set(day, { at, authors });
     byRepo.set(point.repoId, days);
   }
-  if (!Number.isFinite(min)) return { data: [], series: [] };
-  const split = options.split ?? "people";
-  const limit = options.limit ?? 8;
+  if (!Number.isFinite(min)) return EMPTY_HISTORY;
 
   const carried = new Map<number, Map<number, OwnershipHistoryAuthor[]>>();
   const rows: OwnershipHistoryAuthor[] = [];
@@ -313,29 +328,6 @@ export function ownershipHistorySeries(
       }
     }
     carried.set(repoId, filled);
-  }
-
-  if (split !== "people") {
-    const totals = new Map<number, Map<string, number>>();
-    const labelOf = new Map<string, string>();
-    if (split === "total") labelOf.set("total", "Lines");
-    for (let day = min; day <= max; day += DAY) {
-      const bucket = new Map<string, number>();
-      if (split === "total") {
-        let lines = 0;
-        for (const filled of carried.values()) for (const author of filled.get(day) ?? []) lines += author.lines;
-        bucket.set("total", lines);
-      } else {
-        for (const [repoId, filled] of carried) {
-          if (!filled.has(day)) continue;
-          const key = `repo:${repoId}`;
-          bucket.set(key, (filled.get(day) ?? []).reduce((sum, author) => sum + author.lines, 0));
-          if (!labelOf.has(key)) labelOf.set(key, options.repoNames?.get(repoId) ?? `Repository ${repoId}`);
-        }
-      }
-      totals.set(day, bucket);
-    }
-    return rankHistorySeries(totals, labelOf, split === "total" ? 1 : limit);
   }
 
   const parent = rows.map((_, index) => index);
@@ -364,7 +356,7 @@ export function ownershipHistorySeries(
       const key = email.toLowerCase();
       if (!key) continue;
       claim(emailOwner, key, index);
-      const account = linkedAccount(email, options.accounts);
+      const account = linkedAccount(email, accounts);
       if (!account) continue;
       claim(loginOwner, account.login, index);
       if (account.id) claim(githubIdOwner, account.id, index);
@@ -377,8 +369,8 @@ export function ownershipHistorySeries(
     const root = find(index);
     members.set(root, [...(members.get(root) ?? []), index]);
   });
-  const keyOf = new Map<number, string>();
-  const labelOf = new Map<string, string>();
+  const personLabels = new Map<string, string>();
+  const keyByAuthor = new Map<OwnershipHistoryAuthor, string>();
   for (const indexes of members.values()) {
     const names = new Set<string>();
     const emails = new Set<string>();
@@ -393,30 +385,84 @@ export function ownershipHistorySeries(
     for (const index of indexes) {
       const found = new Set<string>();
       for (const email of rows[index].emails) {
-        const login = linkedAccount(email, options.accounts)?.login;
+        const login = linkedAccount(email, accounts)?.login;
         if (login) found.add(login);
       }
       for (const login of found) loginLines.set(login, (loginLines.get(login) ?? 0) + rows[index].lines);
     }
     const key = emailList.length ? `email:${emailList.join("|")}` : `name:${nameList.map(normalizeHistoryName).join("|")}`;
-    for (const index of indexes) keyOf.set(find(index), key);
-    labelOf.set(key, preferredLogin(loginLines) ?? nameList.find((name) => name.includes(" ")) ?? nameList[0] ?? emailList[0] ?? "Unknown");
+    personLabels.set(key, preferredLogin(loginLines) ?? nameList.find((name) => name.includes(" ")) ?? nameList[0] ?? emailList[0] ?? "Unknown");
+    for (const index of indexes) keyByAuthor.set(rows[index], key);
   }
 
-  const totals = new Map<number, Map<string, number>>();
+  const people = new Map<number, Map<string, number>>();
+  const repositories = new Map<number, Map<number, number>>();
+  const days: number[] = [];
   for (let day = min; day <= max; day += DAY) {
-    const people = new Map<string, number>();
-    for (const filled of carried.values()) {
-      for (const author of filled.get(day) ?? []) {
-        const index = rowIndex.get(author);
-        const key = index == null ? undefined : keyOf.get(find(index));
+    days.push(day);
+    const peopleOnDay = new Map<string, number>();
+    const reposOnDay = new Map<number, number>();
+    for (const [repoId, filled] of carried) {
+      const authors = filled.get(day);
+      if (!authors) continue;
+      let repoLines = 0;
+      for (const author of authors) {
+        repoLines += author.lines;
+        const key = keyByAuthor.get(author);
         if (!key) continue;
-        people.set(key, (people.get(key) ?? 0) + author.lines);
+        peopleOnDay.set(key, (peopleOnDay.get(key) ?? 0) + author.lines);
       }
+      if (repoLines) reposOnDay.set(repoId, repoLines);
     }
-    totals.set(day, people);
+    people.set(day, peopleOnDay);
+    repositories.set(day, reposOnDay);
+  }
+  return { days, people, personLabels, repositories };
+}
+
+/** Choose people, repositories or a single total, then fold the tail into Other. */
+export function projectOwnershipHistory(
+  prepared: PreparedOwnershipHistory,
+  options: OwnershipHistorySeriesOptions = {},
+): OwnershipHistorySeries {
+  if (prepared.days.length === 0) return { data: [], series: [] };
+  const split = options.split ?? "people";
+  const limit = options.limit ?? 8;
+  if (split === "people") return rankHistorySeries(prepared.people, prepared.personLabels, limit);
+  if (split === "total") {
+    const totals = new Map<number, Map<string, number>>();
+    for (const day of prepared.days) {
+      let lines = 0;
+      for (const value of prepared.repositories.get(day)?.values() ?? []) lines += value;
+      totals.set(day, new Map([["total", lines]]));
+    }
+    return rankHistorySeries(totals, new Map([["total", "Lines"]]), 1);
+  }
+  const totals = new Map<number, Map<string, number>>();
+  const labelOf = new Map<string, string>();
+  for (const day of prepared.days) {
+    const bucket = new Map<string, number>();
+    for (const [repoId, lines] of prepared.repositories.get(day) ?? []) {
+      const key = `repo:${repoId}`;
+      bucket.set(key, lines);
+      if (!labelOf.has(key)) labelOf.set(key, options.repoNames?.get(repoId) ?? `Repository ${repoId}`);
+    }
+    totals.set(day, bucket);
   }
   return rankHistorySeries(totals, labelOf, limit);
+}
+
+/** Daily stacked series. Each repository keeps its last commit through days with
+ * none, and people who share a name or email are one series across repositories. */
+export function ownershipHistorySeries(
+  points: readonly OwnershipHistoryPoint[],
+  selectedLogins: readonly string[] = [],
+  options: OwnershipHistorySeriesOptions = {},
+): OwnershipHistorySeries {
+  return projectOwnershipHistory(
+    prepareOwnershipHistory(points, selectedLogins, options.accounts),
+    options,
+  );
 }
 
 /** Sample the stock at the end of each period, then optionally turn those levels
@@ -462,7 +508,15 @@ function samplePeriodEnd(
 /** Snapshot contributors use the shared selector and selection store. Keep all
  * aliases searchable/selectable, independent of the table's grouping mode. */
 export function ownershipContributors(reports: OwnershipReport[], botPatterns: readonly string[] = [], accounts?: GithubAccounts) {
-  const summary = aggregateOwnership(reports, "person", [], accounts);
+  return contributorsFromOwnership(aggregateOwnership(reports, "person", [], accounts), botPatterns, accounts);
+}
+
+/** The person summary already walked every credit, so the selector can reuse it. */
+export function contributorsFromOwnership(
+  summary: ReturnType<typeof aggregateOwnership>,
+  botPatterns: readonly string[] = [],
+  accounts?: GithubAccounts,
+) {
   const repositoryCounts = new Map<string, number>();
   for (const repo of summary.byRepository) for (const author of repo.authors) {
     repositoryCounts.set(author.key, (repositoryCounts.get(author.key) ?? 0) + 1);

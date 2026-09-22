@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 import { keepPreviousData, useQuery } from "@tanstack/react-query";
 import { useApp } from "../lib/state/app";
 import { PageShell } from "../components/PageShell";
@@ -6,7 +6,7 @@ import { LineOwnershipCharts, OwnershipHistoryChart } from "../components/LineOw
 import { UserFilter } from "../components/UserFilter";
 import { RepoFilter } from "../components/RepoFilter";
 import { Button, Callout, Card, CardHeader, DataTable, EmptyState, Spinner, StatTile, full } from "../components/ui";
-import { aggregateOwnership, ownershipContributors, downloadOwnership, type GithubAccounts, type GroupBy, type OwnershipReport } from "../lib/lineOwnership";
+import { aggregateOwnership, contributorsFromOwnership, downloadOwnership, type GithubAccounts, type GroupBy, type OwnershipReport } from "../lib/lineOwnership";
 import { NO_CONTRIBUTORS } from "../lib/contributorSelection";
 import { githubAccounts, ownershipHistory, ownershipSnapshots } from "../lib/db/lineOwnership";
 
@@ -45,15 +45,28 @@ export function LineOwnership() {
   const accountMap = accounts.data ?? NO_ACCOUNTS;
   const rows = repoIds.length ? snapshots.data ?? [] : [];
   const historyPoints = repoIds.length ? history.data ?? [] : [];
-  const chartRepositories = useMemo(() => rows.filter((r) => r.report != null).map((r) => ({ id: r.repo_id, name: r.full_name })), [rows]);
-  const reports = useMemo(() => rows.map((r) => r.report).filter((r): r is OwnershipReport => r != null), [rows]);
-  const contributors = useMemo(() => ownershipContributors(reports, botPatterns, accountMap), [reports, botPatterns, accountMap]);
-  const summary = useMemo(() => aggregateOwnership(reports, groupBy, selectedLogins, accountMap), [reports, groupBy, selectedLogins, accountMap]);
+  // A new selection or grouping walks every credit and every history day. Let the
+  // control paint first and keep the previous figures until that walk finishes.
+  const deferredRows = useDeferredValue(rows);
+  const deferredHistory = useDeferredValue(historyPoints);
+  const deferredGroupBy = useDeferredValue(groupBy);
+  const deferredLogins = useDeferredValue(selectedLogins);
+  const chartRepositories = useMemo(() => deferredRows.filter((r) => r.report != null).map((r) => ({ id: r.repo_id, name: r.full_name })), [deferredRows]);
+  const historyRepositories = useMemo(() => deferredRows.map((row) => ({ id: row.repo_id, name: row.full_name })), [deferredRows]);
+  const reports = useMemo(() => deferredRows.map((r) => r.report).filter((r): r is OwnershipReport => r != null), [deferredRows]);
+  const everyone = useMemo(() => aggregateOwnership(reports, "person", [], accountMap), [reports, accountMap]);
+  const contributors = useMemo(() => contributorsFromOwnership(everyone, botPatterns, accountMap), [everyone, botPatterns, accountMap]);
+  const summary = useMemo(() => deferredGroupBy === "person" && deferredLogins.length === 0
+    ? everyone
+    : aggregateOwnership(reports, deferredGroupBy, deferredLogins, accountMap),
+  [everyone, reports, deferredGroupBy, deferredLogins, accountMap]);
+  const summaryStale = deferredRows !== rows || deferredGroupBy !== groupBy || deferredLogins !== selectedLogins;
+  const historyStale = deferredHistory !== historyPoints || deferredLogins !== selectedLogins;
   const filteredLinesByRepo = useMemo(() => new Map(chartRepositories.map((r, i) => [r.id, summary.byRepository[i].totalLines])), [chartRepositories, summary]);
   const missing = rows.filter((r) => !r.report).length;
   const failed = rows.filter((r) => r.status === "error").length;
   const exportReport = { authors: summary.authors, totalLines: summary.totalLines, creditedLines: summary.creditedLines,
-    coauthoredLines: summary.coauthoredLines, groupBy, selectedContributors: selectedLogins.length ? selectedLogins.filter((login) => login !== NO_CONTRIBUTORS) : null, repositories: rows.map((r) => ({
+    coauthoredLines: summary.coauthoredLines, groupBy: deferredGroupBy, selectedContributors: deferredLogins.length ? deferredLogins.filter((login) => login !== NO_CONTRIBUTORS) : null, repositories: deferredRows.map((r) => ({
     repository: r.full_name, revision: r.revision, calculatedAt: r.calculated_at, checkedAt: r.checked_at, status: r.status, totalLines: filteredLinesByRepo.get(r.repo_id) ?? null,
   })) };
   return (
@@ -83,18 +96,19 @@ export function LineOwnership() {
       {reports.length > 0 && <>
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <StatTile label="Surviving lines" value={full(summary.totalLines)} hint="Unique lines in the synced code" />
-          <StatTile label="People" value={full(summary.authors.length)} hint={`Grouped by ${groupBy}`} />
+          <StatTile label="People" value={full(summary.authors.length)} hint={`Grouped by ${deferredGroupBy}`} />
           <StatTile label="Co-authored lines" value={full(summary.coauthoredLines)} hint={`${full(summary.creditedLines)} person-line credits`} />
           <StatTile label="Repositories" value={`${full(reports.length)} / ${full(repoIds.length)}`} hint="With a saved ownership snapshot" />
         </div>
-        {historyPoints.length === 0 && !history.isLoading && <p className="text-[12px] text-ink-muted">Ownership history builds during sync. The daily chart appears once each default-branch commit has been recorded.</p>}
-        {historyPoints.length > 0 && <OwnershipHistoryChart points={historyPoints} selectedLogins={selectedLogins} accounts={accountMap} loading={history.isFetching} repositories={rows.map((row) => ({ id: row.repo_id, name: row.full_name }))} />}
-        <LineOwnershipCharts summary={summary} repositories={chartRepositories} loading={snapshots.isFetching} />
+        {historyPoints.length === 0 && deferredHistory.length === 0 && !history.isLoading && !history.isFetching && !historyStale
+          ? <p className="text-[12px] text-ink-muted">Ownership history builds during sync. The daily chart appears once each default-branch commit has been recorded.</p>
+          : <OwnershipHistoryChart points={deferredHistory} selectedLogins={deferredLogins} accounts={accountMap} loading={history.isLoading || history.isFetching || historyStale} repositories={historyRepositories} />}
+        <LineOwnershipCharts summary={summary} repositories={chartRepositories} loading={snapshots.isFetching || summaryStale} />
         <p className="text-[12px] text-ink-muted">Person grouping merges shared names, emails, and GitHub accounts across repositories. Use Email to separate people who share a name. The contributor selector shares selections with other pages; Deselect bots removes detected bots from that selection.</p>
       </>}
-      {rows.length > 0 && <Card>
+      {deferredRows.length > 0 && <Card>
         <CardHeader title="Repository snapshots" subtitle="Saved commit and last successful calculation for each repository. Sync changes updates touched files; Full re-sync rebuilds all ownership." />
-        <DataTable rows={rows} rowKey={(r) => r.repo_id} columns={[
+        <DataTable rows={deferredRows} rowKey={(r) => r.repo_id} columns={[
           { key: "repo", header: "Repository", render: (r) => r.full_name, sortValue: (r) => r.full_name },
           { key: "lines", header: "Lines", align: "right", render: (r) => r.report ? full(filteredLinesByRepo.get(r.repo_id) ?? 0) : "—", sortValue: (r) => filteredLinesByRepo.get(r.repo_id) ?? -1 },
           { key: "commit", header: "Commit", render: (r) => r.revision ? <code title={r.revision}>{r.revision.slice(0, 12)}</code> : r.report ? "Empty repository" : "—" },

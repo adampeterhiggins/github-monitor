@@ -1,9 +1,9 @@
-import { useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useDeferredValue, useMemo, useState } from "react";
 import { bucketLabel } from "../lib/agg/series";
 import { formatDate } from "../lib/agg/weeks";
-import { ownershipHistoryBuckets, ownershipHistorySeries, type GithubAccounts, type OwnershipHistoryPoint, type OwnershipHistorySplit, type OwnershipPeriod, type OwnershipReading, type aggregateOwnership } from "../lib/lineOwnership";
+import { ownershipHistoryBuckets, prepareOwnershipHistory, projectOwnershipHistory, type GithubAccounts, type OwnershipHistoryPoint, type OwnershipHistorySeries, type OwnershipHistorySplit, type OwnershipPeriod, type OwnershipReading, type aggregateOwnership } from "../lib/lineOwnership";
 import { HeatMatrix, RankedBars, TimelineArea, type TimelineShape } from "./charts";
-import { ChartCard, DataTable, FilterPopover, LabeledControl, Segmented, full } from "./ui";
+import { ChartCard, DataTable, FilterPopover, LabeledControl, Segmented, Spinner, full } from "./ui";
 
 type Summary = ReturnType<typeof aggregateOwnership>;
 const percent = (value: number) => `${value.toFixed(1)}%`;
@@ -77,6 +77,29 @@ function remember<T>(key: string, value: T, set: (value: T) => void) {
   set(value);
 }
 
+/** The plotted series. Memoised so a control change can paint before Recharts
+ * rebuilds thousands of daily marks. */
+const HistoryPlot = memo(function HistoryPlot({
+  plotted, series, shape, stackMode, values, reading, period, activeKeys, onToggleKey,
+}: {
+  plotted: Array<Record<string, number>>;
+  series: OwnershipHistorySeries["series"];
+  shape: TimelineShape;
+  stackMode: "stacked" | "overlaid";
+  values: "total" | "share";
+  reading: OwnershipReading;
+  period: OwnershipPeriod;
+  activeKeys: Set<string>;
+  onToggleKey: (key: string) => void;
+}) {
+  const periodLabel = (week: number) => period === "day" ? formatDate(week * 1000) : bucketLabel(week, period);
+  return series.length === 0
+    ? <p className="text-[12px] text-ink-muted">No surviving lines match these filters.</p>
+    : <TimelineArea data={plotted} series={series} shape={shape} stackMode={stackMode} values={values} height={280}
+      withBrush={plotted.length > 45} activeKeys={activeKeys} onToggleKey={onToggleKey}
+      valueLabel={values === "share" ? (reading === "period" ? "of that period's change" : "of credited lines") : "lines"} labelOf={periodLabel} />;
+});
+
 /** Daily first-parent history. Person grouping is fixed because that is what was saved. */
 export function OwnershipHistoryChart({ points, selectedLogins, repositories, accounts, loading }: {
   points: OwnershipHistoryPoint[];
@@ -95,33 +118,47 @@ export function OwnershipHistoryChart({ points, selectedLogins, repositories, ac
   const [activeKeys, setActiveKeys] = useState<Set<string>>(() => new Set());
   const chooseReading = useCallback((value: OwnershipReading) => remember("github-monitor.ownership.reading", value, setReading), []);
   const choosePeriod = useCallback((value: OwnershipPeriod) => remember("github-monitor.ownership.period", value, setPeriod), []);
-  const repoNames = useMemo(() => new Map(repositories.map((repo) => [repo.id, repo.name])), [repositories]);
-  const { data, series } = useMemo(
-    () => ownershipHistorySeries(points, selectedLogins, {
-      split,
-      limit: seriesLimit === "all" ? Number.POSITIVE_INFINITY : Number(seriesLimit),
-      repoNames,
-      accounts,
-    }),
-    [points, selectedLogins, split, seriesLimit, repoNames, accounts],
-  );
-  const plotted = useMemo(
-    () => ownershipHistoryBuckets(data, series.map((item) => item.key), period, reading),
-    [data, series, period, reading],
-  );
-  const singleSeries = split === "total";
-  const toggleKey = (key: string) => setActiveKeys((prev) => {
+  const toggleKey = useCallback((key: string) => setActiveKeys((prev) => {
     if (prev.size === 0) return new Set([key]);
     const next = new Set(prev);
     if (next.has(key)) next.delete(key);
     else next.add(key);
     return next;
-  });
-  if (!data.length) return null;
+  }), []);
+  // The join across every day is independent of how the chart is drawn. Defer the
+  // drawing so the control updates on the click and the marks catch up after.
+  const deferredSplit = useDeferredValue(split);
+  const deferredLimit = useDeferredValue(seriesLimit);
+  const deferredReading = useDeferredValue(reading);
+  const deferredPeriod = useDeferredValue(period);
+  const deferredShape = useDeferredValue(shape);
+  const deferredStack = useDeferredValue(stackMode);
+  const deferredValues = useDeferredValue(values);
+  const repoNames = useMemo(() => new Map(repositories.map((repo) => [repo.id, repo.name])), [repositories]);
+  const prepared = useMemo(
+    () => prepareOwnershipHistory(points, selectedLogins, accounts),
+    [points, selectedLogins, accounts],
+  );
+  const { data, series } = useMemo(
+    () => projectOwnershipHistory(prepared, {
+      split: deferredSplit,
+      limit: deferredLimit === "all" ? Number.POSITIVE_INFINITY : Number(deferredLimit),
+      repoNames,
+    }),
+    [prepared, deferredSplit, deferredLimit, repoNames],
+  );
+  const plotted = useMemo(
+    () => ownershipHistoryBuckets(data, series.map((item) => item.key), deferredPeriod, deferredReading),
+    [data, series, deferredPeriod, deferredReading],
+  );
+  const plotStale = deferredSplit !== split || deferredLimit !== seriesLimit || deferredReading !== reading
+    || deferredPeriod !== period || deferredShape !== shape || deferredStack !== stackMode || deferredValues !== values;
+  const singleSeries = split === "total";
+  const waiting = data.length === 0;
   const changed = shape !== "area" || split !== "people" || seriesLimit !== "8" || stackMode !== "stacked" || values !== "total" || reading !== "cumulative" || period !== "day";
-  const periodLabel = (week: number) => period === "day" ? formatDate(week * 1000) : bucketLabel(week, period);
+  const periodLabel = (week: number) => deferredPeriod === "day" ? formatDate(week * 1000) : bucketLabel(week, deferredPeriod);
   return (
-    <ChartCard title="Ownership over time" loading={loading}
+    <ChartCard title="Ownership over time" loading={loading || plotStale || waiting}
       subtitle={`Credited lines on the default branch. ${historyCaption(reading, period)} Co-authors each receive full credit, so stacked people can exceed surviving lines.`}
       titleAfter={
         <FilterPopover active={changed} width={356}>
@@ -153,11 +190,14 @@ export function OwnershipHistoryChart({ points, selectedLogins, repositories, ac
           sortValue: (row: Record<string, number>) => row[item.key] ?? 0,
         })),
       ]} /> : undefined}>
-      {series.length === 0
-        ? <p className="text-[12px] text-ink-muted">No surviving lines match these filters.</p>
-        : <TimelineArea data={plotted} series={series} shape={shape} stackMode={stackMode} values={values} height={280}
-          withBrush={plotted.length > 45} activeKeys={activeKeys} onToggleKey={toggleKey}
-          valueLabel={values === "share" ? (reading === "period" ? "of that period's change" : "of credited lines") : "lines"} labelOf={periodLabel} />}
+      {waiting ? (
+        <div className="flex h-[280px] items-center justify-center gap-2 text-[12px] text-ink-muted" role="status">
+          <Spinner /> Calculating ownership history…
+        </div>
+      ) : (
+        <HistoryPlot plotted={plotted} series={series} shape={deferredShape} stackMode={deferredStack} values={deferredValues}
+          reading={deferredReading} period={deferredPeriod} activeKeys={activeKeys} onToggleKey={toggleKey} />
+      )}
     </ChartCard>
   );
 }
