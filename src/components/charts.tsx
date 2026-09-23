@@ -275,6 +275,7 @@ export function TimelineArea({
   yMin = 0,
   animate = true,
   yFit = false,
+  hideOther = false,
 }: {
   data: Array<Record<string, number>>;
   series: StackSeriesSpec[];
@@ -287,6 +288,11 @@ export function TimelineArea({
    * upwards (totals). Stacks and shares keep a zero baseline; overlaid totals need not.
    */
   yFit?: boolean;
+  /**
+   * Leave the folded "Other" band undrawn. It still counts: shares and totals are
+   * measured against every series, so hiding it rescales nothing.
+   */
+  hideOther?: boolean;
   stackMode?: "stacked" | "overlaid";
   /**
    * What the y axis measures. `share` reads the total at each point as 100% and
@@ -348,6 +354,8 @@ export function TimelineArea({
   /* A selection that nothing on screen matches is no selection at all. Without
      this the chart dims every band and the legend offers nothing to click, because
      the series that would clear the filter is not there to be clicked. */
+  /** What is drawn, in the legend and in the tooltip list. `colored` stays the base for shares and totals. */
+  const drawn = hideOther ? colored.filter((s) => s.slot != null) : colored;
   const filtered = activeKeys != null && colored.some((s) => activeKeys.has(s.key));
   const isActive = (key: string) => !filtered || activeKeys!.has(key);
   const dim = (key: string) => (isActive(key) ? 1 : 0.18);
@@ -371,7 +379,7 @@ export function TimelineArea({
     plotted === data ? null : new Map(data.map((row) => [row.week, row] as const));
   // Fitted to every series, not just the highlighted ones: highlighting only dims
   // the rest, so the axis must stay put for them to keep their place.
-  const fit = yFit ? fitAxis(plotted, colored.map((s) => s.key), stacked && shape !== "line", normalised) : null;
+  const fit = yFit ? fitAxis(plotted, drawn.map((s) => s.key), stacked && shape !== "line", normalised) : null;
 
   const axes = (
     <>
@@ -413,7 +421,8 @@ export function TimelineArea({
           // Highlighting chooses which series are listed, not what they are measured
           // against: shares and the heading total always count every series, as the
           // plotted shares do.
-          const rows = everyRow.filter((r) => isActive(r.key)).sort((a, b) => Math.abs(b.raw) - Math.abs(a.raw));
+          const shown = new Set(drawn.map((s) => s.key));
+          const rows = everyRow.filter((r) => shown.has(r.key) && isActive(r.key)).sort((a, b) => Math.abs(b.raw) - Math.abs(a.raw));
           const total = everyRow.reduce((a, r) => a + r.raw, 0);
           const churn = everyRow.reduce((a, r) => a + Math.abs(r.raw), 0);
           const capped = rows.slice(0, 10);
@@ -468,7 +477,7 @@ export function TimelineArea({
             stackOffset={stackOffset}
           >
             {axes}
-            {colored.map((s, i) => (
+            {drawn.map((s, i) => (
               <Bar
                 key={s.key}
                 dataKey={s.key}
@@ -476,7 +485,7 @@ export function TimelineArea({
                 fill={s.color}
                 fillOpacity={dim(s.key)}
                 maxBarSize={BAR_MAX}
-                radius={!stacked || i === colored.length - 1 ? geom.radius : [0, 0, 0, 0]}
+                radius={!stacked || i === drawn.length - 1 ? geom.radius : [0, 0, 0, 0]}
                 isAnimationActive={animate}
               />
             ))}
@@ -489,7 +498,7 @@ export function TimelineArea({
             stackOffset={stackOffset}
           >
             {axes}
-            {colored.map((s) => (
+            {drawn.map((s) => (
               <Line
                 key={s.key}
                 type="monotone"
@@ -513,7 +522,7 @@ export function TimelineArea({
             stackOffset={stackOffset}
           >
             {axes}
-            {colored.map((s) => (
+            {drawn.map((s) => (
               <Area
                 key={s.key}
                 type="monotone"
@@ -534,10 +543,10 @@ export function TimelineArea({
         )}
       </ResponsiveContainer>
 
-      {colored.length >= 2 ? (
+      {drawn.length >= 2 ? (
         <div className="mt-2">
           <ClickableLegend
-            items={colored.map((s) => ({ key: s.key, label: s.label, color: s.color }))}
+            items={drawn.map((s) => ({ key: s.key, label: s.label, color: s.color }))}
             isActive={isActive}
             onToggle={onToggleKey}
             filtered={filtered}

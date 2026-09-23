@@ -36,6 +36,7 @@ import {
   ChartCard,
   ChartHeight,
   Card,
+  Checkbox,
   DataTable,
   Dropdown,
   DropdownRow,
@@ -235,6 +236,8 @@ export function Contributors() {
   const [yAxis, setYAxis] = useState<"full" | "fit">(
     () => (localStorage.getItem("github-monitor.yAxis") === "fit" ? "fit" : "full"),
   );
+  /** Leave the folded Other band undrawn; it still counts in every share and total. */
+  const [hideOther, setHideOther] = useState(() => localStorage.getItem("github-monitor.hideOther") === "true");
   /** Series switched off via the legend. Empty means everything is shown. */
   const [activeKeys, setActiveKeys] = useState<Set<string>>(new Set());
 
@@ -662,7 +665,7 @@ export function Contributors() {
    * Stacking is not counted on its own: it only takes effect with a breakdown,
    * which is flagged anyway.
    */
-  const viewChanged = breakdown !== "none" || shape !== "bar" || view !== "week" || yAxis !== "full";
+  const viewChanged = breakdown !== "none" || shape !== "bar" || view !== "week" || yAxis !== "full" || hideOther;
 
   /**
    * The controls a contributor card carries when it is opened full screen.
@@ -673,7 +676,7 @@ export function Contributors() {
    * once here and hand to every card: only the open one ever renders it.
    */
   const cardControls = (
-    <FilterPopover active={shape !== "bar" || cardSplit !== "none" || view !== "week" || yAxis !== "full"} width={420}>
+    <FilterPopover active={shape !== "bar" || cardSplit !== "none" || view !== "week" || yAxis !== "full" || hideOther} width={420}>
         <Segmented<TimelineView>
           ariaLabel="Timeline"
           stretch
@@ -708,6 +711,12 @@ export function Contributors() {
             options={SERIES_LIMITS}
           />
         </LabeledControl>
+        <Checkbox
+          checked={hideOther}
+          disabled={seriesLimit === "all" || cardSplit === "none"}
+          onChange={(v: boolean) => persist("github-monitor.hideOther", v, setHideOther)}
+          label={<span className="text-ink-secondary" title="Other stays in every share and total; it is only not drawn">Hide Other</span>}
+        />
         {seriesLimit === "all" ? (
           <p className="px-0.5 text-[11px] text-ink-muted">
             Past eight series the colours repeat — the legend and tooltip still name
@@ -851,6 +860,12 @@ export function Contributors() {
                     options={SERIES_LIMITS}
                   />
                 </LabeledControl>
+                <Checkbox
+                  checked={hideOther}
+                  disabled={seriesLimit === "all" || breakdown === "none"}
+                  onChange={(v: boolean) => persist("github-monitor.hideOther", v, setHideOther)}
+                  label={<span className="text-ink-secondary" title="Other stays in every share and total; it is only not drawn">Hide Other</span>}
+                />
                 {seriesLimit === "all" ? (
                   <p className="px-0.5 text-[11px] text-ink-muted">
                     Past eight series the colours repeat — the legend and tooltip still name
@@ -948,6 +963,7 @@ export function Contributors() {
             withBrush
             onBrushChange={(r) => handleBrush(r.startIndex, r.endIndex)}
             yFit={yAxis === "fit"}
+            hideOther={hideOther}
           />
 
         </ChartCard>
@@ -1006,7 +1022,7 @@ export function Contributors() {
                   yMax={sharedScale ? cardCharts.ceiling : undefined}
                   yMin={sharedScale ? cardCharts.floor : undefined}
                   repoCount={repos.length}
-                  view={{ shape, stackMode, valueMode, granularity, yFit: yAxis === "fit" && !sharedScale }}
+                  view={{ shape, stackMode, valueMode, granularity, yFit: yAxis === "fit" && !sharedScale, hideOther }}
                   controls={cardControls}
                   showNumbers={showNumbers}
                   span={spanByLogin.get(c.login.toLowerCase()) ?? null}
@@ -1126,6 +1142,7 @@ function ContributorCardView({
     granularity: Granularity;
     /** Only on an own-scale card: a shared ceiling is what makes cards comparable. */
     yFit: boolean;
+    hideOther: boolean;
   };
   /** Shown when the card is opened full screen, where the page's own are hidden. */
   controls: ReactNode;
@@ -1215,6 +1232,7 @@ function ContributorCardView({
         yMax={yMax}
         yMin={yMin}
         yFit={view.yFit}
+        hideOther={view.hideOther}
       />
     );
 

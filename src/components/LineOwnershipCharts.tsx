@@ -9,7 +9,7 @@ import type { NormalizedRepoHistory } from "../lib/ownershipHistory";
 import { selectOwnershipPeople, type OwnershipAccountIndex } from "../lib/ownershipIdentity";
 import { measure, profileRender } from "../lib/perf";
 import { HeatMatrix, RankedBars, TimelineArea, type TimelineShape } from "./charts";
-import { Button, ChartCard, DataTable, FilterPopover, LabeledControl, Segmented, Spinner, full } from "./ui";
+import { Button, ChartCard, Checkbox, DataTable, FilterPopover, LabeledControl, Segmented, Spinner, full } from "./ui";
 
 type Summary = OwnershipSummary;
 const percent = (value: number) => `${value.toFixed(1)}%`;
@@ -113,7 +113,7 @@ const ANIMATION_WINDOW_MS = 1600;
 /** The plotted series. Memoised so a control change can paint before Recharts
  * rebuilds the marks. */
 const HistoryPlot = memo(function HistoryPlot({
-  plotted, series, shape, stackMode, values, reading, labelOf, withBrush, onBrushChange, activeKeys, onToggleKey, animate, yFit,
+  plotted, series, shape, stackMode, values, reading, labelOf, withBrush, onBrushChange, activeKeys, onToggleKey, animate, yFit, hideOther,
 }: {
   plotted: Array<Record<string, number>>;
   series: OwnershipHistorySeries["series"];
@@ -128,12 +128,13 @@ const HistoryPlot = memo(function HistoryPlot({
   onToggleKey: (key: string) => void;
   animate: boolean;
   yFit: boolean;
+  hideOther: boolean;
 }) {
   return series.length === 0
     ? <p className="text-[12px] text-ink-muted">No surviving lines match these filters.</p>
     : <Profiler id="ownership-history" onRender={(id, phase, duration) => profileRender(id, phase, duration)}>
       <TimelineArea data={plotted} series={series} shape={shape} stackMode={stackMode} values={values} height={280}
-        withBrush={withBrush} onBrushChange={onBrushChange} activeKeys={activeKeys} onToggleKey={onToggleKey} animate={animate} yFit={yFit}
+        withBrush={withBrush} onBrushChange={onBrushChange} activeKeys={activeKeys} onToggleKey={onToggleKey} animate={animate} yFit={yFit} hideOther={hideOther}
         valueLabel={values === "share" ? (reading === "period" ? "of that period's change" : "of credited lines") : "lines"} labelOf={labelOf} />
     </Profiler>;
 });
@@ -158,6 +159,7 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
   const [seriesLimit, setSeriesLimit] = useState(() => storedChoice("github-monitor.ownership.seriesLimit", ["4", "6", "8", "all"], "8"));
   const [stackMode, setStackMode] = useState<"stacked" | "overlaid">(() => storedChoice("github-monitor.ownership.stackMode", ["stacked", "overlaid"], "stacked"));
   const [values, setValues] = useState<"total" | "share">(() => storedChoice("github-monitor.ownership.valueMode", ["total", "share"], "total"));
+  const [hideOther, setHideOther] = useState(() => storedChoice("github-monitor.ownership.hideOther", ["true", "false"], "false") === "true");
   const [yAxis, setYAxis] = useState<"full" | "fit">(() => storedChoice("github-monitor.ownership.yAxis", ["full", "fit"], "full"));
   const [repoLabel, setRepoLabel] = useState<"full" | "name">(() => storedChoice("github-monitor.ownership.repoLabel", ["full", "name"], "full"));
   const [reading, setReading] = useState<OwnershipReading>(() => storedTimeline().reading);
@@ -228,7 +230,7 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
     || deferredPeriod !== period || deferredShape !== shape || deferredStack !== stackMode || deferredValues !== values;
   const singleSeries = split === "total";
   const waiting = histories.every((h) => h.days.length === 0);
-  const changed = yAxis !== "full" || repoLabel !== "full" || shape !== "area" || split !== "people" || seriesLimit !== "8" || stackMode !== "stacked" || values !== "total" || reading !== "cumulative" || period !== "day";
+  const changed = hideOther || yAxis !== "full" || repoLabel !== "full" || shape !== "area" || split !== "people" || seriesLimit !== "8" || stackMode !== "stacked" || values !== "total" || reading !== "cumulative" || period !== "day";
   const periodLabel = useCallback((week: number) => deferredPeriod === "day" ? formatDate(week * 1000) : bucketLabel(week, deferredPeriod), [deferredPeriod]);
   const plotLabel = useCallback((week: number) => {
     const end = plot.ends.get(week);
@@ -254,7 +256,7 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
   // refresh would replay the transition over and over. Dense plots never animate.
   const viewKey = [
     waiting || series.length === 0 ? "empty" : "ready", deferredShape, deferredSplit, deferredLimit, deferredStack,
-    deferredValues, deferredReading, deferredPeriod, zoom?.from, zoom?.to, fromMs, toMs, yAxis, selectedLogins.join("\0"),
+    deferredValues, deferredReading, deferredPeriod, zoom?.from, zoom?.to, fromMs, toMs, yAxis, hideOther, selectedLogins.join("\0"),
     repositories.map((r) => r.id).join(","),
   ].join("|");
   // Held for the length of Recharts' animation, so a re-render moments after the
@@ -287,6 +289,9 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
         <LabeledControl label="Show">
           <Segmented ariaLabel="Series before Other" variant="bare" stretch value={seriesLimit} options={HISTORY_LIMITS} disabled={singleSeries} onChange={(value) => remember("github-monitor.ownership.seriesLimit", value, setSeriesLimit)} />
         </LabeledControl>
+        <Checkbox checked={hideOther} disabled={singleSeries || seriesLimit === "all"}
+          onChange={(value) => remember("github-monitor.ownership.hideOther", value, setHideOther)}
+          label={<span className="text-ink-secondary" title="Other stays in every share and total; it is only not drawn">Hide Other</span>} />
         {seriesLimit === "all" && !singleSeries ? <p className="px-0.5 text-[11px] text-ink-muted">Every series is drawn. Past eight the colours repeat — the legend and tooltip still name each one.</p> : null}
         <Segmented ariaLabel="Stacking" stretch value={stackMode} options={HISTORY_STACKS} disabled={singleSeries} onChange={(value) => remember("github-monitor.ownership.stackMode", value, setStackMode)} />
         <Segmented ariaLabel="Values" stretch value={values} options={HISTORY_VALUES} disabled={singleSeries} onChange={(value) => remember("github-monitor.ownership.valueMode", value, setValues)} />
@@ -310,7 +315,7 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
         ) : (
           <HistoryPlot plotted={plot.rows} series={series} shape={deferredShape} stackMode={deferredStack} values={deferredValues}
             reading={deferredReading} labelOf={plotLabel} withBrush={plot.rows.length > 1} onBrushChange={onBrushChange}
-            activeKeys={activeKeys} onToggleKey={toggleKey} animate={animate} yFit={yAxis === "fit"} />
+            activeKeys={activeKeys} onToggleKey={toggleKey} animate={animate} yFit={yAxis === "fit"} hideOther={hideOther} />
         )}
       </div>
       {(plot.factor > 1 || zoom || partial > 0) && <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-ink-muted">
