@@ -12,6 +12,7 @@ import {
 } from "../lib/ownershipMappings";
 import { resolveIdentity, type ManualMapping, type OwnershipAccountIndex } from "../lib/ownershipIdentity";
 import { ownershipEngine, publishOwnership, setOwnershipEngine, type OwnershipEngine } from "../lib/ownershipEvents";
+import { JSON_FILE, saveTextFile } from "../lib/saveFile";
 import { Button, Callout, Card, CardHeader, Checkbox, DataTable, Segmented, Spinner, full } from "./ui";
 
 type Filter = "attention" | "all";
@@ -216,17 +217,6 @@ function MappingEditor({ row, inventory, index, token, repoName, onCancel, onSav
   );
 }
 
-function download(name: string, body: string) {
-  const url = URL.createObjectURL(new Blob([body], { type: "application/json" }));
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = name;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
 function SavedMappings({ mappings, index, repoName, inventory, token, repos, onRemove, onImport }: {
   mappings: readonly ManualMapping[];
   index: OwnershipAccountIndex | undefined;
@@ -267,8 +257,20 @@ function SavedMappings({ mappings, index, repoName, inventory, token, repos, onR
       <div className="mb-3 flex flex-wrap items-center gap-2 text-[12px]">
         <Button disabled={mappings.length === 0 && todo === 0}
           title="Save every mapping, plus an entry to fill in for each unmatched author, to a file you can edit and import"
-          onClick={() => download(`contributor-mappings-${new Date().toISOString().slice(0, 10)}.json`,
-            JSON.stringify(exportMappings(mappings, repoName, index, inventory), null, 2) + "\n")}>
+          onClick={async () => {
+            setImported(null);
+            setImportError(null);
+            try {
+              const path = await saveTextFile({
+                name: `contributor-mappings-${new Date().toISOString().slice(0, 10)}.json`,
+                contents: JSON.stringify(exportMappings(mappings, repoName, index, inventory), null, 2) + "\n",
+                ...JSON_FILE,
+              });
+              if (path) setImported(`Saved to ${path}.`);
+            } catch (e) {
+              setImportError((e as Error).message);
+            }
+          }}>
           Export…
         </Button>
         <Button onClick={() => { setImported(null); setImportError(null); fileInput.current?.click(); }}>Import…</Button>

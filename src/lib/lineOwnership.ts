@@ -1,5 +1,6 @@
 import { bucketStart, type Granularity } from "./agg/series";
 import { weekStart } from "./agg/weeks";
+import { CSV_FILE, JSON_FILE, saveTextFile } from "./saveFile";
 import {
   isBotPerson, normalizeEmail, normalizeName, OwnershipIdentityIndex, selectOwnershipPeople, toAccountIndex, withNoreplyLogins,
   type MatchSource, type OwnershipAccountIndex,
@@ -336,16 +337,10 @@ export function ownershipCsv(report: { authors: Array<OwnershipAuthor & Partial<
   return rows.map((row) => row.map(cell).join(",")).join("\r\n") + "\r\n";
 }
 
-export function downloadOwnership(report: { authors: OwnershipAuthor[]; totalLines: number; creditedLines?: number }, format: "json" | "csv") {
+/** Save through the system dialog. Resolves to the saved path, or null when cancelled. */
+export function downloadOwnership(report: { authors: OwnershipAuthor[]; totalLines: number; creditedLines?: number }, format: "json" | "csv"): Promise<string | null> {
   const body = format === "json" ? JSON.stringify(report, null, 2) + "\n" : ownershipCsv(report);
-  const url = URL.createObjectURL(new Blob([body], { type: format === "json" ? "application/json" : "text/csv;charset=utf-8" }));
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = `line-ownership.${format}`;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return saveTextFile({ name: `line-ownership-${new Date().toISOString().slice(0, 10)}.${format}`, contents: body, ...(format === "json" ? JSON_FILE : CSV_FILE) });
 }
 
 export {
