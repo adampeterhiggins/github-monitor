@@ -309,12 +309,12 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
           </div>
         ) : (
           <HistoryPlot plotted={plot.rows} series={series} shape={deferredShape} stackMode={deferredStack} values={deferredValues}
-            reading={deferredReading} labelOf={plotLabel} withBrush={!zoom && plot.rows.length > 45} onBrushChange={onBrushChange}
+            reading={deferredReading} labelOf={plotLabel} withBrush={plot.rows.length > 1} onBrushChange={onBrushChange}
             activeKeys={activeKeys} onToggleKey={toggleKey} animate={animate} yFit={yAxis === "fit"} />
         )}
       </div>
       {(plot.factor > 1 || zoom || partial > 0) && <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-ink-muted">
-        {plot.factor > 1 && <span role="note">Plotted at {plot.factor}-{span} resolution{deferredReading === "cumulative" ? ", each point the level at the end of its range" : ", each point the change across its range"}. {zoom ? "" : "Drag the brush to zoom for "}{zoom ? "" : `${span} detail. `}The table lists every {span}.</span>}
+        {plot.factor > 1 && <span role="note">Plotted at {plot.factor}-{span} resolution{deferredReading === "cumulative" ? ", each point the level at the end of its range" : ", each point the change across its range"}. Drag the handles below the chart to zoom in for {span} detail. The table lists every {span}.</span>}
         {zoom && <><span>Showing {periodLabel(zoom.from)} – {periodLabel(zoom.to)}.</span><Button variant="ghost" onClick={() => setZoom(null)}>Reset zoom</Button></>}
         {partial > 0 && <span>History for {full(partial)} {partial === 1 ? "repository is" : "repositories are"} still being recorded, so the latest day may change.</span>}
       </div>}
