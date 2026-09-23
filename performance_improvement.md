@@ -8,6 +8,8 @@ We recently added a line ownership functionality but the performance is woeful b
 
 I asked this question to multiple models, here were the responses.
 
+[Detailed implementation plan](performance_improvement_plan.md)
+
 ## Transcripts
 
 1. [GPT 6 Sol Medium](#transcript-1)
