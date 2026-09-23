@@ -490,7 +490,33 @@ try {
   assert.notEqual(hinted.users.get("42")?.login, "stale-name", "but never overrides a known one");
   for (const row of plan.rows.filter((r) => r.input)) await lib.saveManualMapping(db, row.input);
   assert.equal((await lib.listManualMappings(db)).find((m) => m.matchValue === "new@example.com").githubId, "11");
-  pass("contributor mappings export and import: preview, repository matching, validation, registry hints");
+  const todoInventory = lib.mappingInventory([
+    { repoId: 8, report: { credits: [{ lines: 4, people: [{ name: "Casey", email: "casey@home" }] }, { lines: 2, people: [{ name: "Build Box", email: "" }] }] }, legacyHistory: false },
+  ], lib.buildAccountIndex({}));
+  const template = lib.exportMappings([], new Map([[8, "org/eight"]]), undefined, todoInventory);
+  assert.equal(template.mappings.length, 2, "with no saved mappings, export lists every author to map");
+  const casey = template.mappings.find((m) => m.matchValue === "casey@home");
+  assert.deepEqual([casey.login, casey.githubId, casey.survivingLines, casey.gitNames], ["", "", 4, ["Casey"]]);
+  assert.equal(template.mappings.find((m) => m.matchKind === "repo_name").repository, "org/eight");
+  assert.ok(template.instructions.includes("login"));
+  let todoPlan = lib.planMappingImport(JSON.stringify(template), [], [{ id: 8, fullName: "org/eight" }]);
+  assert.deepEqual(todoPlan.rows.map((r) => r.status), ["unfilled", "unfilled"], "an untouched template imports nothing and reports no errors");
+  casey.login = "@CaseyGH";
+  template.mappings.push({ matchKind: "email", matchValue: "ghost@x", githubId: "", login: "nobody-here", reviewedAutoConflict: false });
+  todoPlan = lib.planMappingImport(JSON.stringify(template), [], [{ id: 8, fullName: "org/eight" }]);
+  assert.deepEqual(todoPlan.rows.map((r) => r.status), ["lookup", "unfilled", "lookup"], "a login alone is enough to fill an entry");
+  const asked = [];
+  const resolvedRows = await lib.resolveImportLookups(todoPlan.rows, [], async (login) => {
+    asked.push(login);
+    return login === "CaseyGH" ? { id: "77", login: "caseygh" } : `No GitHub account is named ${login}`;
+  });
+  assert.deepEqual(asked, ["CaseyGH", "nobody-here"]);
+  assert.deepEqual(resolvedRows.map((r) => r.status), ["new", "unfilled", "invalid"]);
+  assert.deepEqual([resolvedRows[0].input.githubId, resolvedRows[0].input.loginAtSave], ["77", "caseygh"], "the account ID and GitHub's spelling are saved");
+  assert.match(resolvedRows[2].reason, /No GitHub account/);
+  const exportedAgain = lib.exportMappings([{ mappingId: 1, matchKind: "email", matchValue: "casey@home", repoId: null, githubId: "77", loginAtSave: "caseygh", reviewedAutoConflict: false }], new Map(), undefined, todoInventory);
+  assert.equal(exportedAgain.mappings.filter((m) => m.matchValue === "casey@home").length, 1, "a saved mapping is not also listed as a to-do");
+  pass("contributor mappings export and import: preview, repository matching, validation, registry hints, fill-in templates");
 
   db.sqlite.exec("INSERT INTO repos (id, owner, name, full_name) VALUES (1, 'org', 'one', 'org/one'), (2, 'org', 'two', 'org/two')");
   const point = (revision, committedAt, lines, groups = [[[0], lines]]) => ({ revision, committedAt, totalLines: lines, coauthoredLines: 0, groups });
