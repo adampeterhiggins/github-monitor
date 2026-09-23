@@ -2,7 +2,7 @@
 
 This note records what changed when line ownership moved to account-aligned
 identity and the incremental history engine, and which differences from the old
-output are intentional. The plan is `performance_synthesised_plan.md`.
+output are intentional. The plan is [performance_synthesised_plan.md](performance_synthesised_plan.md).
 
 ## Intentional identity changes
 
