@@ -15,9 +15,8 @@ I asked this question to multiple models, here were the responses.
 3. [GPT 6 Luna Xhigh](#transcript-3)
 4. [GPT 6 Astra Medium](#transcript-4)
 5. [Opus 5.5 High](#transcript-5)
-6. [Opus 5.5 Medium](#transcript-6)
-7. [Fable 5.1 High](#transcript-7)
-8. [Grok 4.7 XHigh Fast](#transcript-8)
+6. [Fable 5.1 High](#transcript-6)
+7. [Grok 4.7 500K Extra High Fast](#transcript-7)
 
 <a id="transcript-1"></a>
 
@@ -587,6 +586,8 @@ ui.tsx
 
 ### Opus 5.5 High
 
+This transcript includes an attempted write to `performance_improvement.md`. The model headings inside the captured file output are part of that write, not new top-level transcripts.
+
 `````text
  recently added a line ownership functionality but the performance is woeful both in terms of synciactually goes.
 
@@ -777,13 +778,7 @@ total first-parent commits across orn-iac-application.git'), (3813, 'orc
 hestra.git'), (3127, 'langgraph.git'), (2650, 'raincloud-dags.git'), (1641, 'cin-fd-surveys.git')]
 at ~180 ms/commit (serialised by the: 1.9 hours
 Updated performance_improvement.md (+25 -0)
-`````
 
-<a id="transcript-6"></a>
-
-### Opus 5.5 Medium
-
-`````text
 ❯ We recently added a line ownership functionality but the performance is woeful both in te
 rms of syncing …
 
@@ -1388,7 +1383,7 @@ Want me to start on step 1, or go strai
 ※ recap: The goal is to fix the slow lineredraws, and the ranked options arewritten up in performance_improvement.md. Next, you choose whether I start with the quick UI fix or the sync rewrite. (disable recaps in /config)
 `````
 
-<a id="transcript-7"></a>
+<a id="transcript-6"></a>
 
 ### Fable 5.1 High
 
@@ -1490,9 +1485,9 @@ If you want, I can write this up as a plan file in the repo, or start with items
 ※ recap: I analysed why line ownership sync and charts are so slow and delivered ranked fix options with measured wins. Next: you pick which to implement, likely the UI interning fix and daily sampling of the sync walk first. (disable recaps in /config)
 `````
 
-<a id="transcript-8"></a>
+<a id="transcript-7"></a>
 
-### Grok 4.7 XHigh Fast
+### Grok 4.7 500K Extra High Fast
 
 `````text
   Cursor Agent
