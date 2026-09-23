@@ -398,13 +398,12 @@ try {
 
   const shareRows = [{ week: 0, a: 0.17, b: 0.04 }, { week: 1, a: 0.12, b: 0.06 }];
   assert.deepEqual(lib.fitAxis(shareRows, ["a", "b"], false, true), { domain: [0, 0.2], ticks: [0, 0.05, 0.1, 0.15, 0.2] }, "overlaid shares stretch to the largest one");
-  assert.deepEqual(lib.fitAxis(shareRows, ["b"], false, true).domain, [0, 0.08], "the axis follows the series in view");
   assert.equal(lib.fitAxis([{ week: 0, a: 0.6, b: 0.4 }], ["a", "b"], true, true).domain[1], 1, "a full stack of shares stops at 100%");
   assert.deepEqual(lib.fitAxis([{ week: 0, a: 1200 }, { week: 1, a: 1450 }], ["a"], false, false).domain, [1200, 1500], "overlaid totals need not start at zero");
   assert.equal(lib.fitAxis([{ week: 0, a: 1200, b: 300 }], ["a", "b"], true, false).domain[0], 0, "a stack keeps its zero baseline");
   assert.deepEqual(lib.fitAxis([{ week: 0, a: -30 }, { week: 1, a: 50 }], ["a"], false, false).domain, [-40, 60], "negative changes stay in range");
   assert.equal(lib.fitAxis([{ week: 0, a: 0 }], ["a"], false, false), null, "nothing to fit falls back to the default axis");
-  pass("fit-to-data y axis: shares, totals, stacks, negatives and the series in view");
+  pass("fit-to-data y axis: shares, totals, stacks and negatives");
 
   /* ── Storage ────────────────────────────────────────────────────────── */
 

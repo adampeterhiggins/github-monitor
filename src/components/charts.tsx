@@ -369,7 +369,9 @@ export function TimelineArea({
      rows rather than whatever was plotted. */
   const rawByWeek =
     plotted === data ? null : new Map(data.map((row) => [row.week, row] as const));
-  const fit = yFit ? fitAxis(plotted, colored.filter((s) => isActive(s.key)).map((s) => s.key), stacked && shape !== "line", normalised) : null;
+  // Fitted to every series, not just the highlighted ones: highlighting only dims
+  // the rest, so the axis must stay put for them to keep their place.
+  const fit = yFit ? fitAxis(plotted, colored.map((s) => s.key), stacked && shape !== "line", normalised) : null;
 
   const axes = (
     <>
@@ -405,19 +407,21 @@ export function TimelineArea({
           if (!active || !payload?.length) return null;
           const plottedRow = payload[0].payload as Record<string, number>;
           const row = rawByWeek?.get(Number(plottedRow.week)) ?? plottedRow;
-          const rows = colored
-            .filter((s) => isActive(s.key))
-            .map((s) => ({ label: s.label, raw: Number(row[s.key] ?? 0), color: s.color }))
-            .filter((r) => r.raw !== 0)
-            .sort((a, b) => Math.abs(b.raw) - Math.abs(a.raw));
-          const total = rows.reduce((a, r) => a + r.raw, 0);
-          const churn = rows.reduce((a, r) => a + Math.abs(r.raw), 0);
+          const everyRow = colored
+            .map((s) => ({ key: s.key, label: s.label, raw: Number(row[s.key] ?? 0), color: s.color }))
+            .filter((r) => r.raw !== 0);
+          // Highlighting chooses which series are listed, not what they are measured
+          // against: shares and the heading total always count every series, as the
+          // plotted shares do.
+          const rows = everyRow.filter((r) => isActive(r.key)).sort((a, b) => Math.abs(b.raw) - Math.abs(a.raw));
+          const total = everyRow.reduce((a, r) => a + r.raw, 0);
+          const churn = everyRow.reduce((a, r) => a + Math.abs(r.raw), 0);
           const capped = rows.slice(0, 10);
           return (
             <TooltipShell
               palette={palette}
               heading={`${labelOf(Number(row.week))}${
-                rows.length > 1 ? ` · ${full(total)} ${valueLabel}` : ""
+                everyRow.length > 1 ? ` · ${full(total)} ${valueLabel}` : ""
               }`}
               rows={[
                 ...capped.map((r) => ({
