@@ -5,6 +5,7 @@ import { PageShell } from "../components/PageShell";
 import { LineOwnershipCharts, OwnershipHistoryChart } from "../components/LineOwnershipCharts";
 import { UserFilter } from "../components/UserFilter";
 import { RepoFilter } from "../components/RepoFilter";
+import { PeriodFilter } from "../components/FilterBar";
 import { Button, Callout, Card, CardHeader, DataTable, EmptyState, Spinner, StatTile, full } from "../components/ui";
 import { aggregateOwnership, contributorsFromOwnership, downloadOwnership, ownershipIdentity, type OwnershipReport } from "../lib/lineOwnership";
 import { NO_CONTRIBUTORS } from "../lib/contributorSelection";
@@ -13,6 +14,8 @@ import { normalizeRepoHistory, type NormalizedRepoHistory, type RepoHistoryData 
 import { EMPTY_ACCOUNT_INDEX } from "../lib/ownershipIdentity";
 import { subscribeOwnership } from "../lib/ownershipEvents";
 import { measure } from "../lib/perf";
+import { useScope } from "../lib/hooks";
+import { formatDate } from "../lib/agg/weeks";
 
 // Stable references keep useQueries from re-running its combine on every render.
 const combineReports = (results: UseQueryResult<OwnershipReport | null>[]) => ({
@@ -45,6 +48,8 @@ export function LineOwnership() {
   const botPatterns = useApp((s) => s.botPatterns);
   const selectedLogins = useApp((s) => s.selectedLogins);
   const queryClient = useQueryClient();
+  const { range } = useScope();
+  const period = useApp((s) => s.period);
   const repoIds = useMemo(() => [...selectedRepoIds].sort((a, b) => a - b), [selectedRepoIds]);
   const repoKey = repoIds.join(",");
 
@@ -172,10 +177,13 @@ export function LineOwnership() {
   return (
     <PageShell title="Line ownership" subtitle="Who owns the surviving code across your organisation" filters={false} requiresData={false}
       filterContent={<div className="flex flex-wrap items-center gap-3 border-b border-hairline bg-plane px-5 py-2.5">
+        <PeriodFilter />
         <RepoFilter />
         <UserFilter support="full" snapshot={{ contributors, isLoading: loadingReports }} />
         {reports.length > 0 && <><Button onClick={() => downloadOwnership(exportReport, "csv")}>Export CSV</Button><Button onClick={() => downloadOwnership(exportReport, "json")}>Export JSON</Button></>}
-        <span className="ml-auto text-[11px] text-ink-muted">Latest synced default branches</span>
+        <span className="ml-auto text-[11px] text-ink-muted" title="The period limits Ownership over time. Surviving-line figures describe the latest synced default branches.">
+          {period === "all" ? "All history" : `${formatDate(range.fromMs)} – ${formatDate(range.toMs)}`} · latest synced default branches
+        </span>
       </div>}>
       {syncing && <div role="status" className="flex items-center gap-2 text-[12px] text-ink-secondary"><Spinner /> Sync in progress. Each repository refreshes on its own as it is saved.</div>}
       {error && <Callout tone="critical">Could not load ownership: {error.message}</Callout>}
@@ -201,7 +209,8 @@ export function LineOwnership() {
         {histories.length === 0 && !historyQueries.loading && !historyQueries.fetching && !historyStale
           ? <p className="text-[12px] text-ink-muted">Ownership history builds during sync. The daily chart appears once each default-branch commit has been recorded.</p>
           : <OwnershipHistoryChart histories={deferredHistories} selectedLogins={deferredLogins} accounts={accountIndex}
-            loading={historyQueries.loading || historyStale} repositories={historyRepositories} />}
+            loading={historyQueries.loading || historyStale} repositories={historyRepositories}
+            window={period === "all" ? null : { fromMs: range.fromMs, toMs: range.toMs }} />}
         <LineOwnershipCharts summary={summary} repositories={chartRepositories} loading={reportQueries.fetching.some(Boolean) || summaryStale} />
         <p className="text-[12px] text-ink-muted">Person grouping is by GitHub account: every email GitHub or a manual mapping links to an account counts as that login, the same login the Contributors page shows. Authors marked * have no GitHub match: they are unmatched Git identities and are never joined by name; map them in Settings → Contributor mappings. The Top owners table lists each person's Git names and emails.</p>
       </>}

@@ -139,12 +139,14 @@ const HistoryPlot = memo(function HistoryPlot({
  * period and shape reuse that work. The table always holds exact periods; only the
  * plot is coarsened to what its width can show.
  */
-export function OwnershipHistoryChart({ histories, selectedLogins, repositories, accounts, loading }: {
+export function OwnershipHistoryChart({ histories, selectedLogins, repositories, accounts, loading, window }: {
   histories: readonly NormalizedRepoHistory[];
   selectedLogins: readonly string[];
   repositories: Array<{ id: number; name: string }>;
   accounts?: OwnershipAccountIndex;
   loading?: boolean;
+  /** The page's period. Null shows all history. */
+  window?: { fromMs: number; toMs: number } | null;
 }) {
   const [shape, setShape] = useState<TimelineShape>(() => storedChoice("github-monitor.ownership.shape", ["bar", "area", "line"], "area"));
   const [split, setSplit] = useState<OwnershipHistorySplit>(() => storedChoice("github-monitor.ownership.split", ["people", "repository", "total"], "people"));
@@ -194,9 +196,22 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
     () => measure("ownership:buckets", () => ownershipHistoryBuckets(data, keys, deferredPeriod, deferredReading)),
     [data, keys, deferredPeriod, deferredReading],
   );
+  // The page period, applied after bucketing so a per-period reading keeps each
+  // period's real change instead of measuring the first one from zero.
+  const fromMs = window?.fromMs ?? null;
+  const toMs = window?.toMs ?? null;
+  const periodRows = useMemo(() => {
+    if (fromMs == null || toMs == null) return fullRows;
+    // Keep the bucket that contains the start as well as those that begin inside.
+    let first = 0;
+    for (let i = 0; i < fullRows.length; i++) if (fullRows[i].week * 1000 <= fromMs) first = i;
+    return fullRows.slice(first).filter((row) => row.week * 1000 <= toMs);
+  }, [fullRows, fromMs, toMs]);
+  // A zoom belongs to the period it was made in.
+  useEffect(() => { setZoom(null); }, [fromMs, toMs]);
   const visibleRows = useMemo(
-    () => zoom ? fullRows.filter((row) => row.week >= zoom.from && row.week <= zoom.to) : fullRows,
-    [fullRows, zoom],
+    () => zoom ? periodRows.filter((row) => row.week >= zoom.from && row.week <= zoom.to) : periodRows,
+    [periodRows, zoom],
   );
   const budget = plotBudget(width, deferredShape);
   const plot = useMemo(
@@ -233,7 +248,7 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
   // refresh would replay the transition over and over. Dense plots never animate.
   const viewKey = [
     waiting || series.length === 0 ? "empty" : "ready", deferredShape, deferredSplit, deferredLimit, deferredStack,
-    deferredValues, deferredReading, deferredPeriod, zoom?.from, zoom?.to, selectedLogins.join("\0"),
+    deferredValues, deferredReading, deferredPeriod, zoom?.from, zoom?.to, fromMs, toMs, selectedLogins.join("\0"),
     repositories.map((r) => r.id).join(","),
   ].join("|");
   // Held for the length of Recharts' animation, so a re-render moments after the
@@ -268,7 +283,7 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
         <Segmented ariaLabel="Values" stretch value={values} options={HISTORY_VALUES} disabled={singleSeries} onChange={(value) => remember("github-monitor.ownership.valueMode", value, setValues)} />
         </FilterPopover>
       }
-      table={series.length ? <DataTable rows={fullRows} rowKey={(row) => String(row.week)} maxHeight={420} initialSort={{ key: "day", dir: "asc" }} columns={[
+      table={series.length ? <DataTable rows={periodRows} rowKey={(row) => String(row.week)} maxHeight={420} initialSort={{ key: "day", dir: "asc" }} columns={[
         { key: "day", header: "Period", render: (row) => periodLabel(row.week), sortValue: (row) => row.week },
         ...series.map((item) => ({
           key: item.key,

@@ -31,7 +31,6 @@ export function FilterBar({
   const customFrom = useApp((s) => s.customFrom);
   const customTo = useApp((s) => s.customTo);
 
-  const active = PERIODS.find((p) => p.id === period);
   const range = resolvePeriod(period, {
     customFrom: customFrom ?? undefined,
     customTo: customTo ?? undefined,
@@ -39,9 +38,7 @@ export function FilterBar({
 
   return (
     <div className="flex flex-wrap items-center gap-2 border-b border-hairline bg-plane px-5 py-2.5">
-      <Dropdown label={`Period: ${active?.label ?? "Custom"}`} width={252} align="left">
-        {(close) => <PeriodMenu close={close} />}
-      </Dropdown>
+      <PeriodFilter />
 
       <RepoFilter />
       <UserFilter support={userFilter} />
@@ -54,6 +51,17 @@ export function FilterBar({
           : `${formatDate(range.fromMs)} – ${formatDate(range.toMs)}`}
       </span>
     </div>
+  );
+}
+
+/** The shared period selector, for pages that build their own filter row. */
+export function PeriodFilter() {
+  const period = useApp((s) => s.period);
+  const active = PERIODS.find((p) => p.id === period);
+  return (
+    <Dropdown label={`Period: ${active?.label ?? "Custom"}`} width={252} align="left">
+      {(close) => <PeriodMenu close={close} />}
+    </Dropdown>
   );
 }
 
