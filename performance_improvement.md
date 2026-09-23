@@ -8,8 +8,22 @@ We recently added a line ownership functionality but the performance is woeful b
 
 I asked this question to multiple models, here were the responses.
 
+## Transcripts
+
+1. [GPT 6 Sol Medium](#transcript-1)
+2. [Opus 5.5 Medium](#transcript-2)
+3. [GPT 6 Luna Xhigh](#transcript-3)
+4. [GPT 6 Astra Medium](#transcript-4)
+5. [Opus 5.5 High](#transcript-5)
+6. [Opus 5.5 Medium](#transcript-6)
+7. [Fable 5.1 High](#transcript-7)
+8. [Grok 4.7 XHigh Fast](#transcript-8)
+
+<a id="transcript-1"></a>
+
 ### GPT 6 Sol Medium
 
+`````text
 ╭───────────────────────────────────────────────────────╮
 │ >_ OpenAI Codex (v0.155.1)                            │
 │                                                       │
@@ -150,9 +164,13 @@ I asked this question to multiple models, here were the responses.
 › Ask Codex to do anything
  
   gpt-6-sol medium · ~/Documents/Adam/Projects/github-monitor · Improve line ownership performance
+`````
+
+<a id="transcript-2"></a>
 
 ### Opus 5.5 Medium
 
+`````text
 ❯ We recently added a line ownership functionality but the performance is woeful both in terms of syncing … 
  
 ⏺ Agent "Analyse Rust line ownership perf" finished · 1m 25s
@@ -179,11 +197,13 @@ I asked this question to multiple models, here were the responses.
 ────────────────────────────────────────────────────────────────────────────────────────────────────────────
   github-monitor ❯ main ❯ 07:38
   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 3 agents
+`````
 
+<a id="transcript-3"></a>
 
 ### GPT 6 Luna Xhigh
 
-
+`````text
 ╭───────────────────────────────────────────────────────╮
 │ >_ OpenAI Codex (v0.155.1)                            │
 │                                                       │
@@ -271,12 +291,13 @@ ui.tsx
 › Ask Codex to do anything
  
   gpt-6-luna xhigh · ~/Documents/Adam/Projects/github-monitor · Improve line ownership performance
+`````
 
+<a id="transcript-4"></a>
 
 ### GPT 6 Astra Medium
 
-
-
+`````text
 ╭───────────────────────────────────────────────────────╮
 │ >_ OpenAI Codex (v0.155.1)                            │
 │                                                       │
@@ -493,9 +514,13 @@ ui.tsx
 ›⠁Ask Codex to do anything           ⠂  ⠁ ⠁                                                ⢀
       ⠠             ⠠                        ⢀ ⢀      ⠄⠂  ⡀               ⠄    ⠄
   gpt-6-astra medium · ~/Documents/Adam/Projects/github-monitor · Improve line ownership performance
+`````
 
+<a id="transcript-5"></a>
 
 ### Opus 5.5 High
+
+`````text
  recently added a line ownership functionality but the performance is woeful both in terms of synciactually goes.
 
   Read 1 file, listed 1 directory, ran 1 shell command
@@ -685,9 +710,13 @@ total first-parent commits across orn-iac-application.git'), (3813, 'orc
 hestra.git'), (3127, 'langgraph.git'), (2650, 'raincloud-dags.git'), (1641, 'cin-fd-surveys.git')]
 at ~180 ms/commit (serialised by the: 1.9 hours
 Updated performance_improvement.md (+25 -0)
+`````
+
+<a id="transcript-6"></a>
 
 ### Opus 5.5 Medium
 
+`````text
 ❯ We recently added a line ownership functionality but the performance is woeful both in te
 rms of syncing …
 
@@ -1290,9 +1319,13 @@ Want me to start on step 1, or go strai
 ✻ Crunched for 7m 56s · done 7:44 AM
 
 ※ recap: The goal is to fix the slow lineredraws, and the ranked options arewritten up in performance_improvement.md. Next, you choose whether I start with the quick UI fix or the sync rewrite. (disable recaps in /config)
+`````
+
+<a id="transcript-7"></a>
 
 ### Fable 5.1 High
 
+`````text
 /model
   ⎿  Set model to Fable 5.1 and saved as your default for new sessions
 
@@ -1388,11 +1421,13 @@ If you want, I can write this up as a plan file in the repo, or start with items
 ✻ Crunched for 7m 34s · done 7:53 AM
 
 ※ recap: I analysed why line ownership sync and charts are so slow and delivered ranked fix options with measured wins. Next: you pick which to implement, likely the UI interning fix and daily sampling of the sync walk first. (disable recaps in /config)
+`````
+
+<a id="transcript-8"></a>
 
 ### Grok 4.7 XHigh Fast
 
-
-
+`````text
   Cursor Agent
   v2026.09.18-9a7762b
   Tip: Try Cursor Grok 4.6 via /model, frontier intelligence at a fraction of the cost.
@@ -2422,3 +2457,4 @@ If you want, I can write this up as a plan file in the repo, or start with items
  ▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
   Grok 4.7 500K Extra High Fast · MAX · 52.2% · 4 files edited                              Run Everything
   ~/Documents/Adam/Projects/github-monitor · main
+`````
