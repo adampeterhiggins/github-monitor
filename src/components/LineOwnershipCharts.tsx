@@ -51,6 +51,10 @@ const HISTORY_PERIODS: Array<{ value: OwnershipPeriod; label: string }> = [
   { value: "quarter", label: "Quarter" },
 ];
 const PERIOD_SPAN = { day: "day", week: "week", month: "month", quarter: "quarter" } as const;
+const Y_AXES = [
+  { value: "full" as const, label: "Full" },
+  { value: "fit" as const, label: "Fit to data" },
+];
 const REPO_LABELS = [
   { value: "full" as const, label: "owner/name" },
   { value: "name" as const, label: "Name only" },
@@ -109,7 +113,7 @@ const ANIMATION_WINDOW_MS = 1600;
 /** The plotted series. Memoised so a control change can paint before Recharts
  * rebuilds the marks. */
 const HistoryPlot = memo(function HistoryPlot({
-  plotted, series, shape, stackMode, values, reading, labelOf, withBrush, onBrushChange, activeKeys, onToggleKey, animate,
+  plotted, series, shape, stackMode, values, reading, labelOf, withBrush, onBrushChange, activeKeys, onToggleKey, animate, yFit,
 }: {
   plotted: Array<Record<string, number>>;
   series: OwnershipHistorySeries["series"];
@@ -123,12 +127,13 @@ const HistoryPlot = memo(function HistoryPlot({
   activeKeys: Set<string>;
   onToggleKey: (key: string) => void;
   animate: boolean;
+  yFit: boolean;
 }) {
   return series.length === 0
     ? <p className="text-[12px] text-ink-muted">No surviving lines match these filters.</p>
     : <Profiler id="ownership-history" onRender={(id, phase, duration) => profileRender(id, phase, duration)}>
       <TimelineArea data={plotted} series={series} shape={shape} stackMode={stackMode} values={values} height={280}
-        withBrush={withBrush} onBrushChange={onBrushChange} activeKeys={activeKeys} onToggleKey={onToggleKey} animate={animate}
+        withBrush={withBrush} onBrushChange={onBrushChange} activeKeys={activeKeys} onToggleKey={onToggleKey} animate={animate} yFit={yFit}
         valueLabel={values === "share" ? (reading === "period" ? "of that period's change" : "of credited lines") : "lines"} labelOf={labelOf} />
     </Profiler>;
 });
@@ -153,6 +158,7 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
   const [seriesLimit, setSeriesLimit] = useState(() => storedChoice("github-monitor.ownership.seriesLimit", ["4", "6", "8", "all"], "8"));
   const [stackMode, setStackMode] = useState<"stacked" | "overlaid">(() => storedChoice("github-monitor.ownership.stackMode", ["stacked", "overlaid"], "stacked"));
   const [values, setValues] = useState<"total" | "share">(() => storedChoice("github-monitor.ownership.valueMode", ["total", "share"], "total"));
+  const [yAxis, setYAxis] = useState<"full" | "fit">(() => storedChoice("github-monitor.ownership.yAxis", ["full", "fit"], "full"));
   const [repoLabel, setRepoLabel] = useState<"full" | "name">(() => storedChoice("github-monitor.ownership.repoLabel", ["full", "name"], "full"));
   const [reading, setReading] = useState<OwnershipReading>(() => storedTimeline().reading);
   const [period, setPeriod] = useState<OwnershipPeriod>(() => storedTimeline().period);
@@ -222,7 +228,7 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
     || deferredPeriod !== period || deferredShape !== shape || deferredStack !== stackMode || deferredValues !== values;
   const singleSeries = split === "total";
   const waiting = histories.every((h) => h.days.length === 0);
-  const changed = repoLabel !== "full" || shape !== "area" || split !== "people" || seriesLimit !== "8" || stackMode !== "stacked" || values !== "total" || reading !== "cumulative" || period !== "day";
+  const changed = yAxis !== "full" || repoLabel !== "full" || shape !== "area" || split !== "people" || seriesLimit !== "8" || stackMode !== "stacked" || values !== "total" || reading !== "cumulative" || period !== "day";
   const periodLabel = useCallback((week: number) => deferredPeriod === "day" ? formatDate(week * 1000) : bucketLabel(week, deferredPeriod), [deferredPeriod]);
   const plotLabel = useCallback((week: number) => {
     const end = plot.ends.get(week);
@@ -248,7 +254,7 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
   // refresh would replay the transition over and over. Dense plots never animate.
   const viewKey = [
     waiting || series.length === 0 ? "empty" : "ready", deferredShape, deferredSplit, deferredLimit, deferredStack,
-    deferredValues, deferredReading, deferredPeriod, zoom?.from, zoom?.to, fromMs, toMs, selectedLogins.join("\0"),
+    deferredValues, deferredReading, deferredPeriod, zoom?.from, zoom?.to, fromMs, toMs, yAxis, selectedLogins.join("\0"),
     repositories.map((r) => r.id).join(","),
   ].join("|");
   // Held for the length of Recharts' animation, so a re-render moments after the
@@ -271,6 +277,9 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
         <Segmented ariaLabel="Chart shape" stretch value={shape} options={HISTORY_SHAPES} onChange={(value) => remember("github-monitor.ownership.shape", value, setShape)} />
         <LabeledControl label="Split by">
           <Segmented ariaLabel="Split ownership" variant="bare" stretch value={split} options={HISTORY_SPLITS} onChange={(value) => remember("github-monitor.ownership.split", value, setSplit)} />
+        </LabeledControl>
+        <LabeledControl label="Y axis">
+          <Segmented ariaLabel="Y axis range" variant="bare" stretch value={yAxis} options={Y_AXES} onChange={(value) => remember("github-monitor.ownership.yAxis", value, setYAxis)} />
         </LabeledControl>
         <LabeledControl label="Repository names">
           <Segmented ariaLabel="Repository names" variant="bare" stretch value={repoLabel} options={REPO_LABELS} disabled={split !== "repository"} onChange={(value) => remember("github-monitor.ownership.repoLabel", value, setRepoLabel)} />
@@ -301,7 +310,7 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
         ) : (
           <HistoryPlot plotted={plot.rows} series={series} shape={deferredShape} stackMode={deferredStack} values={deferredValues}
             reading={deferredReading} labelOf={plotLabel} withBrush={!zoom && plot.rows.length > 45} onBrushChange={onBrushChange}
-            activeKeys={activeKeys} onToggleKey={toggleKey} animate={animate} />
+            activeKeys={activeKeys} onToggleKey={toggleKey} animate={animate} yFit={yAxis === "fit"} />
         )}
       </div>
       {(plot.factor > 1 || zoom || partial > 0) && <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-ink-muted">

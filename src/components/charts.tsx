@@ -21,6 +21,7 @@ import { useVizPalette } from "../lib/viz/useVizPalette";
 import { sequentialStep, seriesColorCycled, OTHER_COLOR, type VizPalette } from "../lib/viz/palette";
 import { formatShort, formatDate, weekTickFormatter } from "../lib/agg/weeks";
 import { toShares } from "../lib/agg/series";
+import { fitAxis } from "../lib/viz/axis";
 import { compact, full, useChartHeight } from "./ui";
 
 /**
@@ -273,6 +274,7 @@ export function TimelineArea({
   yMax,
   yMin = 0,
   animate = true,
+  yFit = false,
 }: {
   data: Array<Record<string, number>>;
   series: StackSeriesSpec[];
@@ -280,6 +282,11 @@ export function TimelineArea({
   shape?: TimelineShape;
   /** Off for dense histories: animating thousands of marks delays every control change. */
   animate?: boolean;
+  /**
+   * Stretch the y axis to the visible data instead of 0–100% (shares) or zero
+   * upwards (totals). Stacks and shares keep a zero baseline; overlaid totals need not.
+   */
+  yFit?: boolean;
   stackMode?: "stacked" | "overlaid";
   /**
    * What the y axis measures. `share` reads the total at each point as 100% and
@@ -362,6 +369,7 @@ export function TimelineArea({
      rows rather than whatever was plotted. */
   const rawByWeek =
     plotted === data ? null : new Map(data.map((row) => [row.week, row] as const));
+  const fit = yFit ? fitAxis(plotted, colored.filter((s) => isActive(s.key)).map((s) => s.key), stacked && shape !== "line", normalised) : null;
 
   const axes = (
     <>
@@ -373,15 +381,17 @@ export function TimelineArea({
         tickFormatter={normalised ? share : compact}
         // Quarter ticks are decimals; the default integer-only axis would leave a
         // share chart with nothing between 0% and 100%.
-        allowDecimals={normalised}
+        allowDecimals={normalised || fit != null}
         ticks={
-          normalised
-            ? shareFloor < 0
-              ? [-1, -0.5, 0, 0.5, 1]
-              : [0, 0.25, 0.5, 0.75, 1]
-            : undefined
+          fit
+            ? fit.ticks
+            : normalised
+              ? shareFloor < 0
+                ? [-1, -0.5, 0, 0.5, 1]
+                : [0, 0.25, 0.5, 0.75, 1]
+              : undefined
         }
-        domain={normalised ? [shareFloor, 1] : yMax != null ? [yMin, yMax] : undefined}
+        domain={fit ? fit.domain : normalised ? [shareFloor, 1] : yMax != null ? [yMin, yMax] : undefined}
       />
       <Tooltip
         // A crosshair on continuous forms so the reader aims at a date rather than
