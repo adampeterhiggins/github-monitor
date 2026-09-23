@@ -13,16 +13,22 @@
  * series with empty weeks and keeping them would multiply row counts for nothing.
  */
 
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 export const SCHEMA_SQL = `
--- One atomic snapshot keeps the summary, revision and incremental file cache aligned.
+-- One row keeps the HEAD report, its revision and the native file cache it came
+-- from aligned. The per-file cache lives in a native file named by cache_ref; the
+-- legacy \`snapshot\` column holds a full JSON snapshot only for rows written before
+-- that, and is converted on the repository's next sync.
 CREATE TABLE IF NOT EXISTS line_ownership (
   repo_id INTEGER PRIMARY KEY,
   revision TEXT,
   calculated_at TEXT NOT NULL,
   checked_at TEXT NOT NULL,
-  snapshot TEXT NOT NULL
+  snapshot TEXT NOT NULL,
+  report TEXT,
+  metadata TEXT,
+  cache_ref TEXT
 );
 
 -- One small row per default-branch commit. The file cache stays singular, in
@@ -45,13 +51,103 @@ CREATE TABLE IF NOT EXISTS line_ownership_history_state (
   cache TEXT NOT NULL
 );
 
+-- Daily ownership history by generation. A full rebuild writes a new generation
+-- while the previous one stays visible; one UPDATE of visible_generation switches.
+-- Until a repository has a visible generation, legacy line_ownership_history rows
+-- are shown.
+CREATE TABLE IF NOT EXISTS line_ownership_history_gen (
+  repo_id INTEGER PRIMARY KEY,
+  visible_generation INTEGER,
+  building_generation INTEGER NOT NULL,
+  target TEXT,
+  cursor TEXT,
+  checkpoint_ref TEXT,
+  engine TEXT NOT NULL,
+  format INTEGER NOT NULL,
+  status TEXT NOT NULL,              -- building | done | failed
+  revision INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  updated_at TEXT
+);
+-- Raw Git identities, stable within one repository generation. Account resolution
+-- is a separate, versioned join, so a new match or manual mapping regroups lines
+-- without rewriting history.
+CREATE TABLE IF NOT EXISTS line_ownership_identity (
+  repo_id INTEGER NOT NULL,
+  generation INTEGER NOT NULL,
+  raw_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  email TEXT NOT NULL,
+  PRIMARY KEY (repo_id, generation, raw_id)
+) WITHOUT ROWID;
+-- One row per UTC day: the day's winning commit (latest committer time, then the
+-- greater SHA) and its absolute levels per credit group of raw identities.
+-- Absolute levels make a replayed or late-winning write idempotent.
+CREATE TABLE IF NOT EXISTS line_ownership_day (
+  repo_id INTEGER NOT NULL,
+  generation INTEGER NOT NULL,
+  day TEXT NOT NULL,
+  revision TEXT NOT NULL,
+  committed_at TEXT NOT NULL,
+  committed_unix INTEGER NOT NULL,
+  total_lines INTEGER NOT NULL,
+  coauthored_lines INTEGER NOT NULL,
+  groups_json TEXT NOT NULL,
+  PRIMARY KEY (repo_id, generation, day)
+) WITHOUT ROWID;
+
 -- Git email to the GitHub account on a commit. A null login means GitHub had
--- no account for that address, so a later sync does not look it up again.
+-- no account for that address; checked_at lets a later sync retry old misses.
 CREATE TABLE IF NOT EXISTS github_accounts (
   email TEXT PRIMARY KEY,
   login TEXT,
-  github_id TEXT
+  github_id TEXT,
+  checked_at TEXT
 );
+-- Every account GitHub has returned for an email. More than one ID is a conflict
+-- that stays unresolved until reviewed in Settings.
+CREATE TABLE IF NOT EXISTS github_account_observations (
+  email TEXT NOT NULL,
+  github_id TEXT NOT NULL,
+  login TEXT,
+  observed_at TEXT,
+  PRIMARY KEY (email, github_id)
+);
+-- GitHub accounts by immutable ID with their current login. Contributors has
+-- logins; this is what keeps a renamed login one account.
+CREATE TABLE IF NOT EXISTS github_users (
+  github_id TEXT PRIMARY KEY,
+  login TEXT NOT NULL,
+  source TEXT NOT NULL,              -- commit | lookup
+  checked_at TEXT
+);
+CREATE TABLE IF NOT EXISTS github_user_logins (
+  github_id TEXT NOT NULL,
+  login_lower TEXT NOT NULL,
+  login TEXT NOT NULL,
+  seen_at TEXT,
+  PRIMARY KEY (github_id, login_lower)
+);
+-- User-authored: an unmatched Git identity mapped to a verified GitHub account.
+-- Kept by clearAnalytics, like saved selections. A presentation layer only: it
+-- never changes blame origins or line counts.
+CREATE TABLE IF NOT EXISTS ownership_manual_account_map (
+  mapping_id INTEGER PRIMARY KEY,
+  match_kind TEXT NOT NULL,          -- email | repo_name
+  match_value TEXT NOT NULL,         -- normalized email or normalized Git name
+  repo_id INTEGER,                   -- NULL for email; required for repo_name
+  github_id TEXT NOT NULL,
+  login_at_save TEXT NOT NULL,
+  reviewed_auto_conflict INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ownership_manual_email_unique
+  ON ownership_manual_account_map (match_kind, match_value)
+  WHERE repo_id IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ownership_manual_repo_name_unique
+  ON ownership_manual_account_map (repo_id, match_kind, match_value)
+  WHERE repo_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS meta (
   key   TEXT PRIMARY KEY,
@@ -167,6 +263,7 @@ CREATE TABLE IF NOT EXISTS contributors (
   html_url   TEXT,
   type       TEXT
 );
+CREATE INDEX IF NOT EXISTS idx_contributors_gh_id ON contributors (gh_id);
 
 -- The spine of the Contributors page. One row per repo/author/week with any activity.
 CREATE TABLE IF NOT EXISTS contributor_weeks (
@@ -351,3 +448,28 @@ CREATE TABLE IF NOT EXISTS issues (
 CREATE INDEX IF NOT EXISTS idx_issue_created ON issues (created_at);
 CREATE INDEX IF NOT EXISTS idx_issue_closed ON issues (closed_at);
 `;
+
+/**
+ * Triggers keep the account and manual-map revisions in step with the rows they
+ * describe. A trigger runs inside its statement, so the edit and the revision
+ * bump are one atomic write even though this plugin cannot hold a transaction
+ * across calls. Bodies contain semicolons, so these are executed whole rather
+ * than through splitStatements.
+ */
+const bump = (key: string) => `UPDATE meta SET value = CAST(value AS INTEGER) + 1 WHERE key = '${key}';`;
+const ACCOUNT = "ownership_account_revision";
+const MANUAL = "ownership_manual_map_revision";
+export const REVISION_KEYS = [ACCOUNT, MANUAL] as const;
+export const TRIGGER_SQL: readonly string[] = [
+  ["github_accounts", "old.login IS NOT new.login OR old.github_id IS NOT new.github_id"],
+  ["github_users", "old.login IS NOT new.login"],
+  ["github_account_observations", "0"],
+  ["contributors", "old.login IS NOT new.login OR old.gh_id IS NOT new.gh_id"],
+].flatMap(([table, changed]) => [
+  `CREATE TRIGGER IF NOT EXISTS trg_${table}_ins AFTER INSERT ON ${table} BEGIN ${bump(ACCOUNT)} END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_${table}_upd AFTER UPDATE ON ${table} WHEN ${changed} BEGIN ${bump(ACCOUNT)} END`,
+  `CREATE TRIGGER IF NOT EXISTS trg_${table}_del AFTER DELETE ON ${table} BEGIN ${bump(ACCOUNT)} END`,
+]).concat(["ins", "upd", "del"].map((op) => {
+  const event = op === "ins" ? "INSERT" : op === "upd" ? "UPDATE" : "DELETE";
+  return `CREATE TRIGGER IF NOT EXISTS trg_ownership_manual_${op} AFTER ${event} ON ownership_manual_account_map BEGIN ${bump(MANUAL)} END`;
+}));

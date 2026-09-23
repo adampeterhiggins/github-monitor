@@ -4,6 +4,7 @@ import { useScope, useScopedQuery, type UserFilterSupport } from "../lib/hooks";
 import { listContributors } from "../lib/db/queries";
 import { contributorKeys as keys, deselectContributors, NO_CONTRIBUTORS } from "../lib/contributorSelection";
 import { isBot } from "../lib/bots";
+import { isUnmatchedToken } from "../lib/ownershipIdentity";
 import { Button, Checkbox, Dropdown, DropdownRow, compact, full } from "./ui";
 import { SavedSelections } from "./SavedSelections";
 
@@ -30,11 +31,18 @@ const SORT_KEY = "github-monitor.userSort";
 const HIDE_KEY = "github-monitor.userHideInactive";
 
 export interface ContributorOption {
+  /** What the shared selection stores: a GitHub login, or an unmatched Git identity token. */
   login: string;
   commits: number;
   commits_all: number;
   repos: number;
+  /** Other selection values that mean this contributor, e.g. a former login. */
   aliases?: string[];
+  /** Shown instead of the login, e.g. "Unmatched: Alice". */
+  label?: string;
+  /** Searchable but not selectable: names and emails. */
+  searchText?: string[];
+  unmatched?: boolean;
   isBot?: boolean;
 }
 
@@ -96,7 +104,7 @@ export function UserFilter({ support, snapshot }: {
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     const rows = all
-      .filter((c) => (q ? keys(c).some((key) => key.includes(q)) : true))
+      .filter((c) => (q ? [...keys(c), ...(c.label ? [c.label] : []), ...(c.searchText ?? [])].some((key) => key.toLowerCase().includes(q)) : true))
       // Hides on activity alone; see the note in RepoFilter. Exempting selected
       // contributors made the control a no-op whenever most people were selected.
       .filter((c) => snapshot != null || !hideInactive || Number(c.commits) > 0);
@@ -135,10 +143,18 @@ export function UserFilter({ support, snapshot }: {
   }
 
   const noneSelected = selected.length === 1 && selected[0] === NO_CONTRIBUTORS;
+  // Internal tokens are never shown. Line ownership names them; elsewhere they
+  // have no GitHub activity and read as what they are.
+  const readable = (token: string) => {
+    const option = all.find((c) => keys(c).includes(token.toLowerCase()));
+    if (option) return option.label ?? option.login;
+    return isUnmatchedToken(token) ? "Unmatched Git identity" : token;
+  };
+  const unmatchedSelected = selected.filter((token) => isUnmatchedToken(token) && !all.some((c) => keys(c).includes(token.toLowerCase())));
   const label = (() => {
     if (noneSelected) return "No contributors";
     if (selected.length === 0) return "All contributors";
-    if (selected.length === 1) return selected[0];
+    if (selected.length === 1) return readable(selected[0]);
     return `${full(selected.length)} contributors`;
   })();
 
@@ -193,7 +209,7 @@ export function UserFilter({ support, snapshot }: {
               title={
                 botsInScope.length === 0
                   ? "No bots or agents detected among these contributors"
-                  : `Exclude ${botsInScope.map((c) => c.login).join(", ")}. Add your own patterns in Settings & sync.`
+                  : `Exclude ${botsInScope.map((c) => c.label ?? c.login).join(", ")}. Add your own patterns in Settings & sync.`
               }
               onClick={() => {
                 apply(deselectContributors(selected, all, bots));
@@ -237,6 +253,25 @@ export function UserFilter({ support, snapshot }: {
             />}
           </div>
         </div>
+
+        {unmatchedSelected.length > 0 ? (
+          <div className="flex items-center justify-between gap-2 border-b border-hairline bg-wash px-2 py-1.5">
+            <span className="text-[11px] text-ink-secondary">
+              {full(unmatchedSelected.length)} selected {unmatchedSelected.length === 1 ? "is an unmatched Git identity" : "are unmatched Git identities"} from Line ownership, with no GitHub activity here.
+            </span>
+            <Button
+              variant="ghost"
+              title="Remove unmatched Git identities from the selection"
+              onClick={() => {
+                const drop = new Set(unmatchedSelected);
+                const rest = selected.filter((l) => !drop.has(l));
+                apply(rest.length ? rest : []);
+              }}
+            >
+              Clear them
+            </Button>
+          </div>
+        ) : null}
 
         {hiddenSelected.length > 0 ? (
           <div className="flex items-center justify-between gap-2 border-b border-hairline bg-wash px-2 py-1.5">
@@ -292,7 +327,15 @@ export function UserFilter({ support, snapshot }: {
                       }
                       label={
                         <span className="flex min-w-0 items-center gap-1.5">
-                          <span className="truncate" title={c.aliases?.join(" · ")}>{c.login}</span>
+                          <span className="truncate" title={[...(c.aliases ?? []), ...(c.searchText ?? [])].join(" · ") || undefined}>{c.label ?? c.login}</span>
+                          {c.unmatched ? (
+                            <span
+                              className="shrink-0 rounded border border-dashed border-hairline-strong px-1 text-[9px] uppercase text-ink-muted"
+                              title="No GitHub account matched this Git identity. Map it in Settings → Contributor mappings."
+                            >
+                              git only
+                            </span>
+                          ) : null}
                           {myLogin && c.login.toLowerCase() === myLogin.toLowerCase() ? (
                             <span className="shrink-0 text-[9px] uppercase text-ink-muted">you</span>
                           ) : null}

@@ -24,7 +24,8 @@
     "release:prepare": "node scripts/set-version.mjs",
     "release:manifest": "node scripts/build-update-manifest.mjs",
     "check:workflows": "node scripts/lint-workflows.mjs",
-    "test:line-ownership": "node scripts/test-line-ownership.mjs"
+    "test:line-ownership": "node scripts/test-line-ownership.mjs",
+    "bench:line-ownership": "node scripts/bench-line-ownership.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",

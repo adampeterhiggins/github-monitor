@@ -272,11 +272,14 @@ export function TimelineArea({
   onBrushChange,
   yMax,
   yMin = 0,
+  animate = true,
 }: {
   data: Array<Record<string, number>>;
   series: StackSeriesSpec[];
   height?: number;
   shape?: TimelineShape;
+  /** Off for dense histories: animating thousands of marks delays every control change. */
+  animate?: boolean;
   stackMode?: "stacked" | "overlaid";
   /**
    * What the y axis measures. `share` reads the total at each point as 100% and
@@ -460,6 +463,7 @@ export function TimelineArea({
                 fillOpacity={dim(s.key)}
                 maxBarSize={BAR_MAX}
                 radius={!stacked || i === colored.length - 1 ? geom.radius : [0, 0, 0, 0]}
+                isAnimationActive={animate}
               />
             ))}
             {brush}
@@ -483,6 +487,7 @@ export function TimelineArea({
                 strokeLinejoin="round"
                 dot={false}
                 activeDot={{ r: 4, strokeWidth: 2, stroke: palette.surface }}
+                isAnimationActive={animate}
               />
             ))}
             {brush}
@@ -507,6 +512,7 @@ export function TimelineArea({
                 fillOpacity={(stacked ? 0.75 : 0.12) * dim(s.key)}
                 dot={false}
                 activeDot={{ r: 4, strokeWidth: 2, stroke: palette.surface }}
+                isAnimationActive={animate}
               />
             ))}
             {brush}

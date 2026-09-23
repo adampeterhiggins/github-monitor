@@ -746,10 +746,11 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     });
   })();
 
-  // Two repository jobs overlap preparation/download with calculation. Rust
-  // admits only one calculation at a time, sharing a bounded file worker pool.
-  // API work continues independently and every completed repository is durable.
-  const ownershipTask = pool(ownershipTargets, 2, async (repo) => {
+  // Rust admits two calculations at once and divides its blame workers between
+  // them, so total Git processes stay bounded. A third job downloads and prepares
+  // while both calculate. API work continues independently and every completed
+  // repository is durable.
+  const ownershipTask = pool(ownershipTargets, 3, async (repo) => {
     if (cancelled()) return;
     attempted++;
     try {

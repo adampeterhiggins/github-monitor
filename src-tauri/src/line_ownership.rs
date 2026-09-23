@@ -11,14 +11,84 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 use tauri::{ipc::Channel, Manager, State};
+mod history;
 mod process;
 
 type ActiveJobs = Arc<Mutex<BTreeMap<String, (String, Arc<AtomicBool>)>>>;
 
-#[derive(Default)]
 pub struct ScanControl {
     active: ActiveJobs,
-    calculation: Arc<Mutex<()>>,
+    calculation: Arc<Permits>,
+    /// History walks kept in memory between batches, keyed by repository. A batch
+    /// reuses one only when the caller names the checkpoint it came from.
+    jobs: Arc<Mutex<BTreeMap<String, history::Job>>>,
+}
+
+impl Default for ScanControl {
+    fn default() -> Self {
+        let permits = std::env::var("GITHUB_MONITOR_OWNERSHIP_PERMITS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2usize)
+            .clamp(1, 8);
+        ScanControl {
+            active: ActiveJobs::default(),
+            calculation: Arc::new(Permits::new(permits)),
+            jobs: Arc::default(),
+        }
+    }
+}
+
+/// A counting semaphore for repository calculations. Blame workers are divided
+/// between permits, so total Git processes stay near the machine's worker count
+/// however many repositories calculate at once.
+pub struct Permits {
+    max: usize,
+    active: Mutex<usize>,
+    freed: std::sync::Condvar,
+}
+
+pub struct Permit<'a> {
+    permits: &'a Permits,
+}
+
+impl Permits {
+    fn new(max: usize) -> Self {
+        Permits {
+            max,
+            active: Mutex::new(0),
+            freed: std::sync::Condvar::new(),
+        }
+    }
+
+    /// Wait for a slot, giving up promptly when this job is cancelled.
+    fn acquire(&self, cancelled: &AtomicBool) -> Result<Permit<'_>, String> {
+        let mut active = self.active.lock().unwrap_or_else(|p| p.into_inner());
+        loop {
+            check_cancel(cancelled)?;
+            if *active < self.max {
+                *active += 1;
+                return Ok(Permit { permits: self });
+            }
+            active = self
+                .freed
+                .wait_timeout(active, Duration::from_millis(50))
+                .unwrap_or_else(|p| p.into_inner())
+                .0;
+        }
+    }
+
+    fn workers(&self) -> usize {
+        (worker_count() / self.max).max(1)
+    }
+}
+
+impl Drop for Permit<'_> {
+    fn drop(&mut self) {
+        let mut active = self.permits.active.lock().unwrap_or_else(|p| p.into_inner());
+        *active = active.saturating_sub(1);
+        self.permits.freed.notify_one();
+    }
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
@@ -77,7 +147,7 @@ pub struct Report {
     files_recalculated: usize,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq, Ord, PartialOrd, Hash)]
 struct Identity {
     name: String,
     email: String,
@@ -892,7 +962,8 @@ fn scan_snapshot_at(
                         let counts = if binary[index] {
                             BTreeMap::new()
                         } else {
-                            let mut args = vec!["blame", "--incremental", "--encoding=utf-8"];
+                            let mut args: Vec<&str> = history::DIFF_CONFIG.to_vec();
+                            args.extend(["blame", "--incremental", "--encoding=utf-8"]);
                             if options.ignore_whitespace {
                                 args.push("-w");
                             }
@@ -999,14 +1070,18 @@ fn scan_snapshot_at(
         options.group_by,
         options.exclude_bots,
     );
-    let credits = commits
-        .iter()
-        .map(|(sha, count)| LineCredit {
-            lines: count.lines,
-            people: std::iter::once(count.author.clone())
-                .chain(coauthors.get(sha).into_iter().flatten().cloned())
-                .collect(),
-        })
+    // One credit per distinct list of people. Aggregation sums lines per credit,
+    // so merging identical lists keeps every total and makes the report small.
+    let mut grouped = BTreeMap::<Vec<Identity>, u64>::new();
+    for (sha, count) in &commits {
+        let people: Vec<Identity> = std::iter::once(count.author.clone())
+            .chain(coauthors.get(sha).into_iter().flatten().cloned())
+            .collect();
+        *grouped.entry(people).or_default() += count.lines;
+    }
+    let credits = grouped
+        .into_iter()
+        .map(|(people, lines)| LineCredit { lines, people })
         .collect();
     let report = Report {
         repo: repo.to_string_lossy().into_owned(),
@@ -1030,230 +1105,8 @@ fn scan_snapshot_at(
     })
 }
 
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HistoryAuthor {
-    author: String,
-    names: Vec<String>,
-    emails: Vec<String>,
-    lines: u64,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HistoryPoint {
-    revision: String,
-    committed_at: String,
-    total_lines: u64,
-    coauthored_lines: u64,
-    authors: Vec<HistoryAuthor>,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HistoryBatch {
-    points: Vec<HistoryPoint>,
-    checkpoint: String,
-    reset: bool,
-    done: bool,
-    completed: usize,
-    total: usize,
-}
-
-fn history_point(snapshot: &Snapshot, committed_at: String) -> HistoryPoint {
-    HistoryPoint {
-        revision: snapshot.report.revision.clone(),
-        committed_at,
-        total_lines: snapshot.report.total_lines,
-        coauthored_lines: snapshot.report.coauthored_lines,
-        authors: snapshot
-            .report
-            .authors
-            .iter()
-            .map(|author| HistoryAuthor {
-                author: author.author.clone(),
-                names: author.names.clone(),
-                emails: author.emails.clone(),
-                lines: author.lines,
-            })
-            .collect(),
-    }
-}
-
 fn git_text_cancel(repo: &Path, args: &[&str], cancelled: &AtomicBool) -> Result<String, String> {
     git_cancel(repo, args, cancelled).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-}
-
-/// First-parent commits after `from`, oldest first, with committer timestamps.
-fn first_parent_commits(
-    repo: &Path,
-    from: Option<&str>,
-    target: &str,
-    cancelled: &AtomicBool,
-) -> Result<Vec<(String, String)>, String> {
-    let range = match from {
-        Some(from) => format!("{from}..{target}"),
-        None => target.to_owned(),
-    };
-    let log = git_text_cancel(
-        repo,
-        &[
-            "log",
-            "--first-parent",
-            "--reverse",
-            "--format=%H%x1f%cI",
-            &range,
-        ],
-        cancelled,
-    )?;
-    let mut commits = Vec::new();
-    for line in log.lines().filter(|line| !line.is_empty()) {
-        let (sha, date) = line
-            .split_once('\u{1f}')
-            .ok_or("Invalid ownership history line")?;
-        if !is_commit_id(sha) {
-            return Err("Invalid ownership history commit".into());
-        }
-        commits.push((sha.to_owned(), date.to_owned()));
-    }
-    Ok(commits)
-}
-
-/// Walk the default branch one commit at a time. Each point stores person totals.
-/// The returned checkpoint is the file cache at the last commit in this batch.
-fn advance_history(
-    options: ScanOptions,
-    previous: Option<Snapshot>,
-    target: &str,
-    batch_limit: usize,
-    cancelled: &AtomicBool,
-    progress: impl Fn(Progress),
-) -> Result<HistoryBatch, String> {
-    if target.is_empty() {
-        return Ok(HistoryBatch {
-            points: Vec::new(),
-            checkpoint: String::new(),
-            reset: false,
-            done: true,
-            completed: 0,
-            total: 0,
-        });
-    }
-    if !is_commit_id(target) {
-        return Err("Invalid prepared revision".into());
-    }
-    let usable = previous.filter(|snapshot| {
-        snapshot.version == SNAPSHOT_VERSION
-            && snapshot.report.options == options
-            && is_commit_id(&snapshot.report.revision)
-    });
-    let cursor = usable
-        .as_ref()
-        .map(|snapshot| snapshot.report.revision.clone());
-    let commits = first_parent_commits(
-        Path::new(&options.repo),
-        cursor.as_deref(),
-        target,
-        cancelled,
-    )?;
-    let continues = if let Some(cursor) = cursor.as_deref() {
-        if cursor == target {
-            true
-        } else if let Some((sha, _)) = commits.first() {
-            match git_text_cancel(
-                Path::new(&options.repo),
-                &[
-                    "rev-parse",
-                    "--verify",
-                    "--end-of-options",
-                    &format!("{sha}^"),
-                ],
-                cancelled,
-            ) {
-                Ok(parent) => parent.trim() == cursor,
-                Err(error) => {
-                    check_cancel(cancelled)?;
-                    let _ = error;
-                    false
-                }
-            }
-        } else {
-            false
-        }
-    } else {
-        false
-    };
-    let (reset, mut cache, commits) = if continues {
-        (false, usable, commits)
-    } else if cursor.is_some() {
-        (
-            true,
-            None,
-            first_parent_commits(Path::new(&options.repo), None, target, cancelled)?,
-        )
-    } else {
-        (true, None, commits)
-    };
-    let total_text = git_text_cancel(
-        Path::new(&options.repo),
-        &["rev-list", "--count", "--first-parent", target],
-        cancelled,
-    )?;
-    let total = total_text
-        .trim()
-        .parse::<usize>()
-        .map_err(|_| "Invalid commit count")?;
-    let completed_base = total.saturating_sub(commits.len());
-    let take = batch_limit.clamp(1, 100).min(commits.len());
-    // One pass over the branch, reused for every commit in the batch. Logging
-    // again per commit would re-read the same history each time.
-    let known_aliases = if take == 0 {
-        Vec::new()
-    } else {
-        history_aliases(Path::new(&options.repo), target, cancelled)?
-    };
-    let mut points = Vec::with_capacity(take);
-    for (sha, committed_at) in commits.iter().take(take) {
-        check_cancel(cancelled)?;
-        let completed = completed_base + points.len();
-        progress(Progress {
-            completed,
-            total,
-            phase: format!("Ownership history {completed}/{total}"),
-        });
-        let snapshot = scan_snapshot_at(
-            options.clone(),
-            cache.as_ref(),
-            cancelled,
-            |_| {},
-            Some(sha),
-            worker_count(),
-            cache.is_some(),
-            Some(&known_aliases),
-        )?;
-        points.push(history_point(&snapshot, committed_at.clone()));
-        cache = Some(snapshot);
-    }
-    let done = points.len() == commits.len();
-    if done {
-        progress(Progress {
-            completed: total,
-            total,
-            phase: format!("Ownership history {total}/{total}"),
-        });
-    }
-    let checkpoint = match &cache {
-        Some(snapshot) => serde_json::to_string(snapshot).map_err(|e| e.to_string())?,
-        None => String::new(),
-    };
-    Ok(HistoryBatch {
-        points,
-        checkpoint,
-        reset,
-        done,
-        completed: completed_base + take,
-        total,
-    })
 }
 
 struct ActiveScan {
@@ -1387,16 +1240,89 @@ pub async fn prepare_line_ownership(
     .map_err(|e| e.to_string())?
 }
 
+/// The HEAD scan's result: the small report the page reads, the metadata an
+/// unchanged check compares, and the name of the native per-file cache.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnershipScan {
+    report: String,
+    metadata: String,
+    cache_ref: String,
+}
+
+fn heads_dir(cache: &Path, github_repo: &str) -> PathBuf {
+    cache
+        .join("heads")
+        .join(github_repo.to_lowercase().replace('/', "__"))
+}
+
+fn valid_cache_ref(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() < 200
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+}
+
+/// Write a HEAD file cache under a new name: temporary file, flush, rename. The
+/// previous file stays until the database row points past it.
+fn write_head_cache(dir: &Path, snapshot: &Snapshot) -> Result<String, String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let revision = &snapshot.report.revision;
+    let name = format!(
+        "v{}-{}-{nanos}.json",
+        snapshot.version,
+        if revision.is_empty() { "empty" } else { &revision[..revision.len().min(12)] }
+    );
+    let temp = dir.join(format!(".{name}.tmp"));
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&temp).map_err(|e| e.to_string())?;
+        file.write_all(&serde_json::to_vec(snapshot).map_err(|e| e.to_string())?)
+            .and_then(|_| file.sync_all())
+            .map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&temp, dir.join(&name)).map_err(|e| e.to_string())?;
+    Ok(name)
+}
+
+fn read_head_cache(dir: &Path, name: &str) -> Option<Snapshot> {
+    if !valid_cache_ref(name) {
+        return None;
+    }
+    let bytes = std::fs::read(dir.join(name)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn scan_result(snapshot: &Snapshot, cache_ref: String) -> Result<OwnershipScan, String> {
+    Ok(OwnershipScan {
+        report: serde_json::to_string(&snapshot.report).map_err(|e| e.to_string())?,
+        metadata: serde_json::to_string(&serde_json::json!({
+            "version": snapshot.version,
+            "revision": snapshot.report.revision,
+            "options": snapshot.report.options,
+        }))
+        .map_err(|e| e.to_string())?,
+        cache_ref,
+    })
+}
+
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn sync_line_ownership(
     github_repo: String,
     job_id: String,
     revision: String,
+    previous_ref: Option<String>,
     previous_json: Option<String>,
     app: tauri::AppHandle,
     on_progress: Channel<Progress>,
     control: State<'_, ScanControl>,
-) -> Result<String, String> {
+) -> Result<OwnershipScan, String> {
     let cache = app
         .path()
         .app_cache_dir()
@@ -1413,19 +1339,15 @@ pub async fn sync_line_ownership(
             });
         };
         phase("Waiting for calculation workers");
-        let _permit = loop {
-            check_cancel(&active.cancelled)?;
-            match calculation.try_lock() {
-                Ok(permit) => break permit,
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    std::thread::sleep(Duration::from_millis(20))
-                }
-                Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
-            }
-        };
+        let _permit = calculation.acquire(&active.cancelled)?;
         let repo = cache.join(format!("{}.git", github_repo.to_lowercase()));
+        let heads = heads_dir(&cache, &github_repo);
         let options = managed_options(&repo);
-        let previous: Option<Snapshot> = previous_json.and_then(|s| serde_json::from_str(&s).ok());
+        // A native cache file first; a legacy full JSON snapshot converts once.
+        let previous: Option<Snapshot> = previous_ref
+            .as_deref()
+            .and_then(|name| read_head_cache(&heads, name))
+            .or_else(|| previous_json.and_then(|s| serde_json::from_str(&s).ok()));
         if !revision.is_empty() {
             if !is_commit_id(&revision) {
                 return Err("Invalid prepared revision".into());
@@ -1461,29 +1383,36 @@ pub async fn sync_line_ownership(
                     let _ = on_progress.send(event);
                 },
                 Some(&revision),
-                worker_count(),
+                calculation.workers(),
                 false,
                 None,
             )?
         };
         check_cancel(&active.cancelled)?;
         snapshot.report.repo = format!("https://github.com/{github_repo}");
-        serde_json::to_string(&snapshot).map_err(|e| e.to_string())
+        let name = write_head_cache(&heads, &snapshot)?;
+        // Anything but the row's current file and this new one is an orphan.
+        let keep: Vec<&str> = previous_ref.iter().map(String::as_str).chain([name.as_str()]).collect();
+        history::prune_checkpoints(&heads, &keep);
+        scan_result(&snapshot, name)
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn advance_line_ownership_history(
     github_repo: String,
     job_id: String,
     revision: String,
-    previous_json: Option<String>,
+    generation: i64,
+    checkpoint_ref: Option<String>,
+    engine: String,
     app: tauri::AppHandle,
     on_progress: Channel<Progress>,
     control: State<'_, ScanControl>,
-) -> Result<HistoryBatch, String> {
+) -> Result<history::HistoryBatchV2, String> {
     let cache = app
         .path()
         .app_cache_dir()
@@ -1491,33 +1420,126 @@ pub async fn advance_line_ownership_history(
         .join("line-ownership");
     let active = control.begin(&github_repo, &job_id)?;
     let calculation = control.calculation.clone();
+    let jobs = control.jobs.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let _permit = loop {
-            check_cancel(&active.cancelled)?;
-            match calculation.try_lock() {
-                Ok(permit) => break permit,
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    std::thread::sleep(Duration::from_millis(20))
-                }
-                Err(std::sync::TryLockError::Poisoned(poisoned)) => break poisoned.into_inner(),
-            }
-        };
+        let _permit = calculation.acquire(&active.cancelled)?;
         let repo = cache.join(format!("{}.git", github_repo.to_lowercase()));
-        let options = managed_options(&repo);
-        let previous = previous_json.and_then(|value| serde_json::from_str(&value).ok());
-        advance_history(
-            options,
-            previous,
+        let dir = history::checkpoint_dir(&cache, &github_repo);
+        let key = github_repo.to_lowercase();
+        let remembered = lock_jobs(&jobs).remove(&key);
+        let result = advance_history_job(
+            &repo,
+            &dir,
             &revision,
-            25,
-            &active.cancelled,
-            |event| {
-                let _ = on_progress.send(event);
+            generation,
+            checkpoint_ref.as_deref(),
+            history::Engine::parse(&engine)?,
+            remembered,
+            &history::BatchLimits {
+                workers: calculation.workers(),
+                ..Default::default()
             },
-        )
+            &active.cancelled,
+            |completed, total| {
+                let _ = on_progress.send(Progress {
+                    completed,
+                    total,
+                    phase: format!("Ownership history {completed}/{total}"),
+                });
+            },
+        )?;
+        let (batch, job) = result;
+        if let Some(job) = job {
+            lock_jobs(&jobs).insert(key, job);
+        }
+        Ok(batch)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn lock_jobs(
+    jobs: &Mutex<BTreeMap<String, history::Job>>,
+) -> std::sync::MutexGuard<'_, BTreeMap<String, history::Job>> {
+    jobs.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// One history batch: continue from the named checkpoint (in memory when it is
+/// the one this process just wrote, otherwise from disk), advance, and write the
+/// next checkpoint. The job is returned for reuse unless the walk is done.
+#[allow(clippy::too_many_arguments)]
+fn advance_history_job(
+    repo: &Path,
+    dir: &Path,
+    target: &str,
+    generation: i64,
+    checkpoint_ref: Option<&str>,
+    engine: history::Engine,
+    remembered: Option<history::Job>,
+    limits: &history::BatchLimits,
+    cancelled: &AtomicBool,
+    progress: impl Fn(usize, usize),
+) -> Result<(history::HistoryBatchV2, Option<history::Job>), String> {
+    if target.is_empty() {
+        history::prune_checkpoints(dir, &[]);
+        return Ok((
+            history::HistoryBatchV2 {
+                done: true,
+                engine: Some(engine),
+                final_state: Some(history::FinalState {
+                    total_lines: 0,
+                    groups: vec![],
+                }),
+                ..Default::default()
+            },
+            None,
+        ));
+    }
+    if !is_commit_id(target) {
+        return Err("Invalid prepared revision".into());
+    }
+    let options = managed_options(repo);
+    history::prune_checkpoints(dir, &checkpoint_ref.into_iter().collect::<Vec<_>>());
+    let reusable = remembered.filter(|job| {
+        checkpoint_ref.is_some()
+            && job.checkpoint_ref.as_deref() == checkpoint_ref
+            && job.state.target == target
+            && job.state.generation == generation
+            && job.state.engine == engine
+    });
+    let mut job = match reusable {
+        Some(job) => job,
+        None => {
+            let previous = match checkpoint_ref {
+                Some(name) => match history::read_checkpoint(dir, name) {
+                    Ok(state) => Some(state),
+                    // A missing or corrupt checkpoint restarts in a new generation;
+                    // the visible history stays until that one completes.
+                    Err(_) => return Ok((reset_batch(engine), None)),
+                },
+                None => None,
+            };
+            match history::prepare_job(repo, &options, target, engine, generation, previous, cancelled)? {
+                Some(job) => job,
+                None => return Ok((reset_batch(engine), None)),
+            }
+        }
+    };
+    let mut batch = history::run_batch(&mut job, repo, &options, limits, cancelled, progress)?;
+    check_cancel(cancelled)?;
+    let name = history::write_checkpoint(dir, &job.state)?;
+    job.checkpoint_ref = Some(name.clone());
+    batch.checkpoint_ref = Some(name);
+    let keep = !batch.done;
+    Ok((batch, keep.then_some(job)))
+}
+
+fn reset_batch(engine: history::Engine) -> history::HistoryBatchV2 {
+    history::HistoryBatchV2 {
+        needs_reset: true,
+        engine: Some(engine),
+        ..Default::default()
+    }
 }
 
 fn update_commit_graph(
@@ -2394,6 +2416,111 @@ mod tests {
         }
     }
 
+    /// Opt-in: find the first first-parent commit where replay and blame disagree.
+    ///   OWNERSHIP_BENCH_REPO=/path cargo test --release --lib history_replay_bisect -- --ignored --nocapture
+    #[test]
+    #[ignore = "Opt-in diagnostic using a supplied local clone"]
+    fn history_replay_bisect() {
+        let source = std::env::var("OWNERSHIP_BENCH_REPO").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let repo = cache.path().join("bisect.git");
+        git(cache.path(), &["clone", "--bare", "--shared", "--", &source, repo.to_str().unwrap()]).unwrap();
+        let cancel = AtomicBool::new(false);
+        let target = head_revision(&repo, &cancel).unwrap();
+        let commits: Vec<String> = git_text(&repo, &["rev-list", "--first-parent", "--reverse", &target])
+            .unwrap().lines().map(str::to_owned).collect();
+        let replayed = |k: usize| {
+            let dir = tempfile::tempdir().unwrap();
+            let mut checkpoint = None;
+            loop {
+                let (batch, _) = advance_history_job(&repo, dir.path(), &commits[k], 1, checkpoint.as_deref(),
+                    history::Engine::Replay, None, &history::BatchLimits { workers: worker_count(), ..Default::default() }, &cancel, |_, _| {}).unwrap();
+                checkpoint = batch.checkpoint_ref.clone();
+                if batch.done {
+                    return history::read_checkpoint(dir.path(), checkpoint.as_deref().unwrap()).unwrap();
+                }
+            }
+        };
+        let agrees = |k: usize| replayed(k).origin_lines() == blame_origins(&repo, &commits[k]).0;
+        let (mut good, mut bad) = (0usize, commits.len() - 1);
+        assert!(!agrees(bad), "replay agrees with blame at the head");
+        if !agrees(good) { bad = 0; }
+        while bad > good + 1 {
+            let mid = (good + bad) / 2;
+            if agrees(mid) { good = mid } else { bad = mid }
+            println!("BISECT good={good} bad={bad}");
+        }
+        let sha = &commits[bad];
+        let state = replayed(bad).origin_lines();
+        let (expected, _) = blame_origins(&repo, sha);
+        println!("FIRST DIVERGENCE {bad} {sha}");
+        for key in state.keys().chain(expected.keys()).collect::<BTreeSet<_>>() {
+            if state.get(key) != expected.get(key) {
+                println!("  origin {key}: replay {:?} blame {:?}", state.get(key), expected.get(key));
+            }
+        }
+        println!("{}", git_text(&repo, &["show", "--stat", "-M", "--format=%H %P%n%s", sha]).unwrap());
+    }
+
+    /// Opt-in: time both history engines on a cached clone, count Git processes by
+    /// command, report checkpoint size, and require identical results.
+    ///   OWNERSHIP_BENCH_REPO=/path/to/clone cargo test --release --lib \
+    ///     history_engine_benchmark -- --ignored --nocapture
+    #[test]
+    #[ignore = "Opt-in benchmark using a supplied local clone"]
+    fn history_engine_benchmark() {
+        let source = std::env::var("OWNERSHIP_BENCH_REPO").unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let repo = cache.path().join("benchmark.git");
+        git(cache.path(), &["clone", "--bare", "--shared", "--", &source, repo.to_str().unwrap()]).unwrap();
+        let cancel = AtomicBool::new(false);
+        let target = head_revision(&repo, &cancel).unwrap();
+        update_commit_graph(&repo, &target, &cancel, |_| {}).unwrap();
+        let mut finals = Vec::new();
+        // OWNERSHIP_BENCH_ENGINES=replay skips the slower reference walk.
+        let engines: Vec<_> = std::env::var("OWNERSHIP_BENCH_ENGINES")
+            .unwrap_or_else(|_| "replay,blame".into())
+            .split(',')
+            .map(|e| history::Engine::parse(e.trim()).unwrap())
+            .collect();
+        for engine in engines {
+            let dir = tempfile::tempdir().unwrap();
+            process::reset_spawned();
+            let start = Instant::now();
+            let mut checkpoint = None;
+            let mut points = 0;
+            let mut batches = 0;
+            let fallbacks;
+            let commits;
+            loop {
+                let (batch, _) = advance_history_job(
+                    &repo, dir.path(), &target, 1, checkpoint.as_deref(), engine, None,
+                    &history::BatchLimits { workers: worker_count(), ..Default::default() }, &cancel, |_, _| {},
+                )
+                .unwrap();
+                batches += 1;
+                points += batch.points.len();
+                checkpoint = batch.checkpoint_ref.clone();
+                if batch.done {
+                    commits = batch.completed;
+                    fallbacks = batch.fallbacks.clone();
+                    finals.push(final_sets(batch.final_state.as_ref().unwrap()));
+                    break;
+                }
+            }
+            let seconds = start.elapsed().as_secs_f64();
+            let bytes = fs::metadata(dir.path().join(checkpoint.unwrap())).unwrap().len();
+            println!(
+                "BENCH engine={engine:?} commits={commits} seconds={seconds:.3} ms_per_commit={:.2} batches={batches} day_points={points} checkpoint_bytes={bytes} fallbacks={fallbacks:?} git={:?}",
+                seconds * 1000.0 / commits.max(1) as f64,
+                process::spawned()
+            );
+        }
+        assert!(finals.windows(2).all(|w| w[0] == w[1]), "every engine must end with the same attribution");
+        let (_, report) = blame_origins(&repo, &target);
+        assert_eq!(finals[0], credit_sets(&report), "and match a HEAD scan");
+    }
+
     #[test]
     fn surviving_lines_coauthors_aliases_filters_and_pinned_revision() {
         let dir = fixture();
@@ -2930,157 +3057,424 @@ mod tests {
             .trim()
             .to_owned()
     }
-    fn history_batch(repo: &Path, previous: Option<Snapshot>, limit: usize) -> HistoryBatch {
-        advance_history(
+    fn commit_all(repo: &Path, message: &str) {
+        git(repo, &["add", "-A"]).unwrap();
+        git(repo, &["commit", "-q", "--allow-empty", "-m", message]).unwrap();
+    }
+    fn commit_dated(repo: &Path, author: &str, date: &str, message: &str) {
+        git(repo, &["add", "-A"]).unwrap();
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["commit", "-q", "--allow-empty", "--author", author, "-m", message])
+            .env("GIT_COMMITTER_DATE", date)
+            .env("GIT_AUTHOR_DATE", date)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    /// Surviving lines per origin commit from a full blame at `sha`: the oracle.
+    fn blame_origins(repo: &Path, sha: &str) -> (BTreeMap<String, u64>, Report) {
+        let snapshot = scan_snapshot_at(
             options(repo),
-            previous,
-            &head_sha(repo),
-            limit,
+            None,
             &AtomicBool::new(false),
             |_| {},
-        )
-        .unwrap()
-    }
-    fn saved_cache(batch: &HistoryBatch) -> Snapshot {
-        serde_json::from_str(&batch.checkpoint).unwrap()
-    }
-    fn commit_all(repo: &Path, message: &str) {
-        git(repo, &["add", "."]).unwrap();
-        git(repo, &["commit", "-m", message]).unwrap();
-    }
-    fn assert_same_people(point: &HistoryPoint, report: &Report) {
-        let people = |authors: &[AuthorRow]| {
-            authors
-                .iter()
-                .map(|author| {
-                    (
-                        author.author.clone(),
-                        author.names.clone(),
-                        author.emails.clone(),
-                        author.lines,
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        let historic = point
-            .authors
-            .iter()
-            .map(|author| {
-                (
-                    author.author.clone(),
-                    author.names.clone(),
-                    author.emails.clone(),
-                    author.lines,
-                )
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(point.total_lines, report.total_lines);
-        assert_eq!(point.coauthored_lines, report.coauthored_lines);
-        assert_eq!(historic, people(&report.authors));
-    }
-
-    #[test]
-    fn history_reuses_untouched_files_resumes_and_matches_a_full_scan() {
-        let dir = fixture();
-        let repo = dir.path();
-        let first = history_batch(repo, None, 10);
-        assert!(first.reset);
-        assert!(first.done);
-        assert_eq!(first.points.len(), 1);
-        fs::write(repo.join("code.txt"), "changed\ntwo\nthree\n").unwrap();
-        commit_all(repo, "Edit code");
-        let partial = history_batch(repo, None, 1);
-        assert!(!partial.done);
-        assert_eq!(partial.points.len(), 1);
-        let resumed = history_batch(repo, Some(saved_cache(&partial)), 10);
-        assert!(!resumed.reset);
-        assert!(resumed.done);
-        assert_eq!(resumed.points.len(), 1);
-        let step = saved_cache(&resumed);
-        assert_eq!(step.report.files_recalculated, 1);
-        assert!(step.report.files_reused >= 1);
-        fs::write(repo.join("package-lock.json"), "still generated\n").unwrap();
-        commit_all(repo, "Touch a generated file");
-        let skipped = history_batch(repo, Some(step), 10);
-        assert_eq!(saved_cache(&skipped).report.files_recalculated, 0);
-        assert_same_people(
-            skipped.points.last().unwrap(),
-            &scan(options(repo), &AtomicBool::new(false), |_| {}).unwrap(),
-        );
-    }
-
-    #[test]
-    fn history_credits_a_restored_line_to_the_restoring_commit() {
-        let dir = fixture();
-        let repo = dir.path();
-        let initial = history_batch(repo, None, 10);
-        fs::write(repo.join("code.txt"), "temporary\ntwo\nthree\n").unwrap();
-        commit_all(repo, "Temporary change");
-        fs::write(repo.join("code.txt"), "one\ntwo\nthree\n").unwrap();
-        git(repo, &["add", "."]).unwrap();
-        git(
-            repo,
-            &[
-                "commit",
-                "--author",
-                "Carol <carol@example.com>",
-                "-m",
-                "Restore content",
-            ],
+            Some(sha),
+            2,
+            false,
+            None,
         )
         .unwrap();
-        let updated = history_batch(repo, Some(saved_cache(&initial)), 10);
-        assert!(!updated.reset);
-        assert_eq!(updated.points.len(), 2);
-        assert!(updated.points[1]
-            .authors
-            .iter()
-            .any(|author| { author.author == "Carol" && author.lines == 1 }));
-        assert_same_people(
-            updated.points.last().unwrap(),
-            &scan(options(repo), &AtomicBool::new(false), |_| {}).unwrap(),
-        );
+        let mut counts = BTreeMap::new();
+        for file in snapshot.files.values().filter(|f| !f.binary) {
+            for (origin, lines) in &file.counts {
+                *counts.entry(origin.clone()).or_default() += lines.lines;
+            }
+        }
+        counts.retain(|_, lines| *lines > 0);
+        (counts, snapshot.report)
+    }
+
+    /// Credits as sets of identity tuples, the shape both sides can be compared in.
+    fn credit_sets(report: &Report) -> BTreeMap<Vec<(String, String)>, u64> {
+        let mut out = BTreeMap::new();
+        for credit in &report.credits {
+            let mut people: Vec<_> = credit
+                .people
+                .iter()
+                .map(|p| (p.name.clone(), p.email.clone()))
+                .collect();
+            people.sort();
+            people.dedup();
+            *out.entry(people).or_default() += credit.lines;
+        }
+        out
+    }
+    fn final_sets(state: &history::FinalState) -> BTreeMap<Vec<(String, String)>, u64> {
+        let mut out = BTreeMap::new();
+        for (people, lines) in &state.groups {
+            let mut people = people.clone();
+            people.sort();
+            *out.entry(people).or_default() += *lines;
+        }
+        out
+    }
+
+    fn one_at_a_time() -> history::BatchLimits {
+        history::BatchLimits {
+            time_budget: Duration::from_secs(60),
+            max_commits: 1,
+            chunk: 1,
+            workers: 2,
+        }
+    }
+
+    /// Walk to HEAD one commit per batch, reloading the checkpoint from disk on
+    /// every other batch, and compare each commit with a full blame.
+    fn assert_walk_matches_blame(repo: &Path, engine: history::Engine) -> BTreeMap<String, u64> {
+        let dir = tempfile::tempdir().unwrap();
+        let target = head_sha(repo);
+        let commits = git_text(repo, &["rev-list", "--first-parent", "--reverse", &target]).unwrap();
+        let commits: Vec<_> = commits.lines().map(str::to_owned).collect();
+        let mut checkpoint: Option<String> = None;
+        let mut job: Option<history::Job> = None;
+        let mut fallbacks = BTreeMap::new();
+        for (step, sha) in commits.iter().enumerate() {
+            let remembered = if step % 2 == 0 { job.take() } else { None };
+            let (batch, next) = advance_history_job(
+                repo,
+                dir.path(),
+                &target,
+                1,
+                checkpoint.as_deref(),
+                engine,
+                remembered,
+                &one_at_a_time(),
+                &AtomicBool::new(false),
+                |_, _| {},
+            )
+            .unwrap();
+            assert!(!batch.needs_reset, "step {step} should continue");
+            assert_eq!(batch.cursor.as_deref(), Some(sha.as_str()));
+            checkpoint = batch.checkpoint_ref.clone();
+            let state = history::read_checkpoint(dir.path(), checkpoint.as_deref().unwrap()).unwrap();
+            let (expected, report) = blame_origins(repo, sha);
+            assert_eq!(state.origin_lines(), expected, "{engine:?} differs from blame at step {step} ({sha})");
+            assert_eq!(final_sets(&state.final_state()), credit_sets(&report), "{engine:?} credits at step {step}");
+            fallbacks = batch.fallbacks.clone();
+            job = next;
+            assert_eq!(batch.done, step + 1 == commits.len());
+            if batch.done {
+                assert_eq!(final_sets(batch.final_state.as_ref().unwrap()), credit_sets(&report));
+            }
+        }
+        fallbacks
+    }
+
+    /// Every kind of change the replay engine must agree with blame on.
+    fn replay_matrix() -> tempfile::TempDir {
+        let dir = fixture();
+        let repo = dir.path();
+        let bob = "Bob Example <bob@example.com>";
+        let carol = "Carol Example <carol@example.com>";
+        fs::write(repo.join("code.txt"), "one\n  two\nthree\nfour\n").unwrap();
+        commit_dated(repo, bob, "2020-01-02T10:00:00Z", "Whitespace and an insertion");
+        fs::write(repo.join("code.txt"), "one\ntwo\n\nthree\nfour\nfive\n").unwrap();
+        commit_dated(repo, carol, "2020-01-02T09:00:00Z", "Earlier time, same day");
+        fs::write(repo.join("crlf.txt"), "a\r\nb\r\nc").unwrap();
+        fs::write(repo.join("big.txt"), (0..400).map(|i| format!("line {i}\n")).collect::<String>()).unwrap();
+        commit_dated(repo, bob, "2020-01-03T00:00:00Z", "CRLF, no final newline, a large file");
+        fs::write(repo.join("crlf.txt"), "a\r\nB\r\nc\r\n").unwrap();
+        let big: String = (0..400)
+            .map(|i| if i % 7 == 0 { format!("changed {i}\n") } else { format!("line {i}\n") })
+            .collect();
+        fs::write(repo.join("big.txt"), big).unwrap();
+        commit_dated(repo, carol, "2020-01-04T00:00:00Z", "Large scattered hunks\n\nCo-authored-by: Bob Example <bob@example.com>");
+        git(repo, &["mv", "big.txt", "renamed.txt"]).unwrap();
+        fs::write(repo.join("renamed.txt"), fs::read_to_string(repo.join("renamed.txt")).unwrap() + "tail\n").unwrap();
+        commit_dated(repo, bob, "2020-01-05T00:00:00Z", "Rename plus edit");
+        fs::remove_file(repo.join("crlf.txt")).unwrap();
+        commit_dated(repo, bob, "2020-01-06T00:00:00Z", "Delete");
+        fs::write(repo.join("crlf.txt"), "a\r\nB\r\nc\r\n").unwrap();
+        commit_dated(repo, carol, "2020-01-07T00:00:00Z", "Restore the deleted file");
+        fs::write(repo.join("binary"), "now text\nreally\n").unwrap();
+        fs::write(repo.join("image.png"), b"\x89PNG\0").unwrap();
+        fs::write(repo.join("yarn.lock"), "generated\n").unwrap();
+        commit_dated(repo, bob, "2020-01-08T00:00:00Z", "Binary becomes text, excluded files");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("code.txt", repo.join("link.txt")).unwrap();
+        fs::write(repo.join("code.txt"), "one\ntwo\n\nthree\nfour\nfive\nsix\n").unwrap();
+        commit_dated(repo, "Alice Example <alice@example.com>", "2020-01-08T00:00:00Z", "Symlink, equal timestamp\n\nCo-authored-by: Alice Example <alice@example.com>");
+        git(repo, &["checkout", "-q", "-b", "feature"]).unwrap();
+        fs::write(repo.join("feature.txt"), "side one\nside two\n").unwrap();
+        fs::write(repo.join("code.txt"), "one\ntwo\n\nthree\nfour\nfive\nsix\nfrom side\n").unwrap();
+        commit_dated(repo, carol, "2020-01-09T00:00:00Z", "Side branch");
+        git(repo, &["checkout", "-q", "main"]).unwrap();
+        fs::write(repo.join("main.txt"), "main only\n").unwrap();
+        commit_dated(repo, bob, "2020-01-09T12:00:00Z", "Main moves on");
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(["merge", "-q", "--no-ff", "feature", "-m", "Merge feature"])
+            .env("GIT_COMMITTER_DATE", "2020-01-10T00:00:00Z")
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        fs::write(repo.join("feature.txt"), "side one\nedited after merge\n").unwrap();
+        commit_dated(repo, bob, "2020-01-01T00:00:00Z", "Clock went backwards");
+        git(repo, &["mv", "renamed.txt", "moved.txt"]).unwrap();
+        fs::write(repo.join("renamed.txt"), "a brand new file at the old path\n").unwrap();
+        git(repo, &["mv", "image.png", "moved.png"]).unwrap();
+        git(repo, &["mv", "main.txt", "vendor.min.js"]).unwrap();
+        commit_dated(repo, carol, "2020-01-11T00:00:00Z", "Exact rename, old path reused, binary and excluded renames");
+        dir
     }
 
     #[test]
-    fn history_keeps_the_first_parent_tree_across_a_merge() {
-        let dir = fixture();
-        let repo = dir.path();
-        let initial = history_batch(repo, None, 10);
-        let before = initial.points[0].total_lines;
-        git(repo, &["checkout", "-b", "feature"]).unwrap();
-        fs::write(repo.join("code.txt"), "feature\ntwo\nthree\n").unwrap();
-        commit_all(repo, "Feature");
-        git(repo, &["checkout", "main"]).unwrap();
-        git(repo, &["merge", "-s", "ours", "feature", "-m", "Keep main"]).unwrap();
-        let merged = history_batch(repo, Some(saved_cache(&initial)), 10);
-        assert!(!merged.reset);
-        assert_eq!(merged.points.len(), 1);
-        assert_eq!(saved_cache(&merged).report.files_recalculated, 0);
-        assert_eq!(merged.points[0].total_lines, before);
-        assert_same_people(
-            &merged.points[0],
-            &scan(options(repo), &AtomicBool::new(false), |_| {}).unwrap(),
-        );
+    fn blame_engine_matches_a_full_blame_at_every_commit() {
+        let dir = replay_matrix();
+        assert_walk_matches_blame(dir.path(), history::Engine::Blame);
     }
 
     #[test]
-    fn history_restarts_when_the_cached_commit_is_not_an_ancestor() {
+    fn replay_engine_matches_a_full_blame_at_every_commit_and_records_fallbacks() {
+        let dir = replay_matrix();
+        let fallbacks = assert_walk_matches_blame(dir.path(), history::Engine::Replay);
+        assert!(fallbacks.get("merge").copied().unwrap_or(0) >= 1, "{fallbacks:?}");
+        assert!(fallbacks.get("rename").copied().unwrap_or(0) >= 1, "a contested rename is blamed: {fallbacks:?}");
+        let binary_to_text = fallbacks.get("attributes").copied().unwrap_or(0) + fallbacks.get("transition").copied().unwrap_or(0);
+        assert!(binary_to_text >= 1, "a binary file becoming text is re-blamed: {fallbacks:?}");
+    }
+
+    /// Blame looks for each new path's rename source on its own; full `-M`
+    /// detection pairs each deleted file with at most one new path.
+    fn rename_contention(variant: &str) -> tempfile::TempDir {
         let dir = fixture();
         let repo = dir.path();
-        let initial = history_batch(repo, None, 10);
-        git(repo, &["checkout", "--orphan", "fresh"]).unwrap();
-        git(repo, &["reset", "-q"]).unwrap();
-        fs::write(repo.join("other.txt"), "fresh\n").unwrap();
-        git(repo, &["add", "other.txt"]).unwrap();
-        git(repo, &["commit", "-m", "Fresh root"]).unwrap();
-        let fresh = head_sha(repo);
-        let rebuilt = history_batch(repo, Some(saved_cache(&initial)), 10);
-        assert!(rebuilt.reset);
-        assert!(rebuilt.done);
-        assert_eq!(rebuilt.points.len(), 1);
-        assert_eq!(rebuilt.points[0].revision, fresh);
-        assert_eq!(rebuilt.points[0].total_lines, 1);
+        let body = |tag: &str| (0..20).map(|i| format!("{tag} line {i}\n")).collect::<String>();
+        let bob = "Bob Example <bob@example.com>";
+        fs::write(repo.join("a.txt"), body("shared")).unwrap();
+        fs::write(repo.join("x.txt"), body("other")).unwrap();
+        commit_dated(repo, "Alice Example <alice@example.com>", "2020-01-02T00:00:00Z", "Originals");
+        match variant {
+            // One deleted file, two new near-copies of it.
+            "duplicate" => {
+                fs::remove_file(repo.join("a.txt")).unwrap();
+                fs::write(repo.join("b.txt"), body("shared") + "b tail\n").unwrap();
+                fs::write(repo.join("c.txt"), body("shared") + "c tail\n").unwrap();
+            }
+            // Two deleted files that both resemble one new path, plus a weaker second path.
+            _ => {
+                fs::remove_file(repo.join("a.txt")).unwrap();
+                fs::remove_file(repo.join("x.txt")).unwrap();
+                let mixed: String = (0..20).map(|i| if i < 12 { format!("shared line {i}\n") } else { format!("other line {i}\n") }).collect();
+                fs::write(repo.join("m.txt"), mixed).unwrap();
+                fs::write(repo.join("n.txt"), body("shared")).unwrap();
+            }
+        }
+        commit_dated(repo, bob, "2020-01-03T00:00:00Z", "Split and move");
+        dir
+    }
+
+    #[test]
+    fn replay_follows_renames_the_way_blame_does() {
+        for variant in ["duplicate", "competing"] {
+            let dir = rename_contention(variant);
+            assert_walk_matches_blame(dir.path(), history::Engine::Replay);
+        }
+    }
+
+    #[test]
+    fn replay_uses_fewer_blame_processes_than_the_blame_engine() {
+        let dir = replay_matrix();
+        let repo = dir.path();
+        let target = head_sha(repo);
+        let count_blames = |engine| {
+            let checkpoints = tempfile::tempdir().unwrap();
+            process::reset_spawned();
+            let (batch, _) = advance_history_job(
+                repo, checkpoints.path(), &target, 1, None, engine, None,
+                &history::BatchLimits::default(), &AtomicBool::new(false), |_, _| {},
+            )
+            .unwrap();
+            assert!(batch.done);
+            process::spawned().get("blame").copied().unwrap_or(0)
+        };
+        let blame = count_blames(history::Engine::Blame);
+        let replay = count_blames(history::Engine::Replay);
+        assert!(replay < blame, "replay ran {replay} blames, blame engine {blame}");
+    }
+
+    /// The saved-history rule: the day's point is the latest committer second, then the greater SHA.
+    #[test]
+    fn day_points_reproduce_the_saved_history_rule_with_out_of_order_times() {
+        let dir = replay_matrix();
+        let repo = dir.path();
+        let target = head_sha(repo);
+        let log = git_text(repo, &["log", "--first-parent", "--format=%H %ct", &target]).unwrap();
+        let mut expected = BTreeMap::<i64, (i64, String)>::new();
+        for line in log.lines() {
+            let (sha, unix) = line.split_once(' ').unwrap();
+            let unix: i64 = unix.parse().unwrap();
+            let entry = expected.entry(unix.div_euclid(86_400)).or_insert((i64::MIN, String::new()));
+            if (unix, sha) > (entry.0, entry.1.as_str()) {
+                *entry = (unix, sha.to_owned());
+            }
+        }
+        for limits in [one_at_a_time(), history::BatchLimits { chunk: 3, max_commits: 5, ..Default::default() }] {
+            let checkpoints = tempfile::tempdir().unwrap();
+            let mut saved = BTreeMap::<i64, (i64, String, u64)>::new();
+            let mut checkpoint = None;
+            loop {
+                let (batch, _) = advance_history_job(
+                    repo, checkpoints.path(), &target, 1, checkpoint.as_deref(), history::Engine::Replay,
+                    None, &limits, &AtomicBool::new(false), |_, _| {},
+                )
+                .unwrap();
+                // What the database upsert does with each row.
+                for point in &batch.points {
+                    let unix = git_text(repo, &["show", "-s", "--format=%ct", &point.revision]).unwrap().trim().parse::<i64>().unwrap();
+                    let day = unix.div_euclid(86_400);
+                    let better = saved.get(&day).is_none_or(|(u, s, _)| (unix, point.revision.as_str()) > (*u, s.as_str()));
+                    if better {
+                        saved.insert(day, (unix, point.revision.clone(), point.total_lines));
+                    }
+                }
+                checkpoint = batch.checkpoint_ref.clone();
+                if batch.done {
+                    break;
+                }
+            }
+            assert_eq!(saved.len(), expected.len());
+            for (day, (unix, sha, total)) in &saved {
+                assert_eq!(&expected[day], &(*unix, sha.clone()), "day {day}");
+                assert_eq!(*total, blame_origins(repo, sha).1.total_lines, "levels at {sha}");
+            }
+        }
+    }
+
+    #[test]
+    fn checkpoints_resume_reject_corruption_and_reset_on_rewrites() {
+        let dir = replay_matrix();
+        let repo = dir.path();
+        let target = head_sha(repo);
+        let checkpoints = tempfile::tempdir().unwrap();
+        let limits = history::BatchLimits { chunk: 2, max_commits: 3, ..Default::default() };
+        let run = |checkpoint: Option<&str>, generation: i64, engine| {
+            advance_history_job(
+                repo, checkpoints.path(), &target, generation, checkpoint, engine, None, &limits,
+                &AtomicBool::new(false), |_, _| {},
+            )
+            .unwrap()
+            .0
+        };
+        let first = run(None, 1, history::Engine::Replay);
+        assert!(!first.done && !first.needs_reset);
+        let name = first.checkpoint_ref.clone().unwrap();
+        // An uncommitted newer checkpoint is an orphan: the caller retries from `name`.
+        let orphan = run(Some(&name), 1, history::Engine::Replay).checkpoint_ref.unwrap();
+        let retried = run(Some(&name), 1, history::Engine::Replay);
+        assert!(!checkpoints.path().join(&orphan).exists(), "orphans are pruned");
+        assert!(checkpoints.path().join(&name).exists(), "the committed checkpoint is kept until replaced");
+        assert_eq!(retried.cursor, run(Some(&name), 1, history::Engine::Replay).cursor, "retries are deterministic");
+        assert!(run(Some(&name), 2, history::Engine::Replay).needs_reset, "another generation cannot reuse it");
+        assert!(run(Some(&name), 1, history::Engine::Blame).needs_reset, "another engine cannot reuse it");
+        let mut bytes = fs::read(checkpoints.path().join(&name)).unwrap();
+        let last = bytes.len() - 2;
+        bytes[last] ^= 1;
+        fs::write(checkpoints.path().join(&name), bytes).unwrap();
+        assert!(history::read_checkpoint(checkpoints.path(), &name).is_err());
+        assert!(run(Some(&name), 1, history::Engine::Replay).needs_reset, "corruption restarts in a new generation");
+        assert!(run(Some("../escape"), 1, history::Engine::Replay).needs_reset);
+
+        // Finish, then rewrite the branch: the cursor is no longer a first parent.
+        let mut checkpoint = None;
+        loop {
+            let batch = run(checkpoint.as_deref(), 3, history::Engine::Replay);
+            checkpoint = batch.checkpoint_ref.clone();
+            if batch.done {
+                break;
+            }
+        }
+        let done = checkpoint.unwrap();
+        let (again, _) = advance_history_job(
+            repo, checkpoints.path(), &target, 3, Some(&done), history::Engine::Replay, None, &limits,
+            &AtomicBool::new(false), |_, _| {},
+        )
+        .unwrap();
+        assert!(again.done && again.points.is_empty(), "an unchanged target has nothing to do");
+        git(repo, &["reset", "-q", "--hard", "HEAD~2"]).unwrap();
+        fs::write(repo.join("code.txt"), "rewritten\n").unwrap();
+        commit_all(repo, "Force-pushed");
+        let rewritten = head_sha(repo);
+        let (reset, _) = advance_history_job(
+            repo, checkpoints.path(), &rewritten, 3, Some(&done), history::Engine::Replay, None, &limits,
+            &AtomicBool::new(false), |_, _| {},
+        )
+        .unwrap();
+        assert!(reset.needs_reset);
+    }
+
+    #[test]
+    fn a_mailmap_change_resets_history_and_new_commits_extend_it() {
+        let dir = fixture();
+        let repo = dir.path();
+        let checkpoints = tempfile::tempdir().unwrap();
+        let walk = |target: &str, checkpoint: Option<&str>| {
+            advance_history_job(
+                repo, checkpoints.path(), target, 1, checkpoint, history::Engine::Replay, None,
+                &history::BatchLimits::default(), &AtomicBool::new(false), |_, _| {},
+            )
+            .unwrap()
+            .0
+        };
+        let first = walk(&head_sha(repo), None);
+        assert!(first.done);
+        fs::write(repo.join("code.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        commit_all(repo, "Append");
+        let extended = walk(&head_sha(repo), first.checkpoint_ref.as_deref());
+        assert!(!extended.needs_reset && extended.done);
+        assert_eq!(extended.completed, 2);
+        assert!(extended.identities.is_empty(), "known identities are not sent again");
+        fs::write(repo.join(".mailmap"), "Alice Renamed <alice@example.com> Alice Example <alice@example.com>\n").unwrap();
+        commit_all(repo, "Mailmap");
+        assert!(walk(&head_sha(repo), extended.checkpoint_ref.as_deref()).needs_reset);
+        let rebuilt = walk(&head_sha(repo), None);
+        assert!(rebuilt.identities.iter().any(|(_, name, _)| name == "Alice Renamed"));
+        let (_, report) = blame_origins(repo, &head_sha(repo));
+        assert_eq!(final_sets(rebuilt.final_state.as_ref().unwrap()), credit_sets(&report));
+    }
+
+    #[test]
+    fn permits_bound_concurrency_and_stop_waiting_on_cancel() {
+        let permits = Permits::new(2);
+        let running = AtomicBool::new(false);
+        let a = permits.acquire(&running).unwrap();
+        let _b = permits.acquire(&running).unwrap();
+        let cancelled = AtomicBool::new(true);
+        assert!(permits.acquire(&cancelled).is_err(), "a cancelled job does not wait for a slot");
+        drop(a);
+        assert!(permits.acquire(&running).is_ok(), "a released slot is reused");
+        assert_eq!(Permits::new(2).workers(), (worker_count() / 2).max(1));
+    }
+
+    #[test]
+    fn head_cache_files_are_named_once_and_invalid_names_are_refused() {
+        let dir = fixture();
+        let snapshot = scan_snapshot(options(dir.path()), None, &AtomicBool::new(false), |_| {}).unwrap();
+        let heads = tempfile::tempdir().unwrap();
+        let one = write_head_cache(heads.path(), &snapshot).unwrap();
+        let two = write_head_cache(heads.path(), &snapshot).unwrap();
+        assert_ne!(one, two);
+        assert!(read_head_cache(heads.path(), &one).is_some());
+        assert!(read_head_cache(heads.path(), "../../etc/passwd").is_none());
+        let scan = scan_result(&snapshot, two.clone()).unwrap();
+        assert!(!scan.report.contains("\"files\""), "the page never receives the file cache");
+        assert!(scan.metadata.contains("\"revision\""));
+        history::prune_checkpoints(heads.path(), &[two.as_str()]);
+        assert!(!heads.path().join(&one).exists());
     }
 
     #[test]
