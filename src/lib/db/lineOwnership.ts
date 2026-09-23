@@ -487,6 +487,26 @@ export async function writeGithubUserLookup(db: Db, id: string, login: string): 
   await withWriteLock(() => recordGithubUsers(db, [{ id, login }], "lookup"));
 }
 
+/** Logins named by an imported file. Only fills IDs this install has never seen, so
+ * a match from GitHub or a lookup by ID always wins. */
+export async function writeGithubUserHints(db: Db, users: ReadonlyArray<{ id: string; login: string }>): Promise<void> {
+  if (!users.length) return;
+  await withWriteLock(async () => {
+    await bulkInsert(db as Database, {
+      table: "github_users",
+      columns: ["github_id", "login", "source", "checked_at"],
+      rows: users.map((u) => [u.id, u.login, "import", null]),
+      onConflict: "ignore",
+    });
+    await bulkInsert(db as Database, {
+      table: "github_user_logins",
+      columns: ["github_id", "login_lower", "login", "seen_at"],
+      rows: users.map((u) => [u.id, u.login.toLowerCase(), u.login, new Date().toISOString()]),
+      onConflict: "ignore",
+    });
+  });
+}
+
 /** Mark an ID as checked without a login, e.g. a deleted account. Its last known login stays. */
 export async function markGithubUserChecked(db: Db, id: string): Promise<void> {
   await withWriteLock(() => db.execute("UPDATE github_users SET checked_at = $2 WHERE github_id = $1", [id, new Date().toISOString()]).then(() => {}));

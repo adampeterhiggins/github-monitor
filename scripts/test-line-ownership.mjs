@@ -103,7 +103,7 @@ try {
   assert.equal(options.length, 3, "one option per resolved person");
   const humans = lib.deselectContributors([], options, options.filter((c) => c.isBot));
   assert.deepEqual(humans, [token("alice@x")], "unmatched people are selected by an internal token");
-  assert.ok(options.every((o) => o.unmatched && o.label.startsWith("Unmatched: ")), "unmatched people are labelled as such");
+  assert.ok(options.every((o) => o.unmatched && o.label.endsWith("*")), "unmatched people are marked with an asterisk");
   assert.ok(options.find((o) => o.login === token("alice@x")).searchText.includes("Alice"), "names stay searchable");
   for (const group of ["person", "email", "name"]) {
     const selected = aggregateOwnership(agentReports, group, humans);
@@ -155,7 +155,7 @@ try {
   assert.equal(resolved.authors.length, 4);
   assert.equal(resolved.authors.find((a) => a.author === "aaronconway7").lines, 12);
   assert.equal(resolved.authors.find((a) => a.author === "peakman18").lines, 4);
-  assert.equal(resolved.authors.find((a) => a.author === "Unmatched: Local").lines, 1);
+  assert.equal(resolved.authors.find((a) => a.author === "Local*").lines, 1);
   assert.equal(aggregateOwnership(resolvedReports, "email", [], accounts).authors.length, 5, "email grouping keeps raw identities");
   assert.equal(aggregateOwnership(resolvedReports, "person", ["aaronconway7"], accounts).totalLines, 12);
   assert.equal(lib.ownershipContributors(resolvedReports, [], accounts).find((c) => c.login === "aaronconway7").commits, 12);
@@ -458,6 +458,39 @@ try {
   assert.equal((await lib.listManualMappings(db)).length, 2, "clearing the analytics cache keeps manual mappings");
   assert.equal((await lib.ownershipAccountIndex(db)).users.size, 1, "the registry is cache and is cleared; Contributors logins remain");
   pass("account registry, conflicts, renames by ID, retryable misses, manual mapping create/edit/delete and revisions");
+
+  const savedMappings = await lib.listManualMappings(db);
+  const exported = lib.exportMappings(savedMappings, new Map([[7, "org/seven"], [8, "org/eight"]]), await lib.ownershipAccountIndex(db));
+  assert.equal(exported.format, lib.MAPPING_FILE_FORMAT);
+  assert.deepEqual(exported.mappings.map((m) => m.repository).sort(), ["org/eight", "org/seven"], "name mappings carry their repository");
+  const reposHere = [{ id: 70, fullName: "org/seven" }, { id: 8, fullName: "org/eight" }];
+  let plan = lib.planMappingImport(JSON.stringify(exported), savedMappings, reposHere);
+  assert.equal(plan.error, null);
+  assert.deepEqual(plan.rows.map((r) => r.status).sort(), ["new", "same"], "a repository is matched by ID, then by name on another install");
+  assert.equal(plan.rows.find((r) => r.status === "new").input.repoId, 70);
+  const edited = { ...exported, mappings: [
+    { ...exported.mappings.find((m) => m.repository === "org/eight"), githubId: "5", login: "someone" },
+    { matchKind: "email", matchValue: " New@Example.com ", githubId: "11", login: "newbie", reviewedAutoConflict: false },
+    { matchKind: "email", matchValue: "new@example.com", githubId: "12", login: "dup", reviewedAutoConflict: false },
+    { matchKind: "email", matchValue: "x@y", githubId: "not-an-id", login: "x", reviewedAutoConflict: false },
+    { matchKind: "repo_name", matchValue: "Ghost", repository: "org/gone", githubId: "1", login: "g", reviewedAutoConflict: false },
+  ] };
+  plan = lib.planMappingImport(JSON.stringify(edited), savedMappings, reposHere);
+  assert.deepEqual(plan.rows.map((r) => r.status), ["change", "new", "invalid", "invalid", "invalid"]);
+  assert.equal(plan.rows[1].input.matchValue, "new@example.com", "imported values are normalized");
+  assert.match(plan.rows[2].reason, /twice/);
+  assert.match(plan.rows[3].reason, /account ID/);
+  assert.match(plan.rows[4].reason, /not in this organisation/);
+  assert.match(lib.planMappingImport("{", savedMappings, reposHere).error, /not JSON/);
+  assert.match(lib.planMappingImport(JSON.stringify({ format: "other", mappings: [] }), savedMappings, reposHere).error, /not a contributor mappings file/);
+  assert.match(lib.planMappingImport(JSON.stringify({ ...exported, version: 99 }), savedMappings, reposHere).error, /newer version/);
+  await lib.writeGithubUserHints(db, [{ id: "42", login: "stale-name" }, { id: "11", login: "newbie" }]);
+  const hinted = await lib.ownershipAccountIndex(db);
+  assert.equal(hinted.users.get("11").login, "newbie", "an imported login labels an unknown account");
+  assert.notEqual(hinted.users.get("42")?.login, "stale-name", "but never overrides a known one");
+  for (const row of plan.rows.filter((r) => r.input)) await lib.saveManualMapping(db, row.input);
+  assert.equal((await lib.listManualMappings(db)).find((m) => m.matchValue === "new@example.com").githubId, "11");
+  pass("contributor mappings export and import: preview, repository matching, validation, registry hints");
 
   db.sqlite.exec("INSERT INTO repos (id, owner, name, full_name) VALUES (1, 'org', 'one', 'org/one'), (2, 'org', 'two', 'org/two')");
   const point = (revision, committedAt, lines, groups = [[[0], lines]]) => ({ revision, committedAt, totalLines: lines, coauthoredLines: 0, groups });

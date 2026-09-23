@@ -118,7 +118,7 @@ CREATE TABLE IF NOT EXISTS github_account_observations (
 CREATE TABLE IF NOT EXISTS github_users (
   github_id TEXT PRIMARY KEY,
   login TEXT NOT NULL,
-  source TEXT NOT NULL,              -- commit | lookup
+  source TEXT NOT NULL,              -- commit | lookup | import
   checked_at TEXT
 );
 CREATE TABLE IF NOT EXISTS github_user_logins (

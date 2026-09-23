@@ -1,4 +1,4 @@
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef } from "react";
 import { keepPreviousData, useQueries, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { useApp } from "../lib/state/app";
 import { PageShell } from "../components/PageShell";
@@ -6,7 +6,7 @@ import { LineOwnershipCharts, OwnershipHistoryChart } from "../components/LineOw
 import { UserFilter } from "../components/UserFilter";
 import { RepoFilter } from "../components/RepoFilter";
 import { Button, Callout, Card, CardHeader, DataTable, EmptyState, Spinner, StatTile, full } from "../components/ui";
-import { aggregateOwnership, contributorsFromOwnership, downloadOwnership, ownershipIdentity, type GroupBy, type OwnershipReport } from "../lib/lineOwnership";
+import { aggregateOwnership, contributorsFromOwnership, downloadOwnership, ownershipIdentity, type OwnershipReport } from "../lib/lineOwnership";
 import { NO_CONTRIBUTORS } from "../lib/contributorSelection";
 import { ownershipAccountIndex, ownershipAccountRevision, ownershipDays, ownershipReport, ownershipRevisions, type OwnershipRevision } from "../lib/db/lineOwnership";
 import { normalizeRepoHistory, type NormalizedRepoHistory, type RepoHistoryData } from "../lib/ownershipHistory";
@@ -43,7 +43,6 @@ export function LineOwnership() {
   const selectedRepoIds = useApp((s) => s.selectedRepoIds);
   const syncing = useApp((s) => s.syncing);
   const botPatterns = useApp((s) => s.botPatterns);
-  const [groupBy, setGroupBy] = useState<GroupBy>("person");
   const selectedLogins = useApp((s) => s.selectedLogins);
   const queryClient = useQueryClient();
   const repoIds = useMemo(() => [...selectedRepoIds].sort((a, b) => a - b), [selectedRepoIds]);
@@ -139,7 +138,6 @@ export function LineOwnership() {
   // and keep the previous figures until that walk finishes.
   const deferredReports = useDeferredValue(withReports);
   const deferredHistories = useDeferredValue(histories);
-  const deferredGroupBy = useDeferredValue(groupBy);
   const deferredLogins = useDeferredValue(selectedLogins);
   const reports = deferredReports.reports;
   const reportRepoIds = deferredReports.repoIds;
@@ -148,11 +146,11 @@ export function LineOwnership() {
   const identity = useMemo(() => measure("ownership:snapshot-identity", () => ownershipIdentity(reports, accountIndex, reportRepoIds)), [reports, accountIndex, reportRepoIds]);
   const everyone = useMemo(() => aggregateOwnership(reports, "person", [], identity, reportRepoIds), [reports, identity, reportRepoIds]);
   const contributors = useMemo(() => contributorsFromOwnership(everyone, botPatterns), [everyone, botPatterns]);
-  const summary = useMemo(() => deferredGroupBy === "person" && deferredLogins.length === 0
+  const summary = useMemo(() => deferredLogins.length === 0
     ? everyone
-    : aggregateOwnership(reports, deferredGroupBy, deferredLogins, identity, reportRepoIds),
-  [everyone, reports, deferredGroupBy, deferredLogins, identity, reportRepoIds]);
-  const summaryStale = deferredReports !== withReports || deferredGroupBy !== groupBy || deferredLogins !== selectedLogins;
+    : aggregateOwnership(reports, "person", deferredLogins, identity, reportRepoIds),
+  [everyone, reports, deferredLogins, identity, reportRepoIds]);
+  const summaryStale = deferredReports !== withReports || deferredLogins !== selectedLogins;
   const historyStale = deferredHistories !== histories || deferredLogins !== selectedLogins;
   const filteredLinesByRepo = useMemo(() => new Map(chartRepositories.map((r, i) => [r.id, summary.byRepository[i]?.totalLines ?? 0])), [chartRepositories, summary]);
   const missing = rows.filter((r) => !r.hasReport).length;
@@ -162,7 +160,7 @@ export function LineOwnership() {
   const loadingReports = revisions.isLoading || reportQueries.loading;
   const exportReport = {
     authors: summary.authors.map(({ key: _key, ...author }) => author), totalLines: summary.totalLines,
-    creditedLines: summary.creditedLines, coauthoredLines: summary.coauthoredLines, groupBy: deferredGroupBy,
+    creditedLines: summary.creditedLines, coauthoredLines: summary.coauthoredLines, groupBy: "person",
     selectedContributors: deferredLogins.length ? deferredLogins.filter((login) => login !== NO_CONTRIBUTORS) : null,
     identityRules: { accountRevision: accountIndex.revision },
     repositories: rows.map((r) => ({
@@ -176,11 +174,6 @@ export function LineOwnership() {
       filterContent={<div className="flex flex-wrap items-center gap-3 border-b border-hairline bg-plane px-5 py-2.5">
         <RepoFilter />
         <UserFilter support="full" snapshot={{ contributors, isLoading: loadingReports }} />
-        <label className="flex items-center gap-2 text-[12px] text-ink-secondary">Group by
-          <select className="rounded-md border border-hairline bg-surface px-2 py-1 text-ink" value={groupBy} onChange={(e) => setGroupBy(e.target.value as GroupBy)}>
-            <option value="person">Person</option><option value="email">Email</option><option value="name">Name</option>
-          </select>
-        </label>
         {reports.length > 0 && <><Button onClick={() => downloadOwnership(exportReport, "csv")}>Export CSV</Button><Button onClick={() => downloadOwnership(exportReport, "json")}>Export JSON</Button></>}
         <span className="ml-auto text-[11px] text-ink-muted">Latest synced default branches</span>
       </div>}>
@@ -201,7 +194,7 @@ export function LineOwnership() {
       {reports.length > 0 && <>
         <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
           <StatTile label="Surviving lines" value={full(summary.totalLines)} hint="Unique lines in the synced code" />
-          <StatTile label="People" value={full(summary.authors.length)} hint={deferredGroupBy === "person" ? `${full(unmatchedPeople)} unmatched Git identities` : `Grouped by ${deferredGroupBy}`} />
+          <StatTile label="People" value={full(summary.authors.length)} hint={`${full(unmatchedPeople)} unmatched Git identities`} />
           <StatTile label="Co-authored lines" value={full(summary.coauthoredLines)} hint={`${full(summary.creditedLines)} person-line credits`} />
           <StatTile label="Repositories" value={`${full(reports.length)} / ${full(repoIds.length)}`} hint="With a saved ownership snapshot" />
         </div>
@@ -210,7 +203,7 @@ export function LineOwnership() {
           : <OwnershipHistoryChart histories={deferredHistories} selectedLogins={deferredLogins} accounts={accountIndex}
             loading={historyQueries.loading || historyStale} repositories={historyRepositories} />}
         <LineOwnershipCharts summary={summary} repositories={chartRepositories} loading={reportQueries.fetching.some(Boolean) || summaryStale} />
-        <p className="text-[12px] text-ink-muted">Person grouping is by GitHub account: every email GitHub or a manual mapping links to an account counts as that login, the same login the Contributors page shows. Authors without a match are listed as unmatched Git identities and are never joined by name; map them in Settings → Contributor mappings. Use Email or Name grouping to inspect raw identities.</p>
+        <p className="text-[12px] text-ink-muted">Person grouping is by GitHub account: every email GitHub or a manual mapping links to an account counts as that login, the same login the Contributors page shows. Authors marked * have no GitHub match: they are unmatched Git identities and are never joined by name; map them in Settings → Contributor mappings. The Top owners table lists each person's Git names and emails.</p>
       </>}
       {rows.length > 0 && <Card>
         <CardHeader title="Repository snapshots" subtitle="Saved commit and last successful calculation for each repository. Sync changes updates touched files; Full re-sync rebuilds all ownership." />

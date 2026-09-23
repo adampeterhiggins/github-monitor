@@ -116,3 +116,120 @@ export function statusLabel(row: Pick<InventoryRow, "status" | "conflictIds">): 
     case "unmatched": return "Unmatched";
   }
 }
+
+/* ── Export and import ─────────────────────────────────────────────────── */
+
+export const MAPPING_FILE_FORMAT = "github-monitor.contributor-mappings";
+export const MAPPING_FILE_VERSION = 1;
+
+export interface ExportedMapping {
+  matchKind: "email" | "repo_name";
+  /** Normalized email, or normalized Git name. */
+  matchValue: string;
+  /** Name mappings only: the repository, by GitHub ID and by name. */
+  repoId?: number;
+  repository?: string;
+  githubId: string;
+  login: string;
+  reviewedAutoConflict: boolean;
+}
+
+export interface MappingFile {
+  format: typeof MAPPING_FILE_FORMAT;
+  version: number;
+  exportedAt: string;
+  mappings: ExportedMapping[];
+}
+
+/** A file another install can import. Logins are the current ones when known. */
+export function exportMappings(
+  mappings: readonly ManualMapping[],
+  repoName: ReadonlyMap<number, string>,
+  index?: OwnershipAccountIndex,
+): MappingFile {
+  return {
+    format: MAPPING_FILE_FORMAT,
+    version: MAPPING_FILE_VERSION,
+    exportedAt: new Date().toISOString(),
+    mappings: mappings.map((m) => ({
+      matchKind: m.matchKind,
+      matchValue: m.matchValue,
+      ...(m.matchKind === "repo_name" && m.repoId != null ? { repoId: m.repoId, repository: repoName.get(m.repoId) } : {}),
+      githubId: m.githubId,
+      login: index?.users.get(m.githubId)?.login ?? m.loginAtSave,
+      reviewedAutoConflict: m.reviewedAutoConflict,
+    })),
+  };
+}
+
+export type ImportStatus = "new" | "change" | "same" | "invalid";
+
+export interface ImportRow {
+  status: ImportStatus;
+  /** Why an invalid row cannot be imported. */
+  reason?: string;
+  /** Ready to save, for valid rows. */
+  input?: { matchKind: "email" | "repo_name"; matchValue: string; repoId: number | null; githubId: string; loginAtSave: string; reviewedAutoConflict: boolean };
+  /** What the row maps, for the preview. */
+  label: string;
+  /** The account it maps to now, for a change. */
+  previous?: string;
+}
+
+/**
+ * Check an import against the mappings already saved and the repositories this
+ * install knows. Nothing is written; the caller saves the rows it accepts.
+ */
+export function planMappingImport(
+  text: string,
+  existing: readonly ManualMapping[],
+  repos: ReadonlyArray<{ id: number; fullName: string }>,
+): { rows: ImportRow[]; error: string | null } {
+  let file: unknown;
+  try {
+    file = JSON.parse(text);
+  } catch {
+    return { rows: [], error: "This file is not JSON." };
+  }
+  const f = file as Partial<MappingFile>;
+  if (f?.format !== MAPPING_FILE_FORMAT || !Array.isArray(f.mappings)) {
+    return { rows: [], error: "This is not a contributor mappings file exported from GitHub Monitor." };
+  }
+  if (typeof f.version !== "number" || f.version > MAPPING_FILE_VERSION) {
+    return { rows: [], error: "This file was exported by a newer version of GitHub Monitor." };
+  }
+  const byId = new Map(repos.map((r) => [r.id, r]));
+  const byName = new Map(repos.map((r) => [r.fullName.toLowerCase(), r]));
+  const current = new Map(existing.map((m) => [m.matchKind === "email" ? `email:${m.matchValue}` : `name:${m.repoId}:${m.matchValue}`, m]));
+  const seen = new Set<string>();
+  const rows = f.mappings.map((raw): ImportRow => {
+    const m = (raw ?? {}) as Partial<ExportedMapping>;
+    const githubId = typeof m.githubId === "string" || typeof m.githubId === "number" ? String(m.githubId) : "";
+    const login = typeof m.login === "string" ? m.login.trim() : "";
+    const bad = (reason: string, label = String(m.matchValue ?? "unknown")): ImportRow => ({ status: "invalid", reason, label });
+    if (m.matchKind !== "email" && m.matchKind !== "repo_name") return bad("Unknown kind of mapping");
+    if (typeof m.matchValue !== "string") return bad("No email or name");
+    const value = m.matchKind === "email" ? normalizeEmail(m.matchValue) : normalizeName(m.matchValue);
+    if (!value) return bad("No email or name");
+    if (!/^\d+$/.test(githubId)) return bad("No verified GitHub account ID", value);
+    if (!login) return bad("No GitHub login", value);
+    let repoId: number | null = null;
+    let label = value;
+    if (m.matchKind === "repo_name") {
+      const repo = (m.repoId != null ? byId.get(Number(m.repoId)) : undefined)
+        ?? (typeof m.repository === "string" ? byName.get(m.repository.toLowerCase()) : undefined);
+      if (!repo) return bad(`Repository ${m.repository ?? m.repoId ?? "(none)"} is not in this organisation`, value);
+      repoId = repo.id;
+      label = `${value} · only in ${repo.fullName}`;
+    }
+    const key = m.matchKind === "email" ? `email:${value}` : `name:${repoId}:${value}`;
+    if (seen.has(key)) return bad("Listed twice in this file", label);
+    seen.add(key);
+    const input = { matchKind: m.matchKind, matchValue: value, repoId, githubId, loginAtSave: login, reviewedAutoConflict: m.reviewedAutoConflict === true };
+    const saved = current.get(key);
+    if (!saved) return { status: "new", input, label };
+    if (saved.githubId === githubId && saved.reviewedAutoConflict === input.reviewedAutoConflict) return { status: "same", input, label };
+    return { status: "change", input, label, previous: `@${saved.loginAtSave} (ID ${saved.githubId})` };
+  });
+  return { rows, error: null };
+}

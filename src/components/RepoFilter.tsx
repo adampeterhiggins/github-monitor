@@ -25,7 +25,9 @@ const SORT_KEY = "github-monitor.repoSort";
 const HIDE_KEY = "github-monitor.repoHideInactive";
 
 export function RepoFilter() {
-  const repos = useApp((s) => s.repos);
+  const allRepos = useApp((s) => s.repos);
+  const excludeForks = useApp((s) => s.excludeForks);
+  const repos = useMemo(() => (excludeForks ? allRepos.filter((r) => !r.fork) : allRepos), [allRepos, excludeForks]);
   const selected = useApp((s) => s.selectedRepoIds);
   const setSelectedRepos = useApp((s) => s.setSelectedRepos);
   const { myCommits, login } = useRepoSelectionData();
@@ -325,6 +327,11 @@ function RepoLabel({ repo }: { repo: RepoRow }) {
       {repo.archived ? (
         <span className="shrink-0 rounded border border-hairline-strong px-1 text-[9px] uppercase text-ink-muted">
           archived
+        </span>
+      ) : null}
+      {repo.fork ? (
+        <span className="shrink-0 rounded border border-hairline-strong px-1 text-[9px] uppercase text-ink-muted">
+          fork
         </span>
       ) : null}
       {repo.private ? (

@@ -38,7 +38,7 @@ export interface ContributorOption {
   repos: number;
   /** Other selection values that mean this contributor, e.g. a former login. */
   aliases?: string[];
-  /** Shown instead of the login, e.g. "Unmatched: Alice". */
+  /** Shown instead of the login, e.g. "Alice*" for an unmatched Git identity. */
   label?: string;
   /** Searchable but not selectable: names and emails. */
   searchText?: string[];

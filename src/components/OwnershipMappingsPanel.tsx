@@ -1,12 +1,15 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useApp } from "../lib/state/app";
 import {
   allOwnershipReports, deleteManualMapping, listManualMappings, ownershipAccountIndex, ownershipAccountRevision,
-  saveManualMapping, writeGithubUserLookup,
+  saveManualMapping, writeGithubUserHints, writeGithubUserLookup,
 } from "../lib/db/lineOwnership";
 import { GitHubClient } from "../lib/github/client";
-import { mappingInventory, mappingPreview, sourceKey, statusLabel, type InventoryRow, type MappingSource } from "../lib/ownershipMappings";
+import {
+  exportMappings, mappingInventory, mappingPreview, planMappingImport, sourceKey, statusLabel,
+  type ImportRow, type InventoryRow, type MappingSource,
+} from "../lib/ownershipMappings";
 import { resolveIdentity, type ManualMapping, type OwnershipAccountIndex } from "../lib/ownershipIdentity";
 import { ownershipEngine, publishOwnership, setOwnershipEngine, type OwnershipEngine } from "../lib/ownershipEvents";
 import { Button, Callout, Card, CardHeader, Checkbox, DataTable, Segmented, Spinner, full } from "./ui";
@@ -123,9 +126,16 @@ export function OwnershipMappingsPanel() {
           await changed();
         }} />}
       <SavedMappings mappings={manual.data ?? []} index={accounts.data} repoName={repoName}
+        repos={repos.map((r) => ({ id: r.id, fullName: r.full_name }))}
         onRemove={async (mapping) => {
           if (!db) return;
           await deleteManualMapping(db, mapping.mappingId);
+          await changed();
+        }}
+        onImport={async (rows) => {
+          if (!db) return;
+          await writeGithubUserHints(db, rows.map((r) => ({ id: r.githubId, login: r.loginAtSave })));
+          for (const row of rows) await saveManualMapping(db, row);
           await changed();
         }} />
       <HistoryEngineCard />
@@ -206,16 +216,89 @@ function MappingEditor({ row, inventory, index, token, repoName, onCancel, onSav
   );
 }
 
-function SavedMappings({ mappings, index, repoName, onRemove }: {
+type ImportInput = NonNullable<ImportRow["input"]>;
+
+function download(name: string, body: string) {
+  const url = URL.createObjectURL(new Blob([body], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function SavedMappings({ mappings, index, repoName, repos, onRemove, onImport }: {
   mappings: readonly ManualMapping[];
   index: OwnershipAccountIndex | undefined;
   repoName: ReadonlyMap<number, string>;
+  repos: ReadonlyArray<{ id: number; fullName: string }>;
   onRemove: (mapping: ManualMapping) => Promise<void>;
+  onImport: (rows: ImportInput[]) => Promise<void>;
 }) {
   const [confirm, setConfirm] = useState<number | null>(null);
+  const [plan, setPlan] = useState<{ name: string; rows: ImportRow[] } | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [imported, setImported] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
+  const count = (status: ImportRow["status"]) => plan?.rows.filter((r) => r.status === status).length ?? 0;
+  const apply = async (statuses: ReadonlyArray<ImportRow["status"]>) => {
+    if (!plan) return;
+    const rows = plan.rows.filter((r) => statuses.includes(r.status) && r.input).map((r) => r.input!);
+    setImporting(true);
+    setImportError(null);
+    try {
+      await onImport(rows);
+      setImported(`Imported ${full(rows.length)} ${rows.length === 1 ? "mapping" : "mappings"} from ${plan.name}.`);
+      setPlan(null);
+    } catch (e) {
+      setImportError((e as Error).message);
+    } finally {
+      setImporting(false);
+    }
+  };
   return (
     <Card>
       <CardHeader title="Saved mappings" subtitle="Removing one returns its lines to an unmatched Git identity. Kept when the analytics cache is cleared." />
+      <div className="mb-3 flex flex-wrap items-center gap-2 text-[12px]">
+        <Button disabled={mappings.length === 0} title="Save every mapping to a file another install can import"
+          onClick={() => download(`contributor-mappings-${new Date().toISOString().slice(0, 10)}.json`,
+            JSON.stringify(exportMappings(mappings, repoName, index), null, 2) + "\n")}>
+          Export…
+        </Button>
+        <Button onClick={() => { setImported(null); setImportError(null); fileInput.current?.click(); }}>Import…</Button>
+        <input ref={fileInput} type="file" accept="application/json,.json" className="hidden" onChange={async (e) => {
+          const file = e.target.files?.[0];
+          e.target.value = "";
+          if (!file) return;
+          const result = planMappingImport(await file.text(), mappings, repos);
+          if (result.error) {
+            setPlan(null);
+            setImportError(result.error);
+          } else setPlan({ name: file.name, rows: result.rows });
+        }} />
+        {imported && <span className="text-ink-secondary">{imported}</span>}
+      </div>
+      {importError && <Callout tone="critical">{importError}</Callout>}
+      {plan && <div className="mb-4 flex flex-col gap-2 rounded-md border border-hairline p-3 text-[12px]">
+        <p><strong>{plan.name}</strong>: {full(count("new"))} new, {full(count("change"))} {count("change") === 1 ? "changes" : "change"} an existing mapping, {full(count("same"))} already saved, {full(count("invalid"))} cannot be imported.</p>
+        <p className="text-ink-secondary">Imported logins are only a label until GitHub confirms them: each mapping keeps the account ID from the file. Automatic GitHub matches still take precedence, as for mappings made here.</p>
+        <DataTable rows={plan.rows.filter((r) => r.status !== "same")} rowKey={(r) => `${r.status}:${r.label}:${r.reason ?? ""}`} maxHeight={260}
+          empty="Every mapping in this file is already saved." columns={[
+            { key: "author", header: "Git author", render: (r) => <span className="whitespace-normal">{r.label}</span> },
+            { key: "account", header: "Account", render: (r) => r.input ? `@${r.input.loginAtSave} · ID ${r.input.githubId}` : "—" },
+            { key: "status", header: "", render: (r) => r.status === "new" ? "New" : r.status === "change" ? `Replaces ${r.previous}` : <span className="text-ink-muted">{r.reason}</span> },
+          ]} />
+        <div className="flex flex-wrap gap-2">
+          <Button disabled={importing || count("new") + count("change") === 0} onClick={() => apply(["new", "change"])}>
+            {importing ? "Importing…" : `Import ${full(count("new") + count("change"))}`}
+          </Button>
+          {count("change") > 0 && <Button variant="ghost" disabled={importing || count("new") === 0} onClick={() => apply(["new"])}>Only new ({full(count("new"))})</Button>}
+          <Button variant="ghost" disabled={importing} onClick={() => setPlan(null)}>Cancel</Button>
+        </div>
+      </div>}
       <DataTable rows={[...mappings]} rowKey={(m) => m.mappingId} empty="No manual mappings yet." columns={[
         { key: "source", header: "Git author", render: (m) => m.matchKind === "email" ? `${m.matchValue} · all repositories` : `${m.matchValue} · no email, only in ${repoName.get(m.repoId ?? -1) ?? `repository ${m.repoId}`}` },
         { key: "account", header: "Account", render: (m) => {

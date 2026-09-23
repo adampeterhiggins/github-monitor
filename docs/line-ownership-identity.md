@@ -18,7 +18,7 @@ normalized email (or by name within one repository when there is no email).
 | Selecting a bare Git name (`Alice`) selected everyone with that name | Only logins and unmatched-identity tokens select; a name selects nobody |
 | An email with no match was merged into a namesake's account | It stays unmatched until GitHub matches it or it is mapped in Settings |
 | Co-authors who were one person could count twice across aliases | One credit per resolved person per line |
-| Unmatched people showed as their Git name | They show as `Unmatched: <name>`; the selector token is `unmatched-email:<email>` |
+| Unmatched people showed as their Git name | They show as `<name>*`; the selector token is `unmatched-email:<email>` |
 
 An ID-less `login@users.noreply.github.com` joins the account whose numeric
 noreply address or registry entry names that login, and is otherwise provisional.

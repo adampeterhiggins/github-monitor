@@ -385,7 +385,7 @@ export class OwnershipIdentityIndex {
         key: resolution.key,
         githubId: id,
         login,
-        label: matched && login ? login : `Unmatched: ${displayName}`,
+        label: matched && login ? login : `${displayName}*`,
         matched: matched && login != null,
         sources: [...b.sources].sort(),
         conflict: b.conflict,

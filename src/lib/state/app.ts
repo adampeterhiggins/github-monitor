@@ -54,6 +54,8 @@ interface AppState {
   metric: ContributionMetric;
   /** User-added patterns for logins to treat as bots, on top of the built-ins. */
   botPatterns: string[];
+  /** Forks are hidden from repository lists and never enter the selection. */
+  excludeForks: boolean;
 
   theme: ThemeMode;
   /** Named palette. `default` is this app's built-in light/dark tokens. */
@@ -78,6 +80,8 @@ interface AppState {
   setPeriod: (period: PeriodId, custom?: { from: number; to: number }) => void;
   setMetric: (metric: ContributionMetric) => void;
   setBotPatterns: (patterns: string[]) => void;
+  /** Resolves to the number of selected forks it removed. */
+  setExcludeForks: (exclude: boolean) => Promise<number>;
   setTheme: (theme: ThemeMode) => void;
   setThemeId: (themeId: string) => void;
   setSync: (progress: SyncProgress | null) => void;
@@ -90,6 +94,22 @@ const THEME_ID_KEY = "github-monitor.theme-id";
 const PERIOD_KEY = "github-monitor.period";
 const CUSTOM_RANGE_KEY = "github-monitor.customRange";
 const LOGINS_KEY = "github-monitor.logins";
+const EXCLUDE_FORKS_KEY = "github-monitor.excludeForks";
+
+function readStoredExcludeForks(): boolean {
+  try {
+    return localStorage.getItem(EXCLUDE_FORKS_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+/** Drop forks from a selection when forks are excluded. */
+function withoutForks(ids: number[], repos: RepoRow[], exclude: boolean): number[] {
+  if (!exclude) return ids;
+  const forks = new Set(repos.filter((r) => r.fork).map((r) => r.id));
+  return ids.filter((id) => !forks.has(id));
+}
 
 /**
  * The last custom range, kept so a reload does not silently fall back to a
@@ -188,6 +208,7 @@ export const useApp = create<AppState>((set, get) => ({
   customTo: readStoredCustomRange()?.to ?? null,
   metric: "commits",
   botPatterns: readBotPatterns(),
+  excludeForks: readStoredExcludeForks(),
 
   theme: readStoredTheme(),
   themeId: readStoredThemeId(),
@@ -234,12 +255,13 @@ export const useApp = create<AppState>((set, get) => ({
     const repos = await listRepos(db, org);
     set({
       repos,
-      selectedRepoIds: repos.filter((r) => r.included === 1).map((r) => r.id),
+      selectedRepoIds: withoutForks(repos.filter((r) => r.included === 1).map((r) => r.id), repos, get().excludeForks),
     });
   },
 
-  setSelectedRepos: async (ids) => {
-    const { db, repos } = get();
+  setSelectedRepos: async (requested) => {
+    const { db, repos, excludeForks } = get();
+    const ids = withoutForks(requested, repos, excludeForks);
     set({ selectedRepoIds: ids });
     if (!db) return;
     const wanted = new Set(ids);
@@ -253,6 +275,19 @@ export const useApp = create<AppState>((set, get) => ({
     const current = get().selectedRepoIds;
     const next = current.includes(id) ? current.filter((x) => x !== id) : [...current, id];
     await get().setSelectedRepos(next);
+  },
+
+  setExcludeForks: async (exclude) => {
+    try {
+      localStorage.setItem(EXCLUDE_FORKS_KEY, String(exclude));
+    } catch {
+      // Blocked storage: the choice lasts for this session.
+    }
+    set({ excludeForks: exclude });
+    const before = get().selectedRepoIds;
+    if (!exclude) return 0;
+    await get().setSelectedRepos(before);
+    return before.length - get().selectedRepoIds.length;
   },
 
   selectAllRepos: async (filter) => {

@@ -27,7 +27,12 @@ const repoCount = (n: number) => `${full(n)} ${n === 1 ? "repository" : "reposit
  * changes while reading a page. Both write to the same persisted selection.
  */
 export function RepoSelectionPanel() {
-  const repos = useApp((s) => s.repos);
+  const allRepos = useApp((s) => s.repos);
+  const excludeForks = useApp((s) => s.excludeForks);
+  const setExcludeForks = useApp((s) => s.setExcludeForks);
+  // Excluded forks are not offered anywhere here, so no bulk action can select one.
+  const repos = useMemo(() => (excludeForks ? allRepos.filter((r) => !r.fork) : allRepos), [allRepos, excludeForks]);
+  const forkCount = useMemo(() => allRepos.filter((r) => r.fork).length, [allRepos]);
   const selected = useApp((s) => s.selectedRepoIds);
   const setSelectedRepos = useApp((s) => s.setSelectedRepos);
   const token = useApp((s) => s.token);
@@ -329,6 +334,16 @@ export function RepoSelectionPanel() {
           label={<span className="text-ink-secondary">Include archived</span>}
         />
         <Checkbox
+          checked={excludeForks}
+          onChange={async (exclude) => {
+            const removed = await setExcludeForks(exclude);
+            setNotice(exclude
+              ? `Forks are excluded${forkCount ? ` (${full(forkCount)} in this organisation)` : ""}${removed ? `; removed ${full(removed)} from the selection` : ""}. They are hidden from repository lists and not synced.`
+              : "Forks are shown again. Select any you want to include.");
+          }}
+          label={<span className="text-ink-secondary" title="Hide forked repositories everywhere and keep them out of the selection and sync">Exclude forks</span>}
+        />
+        <Checkbox
           checked={allVisibleSelected}
           onChange={toggleVisible}
           label={<span className="text-ink-secondary">Select these {visible.length}</span>}
@@ -372,6 +387,11 @@ export function RepoSelectionPanel() {
                 {r.archived ? (
                   <span className="shrink-0 rounded border border-hairline-strong px-1 text-[9px] uppercase text-ink-muted">
                     archived
+                  </span>
+                ) : null}
+                {r.fork ? (
+                  <span className="shrink-0 rounded border border-hairline-strong px-1 text-[9px] uppercase text-ink-muted">
+                    fork
                   </span>
                 ) : null}
                 {r.private ? (

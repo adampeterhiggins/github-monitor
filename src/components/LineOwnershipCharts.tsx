@@ -51,6 +51,10 @@ const HISTORY_PERIODS: Array<{ value: OwnershipPeriod; label: string }> = [
   { value: "quarter", label: "Quarter" },
 ];
 const PERIOD_SPAN = { day: "day", week: "week", month: "month", quarter: "quarter" } as const;
+const REPO_LABELS = [
+  { value: "full" as const, label: "owner/name" },
+  { value: "name" as const, label: "Name only" },
+];
 
 function historyCaption(reading: OwnershipReading, period: OwnershipPeriod): string {
   const span = PERIOD_SPAN[period];
@@ -147,6 +151,7 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
   const [seriesLimit, setSeriesLimit] = useState(() => storedChoice("github-monitor.ownership.seriesLimit", ["4", "6", "8", "all"], "8"));
   const [stackMode, setStackMode] = useState<"stacked" | "overlaid">(() => storedChoice("github-monitor.ownership.stackMode", ["stacked", "overlaid"], "stacked"));
   const [values, setValues] = useState<"total" | "share">(() => storedChoice("github-monitor.ownership.valueMode", ["total", "share"], "total"));
+  const [repoLabel, setRepoLabel] = useState<"full" | "name">(() => storedChoice("github-monitor.ownership.repoLabel", ["full", "name"], "full"));
   const [reading, setReading] = useState<OwnershipReading>(() => storedTimeline().reading);
   const [period, setPeriod] = useState<OwnershipPeriod>(() => storedTimeline().period);
   const [activeKeys, setActiveKeys] = useState<Set<string>>(() => new Set());
@@ -168,7 +173,10 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
   const deferredShape = useDeferredValue(shape);
   const deferredStack = useDeferredValue(stackMode);
   const deferredValues = useDeferredValue(values);
-  const repoNames = useMemo(() => new Map(repositories.map((repo) => [repo.id, repo.name])), [repositories]);
+  const repoNames = useMemo(
+    () => new Map(repositories.map((repo) => [repo.id, repoLabel === "name" ? shortRepo(repo.name) : repo.name])),
+    [repositories, repoLabel],
+  );
   // Rebuilt only when the repositories or account mappings change.
   const identity = useMemo(() => measure("ownership:identity", () => resolveOwnershipPeople(histories, accounts)), [histories, accounts]);
   const selection = useMemo(() => measure("ownership:selection", () => selectOwnershipPeople(identity.index, selectedLogins)), [identity, selectedLogins]);
@@ -199,7 +207,7 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
     || deferredPeriod !== period || deferredShape !== shape || deferredStack !== stackMode || deferredValues !== values;
   const singleSeries = split === "total";
   const waiting = histories.every((h) => h.days.length === 0);
-  const changed = shape !== "area" || split !== "people" || seriesLimit !== "8" || stackMode !== "stacked" || values !== "total" || reading !== "cumulative" || period !== "day";
+  const changed = repoLabel !== "full" || shape !== "area" || split !== "people" || seriesLimit !== "8" || stackMode !== "stacked" || values !== "total" || reading !== "cumulative" || period !== "day";
   const periodLabel = useCallback((week: number) => deferredPeriod === "day" ? formatDate(week * 1000) : bucketLabel(week, deferredPeriod), [deferredPeriod]);
   const plotLabel = useCallback((week: number) => {
     const end = plot.ends.get(week);
@@ -248,6 +256,9 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
         <Segmented ariaLabel="Chart shape" stretch value={shape} options={HISTORY_SHAPES} onChange={(value) => remember("github-monitor.ownership.shape", value, setShape)} />
         <LabeledControl label="Split by">
           <Segmented ariaLabel="Split ownership" variant="bare" stretch value={split} options={HISTORY_SPLITS} onChange={(value) => remember("github-monitor.ownership.split", value, setSplit)} />
+        </LabeledControl>
+        <LabeledControl label="Repository names">
+          <Segmented ariaLabel="Repository names" variant="bare" stretch value={repoLabel} options={REPO_LABELS} disabled={split !== "repository"} onChange={(value) => remember("github-monitor.ownership.repoLabel", value, setRepoLabel)} />
         </LabeledControl>
         <LabeledControl label="Show">
           <Segmented ariaLabel="Series before Other" variant="bare" stretch value={seriesLimit} options={HISTORY_LIMITS} disabled={singleSeries} onChange={(value) => remember("github-monitor.ownership.seriesLimit", value, setSeriesLimit)} />
