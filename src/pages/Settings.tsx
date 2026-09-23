@@ -11,6 +11,7 @@ import { SyncPanel } from "../components/SyncPanel";
 import { RepoSelectionPanel } from "../components/RepoSelectionPanel";
 import { SavedSelectionsPanel } from "../components/SavedSelectionsPanel";
 import { BotPatternsPanel } from "../components/BotPatternsPanel";
+import { OwnershipMappingsPanel } from "../components/OwnershipMappingsPanel";
 import { UpdatePanel } from "../components/UpdatePanel";
 import { ThemeSettings } from "../components/ThemeSettings";
 import { PageShell } from "../components/PageShell";
@@ -26,6 +27,7 @@ export type SettingsSubId =
   | "sync-problems"
   | "saved-selections"
   | "bots"
+  | "contributor-mappings"
   | "organisation"
   | "cache"
   | "appearance"
@@ -49,6 +51,7 @@ export const SETTINGS_GROUPS: ReadonlyArray<{
     items: [
       { id: "saved-selections", label: "Saved selections" },
       { id: "bots", label: "Bots & agents" },
+      { id: "contributor-mappings", label: "Contributor mappings" },
     ],
   },
   {
@@ -107,6 +110,15 @@ export function Settings({ sub }: { sub: SettingsSubId }) {
           subtitle="Login patterns the contributor filter can deselect in one go"
         >
           <BotPatternsPanel />
+        </SubPage>
+      );
+    case "contributor-mappings":
+      return (
+        <SubPage
+          title="Contributor mappings"
+          subtitle="Match Git authors to GitHub accounts for line ownership"
+        >
+          <OwnershipMappingsPanel />
         </SubPage>
       );
     case "organisation":

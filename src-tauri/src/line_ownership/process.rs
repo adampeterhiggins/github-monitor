@@ -1,8 +1,38 @@
 //! Pipe-safe Git execution with cancellation, including streaming batch output.
 use std::io::{BufReader, Read, Write};
 use std::process::{Command, Stdio};
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
+
+static SPAWNED: Mutex<BTreeMap<String, u64>> = Mutex::new(BTreeMap::new());
+
+/// The Git subcommand a command runs, skipping `-C path` and `-c key=value`.
+fn subcommand(command: &Command) -> String {
+    let mut args = command.get_args().map(|a| a.to_string_lossy().into_owned());
+    while let Some(arg) = args.next() {
+        if arg == "-C" || arg == "-c" {
+            args.next();
+            continue;
+        }
+        return arg;
+    }
+    String::new()
+}
+
+/// Processes started per Git subcommand since the last reset, for benchmarks.
+#[allow(dead_code)]
+pub(super) fn spawned() -> BTreeMap<String, u64> {
+    SPAWNED.lock().map(|m| m.clone()).unwrap_or_default()
+}
+
+#[allow(dead_code)]
+pub(super) fn reset_spawned() {
+    if let Ok(mut m) = SPAWNED.lock() {
+        m.clear();
+    }
+}
 
 pub(super) fn stream<T>(
     mut command: Command,
@@ -11,6 +41,9 @@ pub(super) fn stream<T>(
     read: impl FnOnce(&mut BufReader<std::process::ChildStdout>) -> Result<T, String>,
 ) -> Result<T, String> {
     super::check_cancel(cancelled)?;
+    if let Ok(mut counts) = SPAWNED.lock() {
+        *counts.entry(subcommand(&command)).or_default() += 1;
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

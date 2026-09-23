@@ -1,5 +1,5 @@
 import Database from "@tauri-apps/plugin-sql";
-import { SCHEMA_SQL, SCHEMA_VERSION } from "./schema";
+import { REVISION_KEYS, SCHEMA_SQL, SCHEMA_VERSION, TRIGGER_SQL } from "./schema";
 
 let dbPromise: Promise<Database> | null = null;
 
@@ -17,18 +17,76 @@ export async function getDb(): Promise<Database> {
       // enforcement for correctness.
       await db.execute("PRAGMA busy_timeout = 5000");
       await db.execute("PRAGMA foreign_keys = ON");
-      for (const stmt of splitStatements(SCHEMA_SQL)) {
-        await db.execute(stmt);
-      }
-      await db.execute(
-        "INSERT INTO meta (key, value) VALUES ('schema_version', $1) " +
-          "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
-        [String(SCHEMA_VERSION)],
-      );
+      await migrate(db);
       return db;
     })();
   }
   return dbPromise;
+}
+
+type Executor = Pick<Database, "execute" | "select">;
+
+async function hasColumn(db: Executor, table: string, column: string): Promise<boolean> {
+  const rows = await db.select<Array<{ name: string }>>(`PRAGMA table_info(${table})`);
+  return rows.some((row) => row.name === column);
+}
+
+async function addColumn(db: Executor, table: string, column: string, type: string): Promise<void> {
+  if (!(await hasColumn(db, table, column))) await db.execute(`ALTER TABLE ${table} ADD COLUMN ${column} ${type}`);
+}
+
+/**
+ * Ordered upgrades from the version already recorded. Each step is idempotent, so
+ * a crash between a step and the version write simply repeats the step. Tables
+ * are created by SCHEMA_SQL; steps only change what CREATE IF NOT EXISTS cannot.
+ */
+const MIGRATIONS: ReadonlyArray<{ version: number; run: (db: Executor) => Promise<void> }> = [
+  {
+    // Account-aligned ownership: native HEAD cache references, account registry,
+    // retryable misses. Legacy history stays readable until a repository rebuilds.
+    version: 8,
+    run: async (db) => {
+      await addColumn(db, "line_ownership", "report", "TEXT");
+      await addColumn(db, "line_ownership", "metadata", "TEXT");
+      await addColumn(db, "line_ownership", "cache_ref", "TEXT");
+      await addColumn(db, "github_accounts", "checked_at", "TEXT");
+      const now = new Date().toISOString();
+      await db.execute(
+        `INSERT OR IGNORE INTO github_account_observations (email, github_id, login, observed_at)
+         SELECT email, github_id, login, $1 FROM github_accounts WHERE github_id IS NOT NULL`, [now]);
+      await db.execute(
+        `INSERT OR IGNORE INTO github_users (github_id, login, source, checked_at)
+         SELECT github_id, MIN(login), 'commit', NULL FROM github_accounts
+         WHERE github_id IS NOT NULL AND login IS NOT NULL GROUP BY github_id`);
+      await db.execute(
+        `INSERT OR IGNORE INTO github_user_logins (github_id, login_lower, login, seen_at)
+         SELECT github_id, LOWER(login), login, $1 FROM github_accounts
+         WHERE github_id IS NOT NULL AND login IS NOT NULL`, [now]);
+    },
+  },
+];
+
+/** Create, upgrade, and record the schema version. Reads the old version before changing anything. */
+export async function migrate(db: Executor): Promise<void> {
+  for (const stmt of splitStatements(SCHEMA_SQL)) await db.execute(stmt);
+  const rows = await db.select<Array<{ value: string }>>("SELECT value FROM meta WHERE key = 'schema_version'");
+  const previous = Number(rows[0]?.value ?? 0) || 0;
+  for (const step of MIGRATIONS) {
+    if (step.version <= previous) continue;
+    await step.run(db);
+    await db.execute(
+      "INSERT INTO meta (key, value) VALUES ('schema_version', $1) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+      [String(step.version)],
+    );
+  }
+  for (const key of REVISION_KEYS) await db.execute("INSERT OR IGNORE INTO meta (key, value) VALUES ($1, '0')", [key]);
+  for (const trigger of TRIGGER_SQL) await db.execute(trigger);
+  if (previous < SCHEMA_VERSION) {
+    await db.execute(
+      "INSERT INTO meta (key, value) VALUES ('schema_version', $1) ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+      [String(SCHEMA_VERSION)],
+    );
+  }
 }
 
 /**
@@ -299,7 +357,13 @@ export async function clearAnalytics(db: Database): Promise<void> {
     "line_ownership",
     "line_ownership_history",
     "line_ownership_history_state",
+    "line_ownership_history_gen",
+    "line_ownership_identity",
+    "line_ownership_day",
     "github_accounts",
+    "github_account_observations",
+    "github_users",
+    "github_user_logins",
     "contributor_weeks",
     "commit_activity",
     "participation",
@@ -321,4 +385,5 @@ export async function clearAnalytics(db: Database): Promise<void> {
     for (const t of tables) await db.execute(`DELETE FROM ${t}`);
   });
   // traffic_daily is deliberately preserved: it holds history GitHub has dropped.
+  // ownership_manual_account_map is user-authored, like saved selections, and is kept.
 }

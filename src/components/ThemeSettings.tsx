@@ -12,6 +12,7 @@ import { useCustomThemes } from "../lib/theme/useCustomThemes";
 import { useApp, type ThemeMode } from "../lib/state/app";
 import { ThemeImportDialog } from "./ThemeImportDialog";
 import { Button, Card, CardHeader, Segmented } from "./ui";
+import { JSON_FILE, saveTextFile } from "../lib/saveFile";
 
 function previewOf(theme: ThemeDefinition, mode: ThemeAppearance) {
   const colors = getThemeColorsForMode(theme, mode) ?? theme.colors;
@@ -46,12 +47,7 @@ function ThemeSwatch({
 }
 
 function downloadThemeFile(filename: string, contents: string): void {
-  const url = URL.createObjectURL(new Blob([contents], { type: "application/json" }));
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  void saveTextFile({ name: filename, contents, ...JSON_FILE }).catch(() => {});
 }
 
 function ThemeCard({

@@ -36,6 +36,7 @@ import {
   ChartCard,
   ChartHeight,
   Card,
+  Checkbox,
   DataTable,
   Dropdown,
   DropdownRow,
@@ -107,6 +108,11 @@ const SCALES: Array<{ value: "shared" | "own"; label: string }> = [
 const SCALES_SHORT: Array<{ value: "shared" | "own"; label: string }> = [
   { value: "shared", label: "Shared" },
   { value: "own", label: "Own" },
+];
+
+const Y_AXES: Array<{ value: "full" | "fit"; label: string }> = [
+  { value: "full", label: "Full" },
+  { value: "fit", label: "Fit to data" },
 ];
 
 const CARD_SPLITS: Array<{ value: "none" | "repository"; label: string }> = [
@@ -226,6 +232,12 @@ export function Contributors() {
       ? "cumulative"
       : (localStorage.getItem("github-monitor.granularity") as Granularity) || "week",
   );
+  /** Stretch the y axis to the data rather than starting at zero or 0–100%. */
+  const [yAxis, setYAxis] = useState<"full" | "fit">(
+    () => (localStorage.getItem("github-monitor.yAxis") === "fit" ? "fit" : "full"),
+  );
+  /** Leave the folded Other band undrawn; it still counts in every share and total. */
+  const [hideOther, setHideOther] = useState(() => localStorage.getItem("github-monitor.hideOther") === "true");
   /** Series switched off via the legend. Empty means everything is shown. */
   const [activeKeys, setActiveKeys] = useState<Set<string>>(new Set());
 
@@ -653,7 +665,7 @@ export function Contributors() {
    * Stacking is not counted on its own: it only takes effect with a breakdown,
    * which is flagged anyway.
    */
-  const viewChanged = breakdown !== "none" || shape !== "bar" || view !== "week";
+  const viewChanged = breakdown !== "none" || shape !== "bar" || view !== "week" || yAxis !== "full" || hideOther;
 
   /**
    * The controls a contributor card carries when it is opened full screen.
@@ -664,7 +676,7 @@ export function Contributors() {
    * once here and hand to every card: only the open one ever renders it.
    */
   const cardControls = (
-    <FilterPopover active={shape !== "bar" || cardSplit !== "none" || view !== "week"} width={420}>
+    <FilterPopover active={shape !== "bar" || cardSplit !== "none" || view !== "week" || yAxis !== "full" || hideOther} width={420}>
         <Segmented<TimelineView>
           ariaLabel="Timeline"
           stretch
@@ -699,6 +711,12 @@ export function Contributors() {
             options={SERIES_LIMITS}
           />
         </LabeledControl>
+        <Checkbox
+          checked={hideOther}
+          disabled={seriesLimit === "all" || cardSplit === "none"}
+          onChange={(v: boolean) => persist("github-monitor.hideOther", v, setHideOther)}
+          label={<span className="text-ink-secondary" title="Other stays in every share and total; it is only not drawn">Hide Other</span>}
+        />
         {seriesLimit === "all" ? (
           <p className="px-0.5 text-[11px] text-ink-muted">
             Past eight series the colours repeat — the legend and tooltip still name
@@ -736,6 +754,21 @@ export function Contributors() {
             options={SCALES_SHORT}
           />
         </LabeledControl>
+        <LabeledControl label="Y axis">
+          <Segmented
+            ariaLabel="Card y axis range"
+            variant="bare"
+            stretch
+            value={yAxis}
+            onChange={(v) => persist("github-monitor.yAxis", v, setYAxis)}
+            options={Y_AXES}
+          />
+        </LabeledControl>
+        {sharedScale && yAxis === "fit" ? (
+          <p className="px-0.5 text-[11px] text-ink-muted">
+            Cards on a shared scale keep one ceiling so they compare; choose Own to fit each card.
+          </p>
+        ) : null}
     </FilterPopover>
   );
 
@@ -827,6 +860,12 @@ export function Contributors() {
                     options={SERIES_LIMITS}
                   />
                 </LabeledControl>
+                <Checkbox
+                  checked={hideOther}
+                  disabled={seriesLimit === "all" || breakdown === "none"}
+                  onChange={(v: boolean) => persist("github-monitor.hideOther", v, setHideOther)}
+                  label={<span className="text-ink-secondary" title="Other stays in every share and total; it is only not drawn">Hide Other</span>}
+                />
                 {seriesLimit === "all" ? (
                   <p className="px-0.5 text-[11px] text-ink-muted">
                     Past eight series the colours repeat — the legend and tooltip still name
@@ -852,6 +891,16 @@ export function Contributors() {
                   onChange={(v) => persist("github-monitor.valueMode", v, setValueMode)}
                   options={VALUE_MODES}
                 />
+                <LabeledControl label="Y axis">
+                  <Segmented
+                    ariaLabel="Y axis range"
+                    variant="bare"
+                    stretch
+                    value={yAxis}
+                    onChange={(v) => persist("github-monitor.yAxis", v, setYAxis)}
+                    options={Y_AXES}
+                  />
+                </LabeledControl>
               </FilterPopover>
           }
           actions={
@@ -913,6 +962,8 @@ export function Contributors() {
             onToggleKey={toggleKey}
             withBrush
             onBrushChange={(r) => handleBrush(r.startIndex, r.endIndex)}
+            yFit={yAxis === "fit"}
+            hideOther={hideOther}
           />
 
         </ChartCard>
@@ -971,7 +1022,7 @@ export function Contributors() {
                   yMax={sharedScale ? cardCharts.ceiling : undefined}
                   yMin={sharedScale ? cardCharts.floor : undefined}
                   repoCount={repos.length}
-                  view={{ shape, stackMode, valueMode, granularity }}
+                  view={{ shape, stackMode, valueMode, granularity, yFit: yAxis === "fit" && !sharedScale, hideOther }}
                   controls={cardControls}
                   showNumbers={showNumbers}
                   span={spanByLogin.get(c.login.toLowerCase()) ?? null}
@@ -1089,6 +1140,9 @@ function ContributorCardView({
     stackMode: StackMode;
     valueMode: ValueMode;
     granularity: Granularity;
+    /** Only on an own-scale card: a shared ceiling is what makes cards comparable. */
+    yFit: boolean;
+    hideOther: boolean;
   };
   /** Shown when the card is opened full screen, where the page's own are hidden. */
   controls: ReactNode;
@@ -1177,6 +1231,8 @@ function ContributorCardView({
         labelOf={(week) => bucketLabel(week, view.granularity)}
         yMax={yMax}
         yMin={yMin}
+        yFit={view.yFit}
+        hideOther={view.hideOther}
       />
     );
 

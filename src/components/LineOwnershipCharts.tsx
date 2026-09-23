@@ -1,11 +1,17 @@
-import { memo, useCallback, useDeferredValue, useMemo, useState } from "react";
+import { memo, Profiler, useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { bucketLabel } from "../lib/agg/series";
 import { formatDate } from "../lib/agg/weeks";
-import { ownershipHistoryBuckets, prepareOwnershipHistory, projectOwnershipHistory, type GithubAccounts, type OwnershipHistoryPoint, type OwnershipHistorySeries, type OwnershipHistorySplit, type OwnershipPeriod, type OwnershipReading, type aggregateOwnership } from "../lib/lineOwnership";
+import {
+  coarsenPlotRows, ownershipHistoryBuckets, plotBudget, projectOwnershipHistory, resolveOwnershipPeople,
+  type OwnershipHistorySeries, type OwnershipHistorySplit, type OwnershipPeriod, type OwnershipReading, type OwnershipSummary,
+} from "../lib/lineOwnership";
+import type { NormalizedRepoHistory } from "../lib/ownershipHistory";
+import { selectOwnershipPeople, type OwnershipAccountIndex } from "../lib/ownershipIdentity";
+import { measure, profileRender } from "../lib/perf";
 import { HeatMatrix, RankedBars, TimelineArea, type TimelineShape } from "./charts";
-import { ChartCard, DataTable, FilterPopover, LabeledControl, Segmented, Spinner, full } from "./ui";
+import { Button, ChartCard, Checkbox, DataTable, FilterPopover, LabeledControl, Segmented, Spinner, full } from "./ui";
 
-type Summary = ReturnType<typeof aggregateOwnership>;
+type Summary = OwnershipSummary;
 const percent = (value: number) => `${value.toFixed(1)}%`;
 const share = (value: number) => percent(value * 100);
 const shortRepo = (name: string) => name.slice(name.lastIndexOf("/") + 1);
@@ -45,6 +51,14 @@ const HISTORY_PERIODS: Array<{ value: OwnershipPeriod; label: string }> = [
   { value: "quarter", label: "Quarter" },
 ];
 const PERIOD_SPAN = { day: "day", week: "week", month: "month", quarter: "quarter" } as const;
+const Y_AXES = [
+  { value: "full" as const, label: "Full" },
+  { value: "fit" as const, label: "Fit to data" },
+];
+const REPO_LABELS = [
+  { value: "full" as const, label: "owner/name" },
+  { value: "name" as const, label: "Name only" },
+];
 
 function historyCaption(reading: OwnershipReading, period: OwnershipPeriod): string {
   const span = PERIOD_SPAN[period];
@@ -77,10 +91,29 @@ function remember<T>(key: string, value: T, set: (value: T) => void) {
   set(value);
 }
 
+/** Width of an element, following resizes. */
+function useWidth<T extends HTMLElement>(): [React.RefObject<T | null>, number] {
+  const ref = useRef<T>(null);
+  const [width, setWidth] = useState(800);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(([entry]) => setWidth(Math.round(entry.contentRect.width)));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  return [ref, width];
+}
+
+/** Past this many plotted marks, animating a change costs more than it shows. */
+const MAX_ANIMATED_MARKS = 6000;
+/** Recharts' default area and line animation is 1.5 s. */
+const ANIMATION_WINDOW_MS = 1600;
+
 /** The plotted series. Memoised so a control change can paint before Recharts
- * rebuilds thousands of daily marks. */
+ * rebuilds the marks. */
 const HistoryPlot = memo(function HistoryPlot({
-  plotted, series, shape, stackMode, values, reading, period, activeKeys, onToggleKey,
+  plotted, series, shape, stackMode, values, reading, labelOf, withBrush, onBrushChange, activeKeys, onToggleKey, animate, yFit, hideOther,
 }: {
   plotted: Array<Record<string, number>>;
   series: OwnershipHistorySeries["series"];
@@ -88,36 +121,54 @@ const HistoryPlot = memo(function HistoryPlot({
   stackMode: "stacked" | "overlaid";
   values: "total" | "share";
   reading: OwnershipReading;
-  period: OwnershipPeriod;
+  labelOf: (week: number) => string;
+  withBrush: boolean;
+  onBrushChange: (range: { startIndex: number; endIndex: number }) => void;
   activeKeys: Set<string>;
   onToggleKey: (key: string) => void;
+  animate: boolean;
+  yFit: boolean;
+  hideOther: boolean;
 }) {
-  const periodLabel = (week: number) => period === "day" ? formatDate(week * 1000) : bucketLabel(week, period);
   return series.length === 0
     ? <p className="text-[12px] text-ink-muted">No surviving lines match these filters.</p>
-    : <TimelineArea data={plotted} series={series} shape={shape} stackMode={stackMode} values={values} height={280}
-      withBrush={plotted.length > 45} activeKeys={activeKeys} onToggleKey={onToggleKey}
-      valueLabel={values === "share" ? (reading === "period" ? "of that period's change" : "of credited lines") : "lines"} labelOf={periodLabel} />;
+    : <Profiler id="ownership-history" onRender={(id, phase, duration) => profileRender(id, phase, duration)}>
+      <TimelineArea data={plotted} series={series} shape={shape} stackMode={stackMode} values={values} height={280}
+        withBrush={withBrush} onBrushChange={onBrushChange} activeKeys={activeKeys} onToggleKey={onToggleKey} animate={animate} yFit={yFit} hideOther={hideOther}
+        valueLabel={values === "share" ? (reading === "period" ? "of that period's change" : "of credited lines") : "lines"} labelOf={labelOf} />
+    </Profiler>;
 });
 
-/** Daily first-parent history. Person grouping is fixed because that is what was saved. */
-export function OwnershipHistoryChart({ points, selectedLogins, repositories, accounts, loading }: {
-  points: OwnershipHistoryPoint[];
+/**
+ * Daily first-parent history. People are resolved to GitHub accounts once per
+ * repository selection and account revision; the contributor selection, split,
+ * period and shape reuse that work. The table always holds exact periods; only the
+ * plot is coarsened to what its width can show.
+ */
+export function OwnershipHistoryChart({ histories, selectedLogins, repositories, accounts, loading, window }: {
+  histories: readonly NormalizedRepoHistory[];
   selectedLogins: readonly string[];
   repositories: Array<{ id: number; name: string }>;
-  accounts?: GithubAccounts;
+  accounts?: OwnershipAccountIndex;
   loading?: boolean;
+  /** The page's period. Null shows all history. */
+  window?: { fromMs: number; toMs: number } | null;
 }) {
   const [shape, setShape] = useState<TimelineShape>(() => storedChoice("github-monitor.ownership.shape", ["bar", "area", "line"], "area"));
   const [split, setSplit] = useState<OwnershipHistorySplit>(() => storedChoice("github-monitor.ownership.split", ["people", "repository", "total"], "people"));
   const [seriesLimit, setSeriesLimit] = useState(() => storedChoice("github-monitor.ownership.seriesLimit", ["4", "6", "8", "all"], "8"));
   const [stackMode, setStackMode] = useState<"stacked" | "overlaid">(() => storedChoice("github-monitor.ownership.stackMode", ["stacked", "overlaid"], "stacked"));
   const [values, setValues] = useState<"total" | "share">(() => storedChoice("github-monitor.ownership.valueMode", ["total", "share"], "total"));
+  const [hideOther, setHideOther] = useState(() => storedChoice("github-monitor.ownership.hideOther", ["true", "false"], "false") === "true");
+  const [yAxis, setYAxis] = useState<"full" | "fit">(() => storedChoice("github-monitor.ownership.yAxis", ["full", "fit"], "full"));
+  const [repoLabel, setRepoLabel] = useState<"full" | "name">(() => storedChoice("github-monitor.ownership.repoLabel", ["full", "name"], "full"));
   const [reading, setReading] = useState<OwnershipReading>(() => storedTimeline().reading);
   const [period, setPeriod] = useState<OwnershipPeriod>(() => storedTimeline().period);
   const [activeKeys, setActiveKeys] = useState<Set<string>>(() => new Set());
+  const [zoom, setZoom] = useState<{ from: number; to: number } | null>(null);
+  const [plotRef, width] = useWidth<HTMLDivElement>();
   const chooseReading = useCallback((value: OwnershipReading) => remember("github-monitor.ownership.reading", value, setReading), []);
-  const choosePeriod = useCallback((value: OwnershipPeriod) => remember("github-monitor.ownership.period", value, setPeriod), []);
+  const choosePeriod = useCallback((value: OwnershipPeriod) => { setZoom(null); remember("github-monitor.ownership.period", value, setPeriod); }, []);
   const toggleKey = useCallback((key: string) => setActiveKeys((prev) => {
     if (prev.size === 0) return new Set([key]);
     const next = new Set(prev);
@@ -125,8 +176,6 @@ export function OwnershipHistoryChart({ points, selectedLogins, repositories, ac
     else next.add(key);
     return next;
   }), []);
-  // The join across every day is independent of how the chart is drawn. Defer the
-  // drawing so the control updates on the click and the marks catch up after.
   const deferredSplit = useDeferredValue(split);
   const deferredLimit = useDeferredValue(seriesLimit);
   const deferredReading = useDeferredValue(reading);
@@ -134,32 +183,91 @@ export function OwnershipHistoryChart({ points, selectedLogins, repositories, ac
   const deferredShape = useDeferredValue(shape);
   const deferredStack = useDeferredValue(stackMode);
   const deferredValues = useDeferredValue(values);
-  const repoNames = useMemo(() => new Map(repositories.map((repo) => [repo.id, repo.name])), [repositories]);
-  const prepared = useMemo(
-    () => prepareOwnershipHistory(points, selectedLogins, accounts),
-    [points, selectedLogins, accounts],
+  const repoNames = useMemo(
+    () => new Map(repositories.map((repo) => [repo.id, repoLabel === "name" ? shortRepo(repo.name) : repo.name])),
+    [repositories, repoLabel],
   );
+  // Rebuilt only when the repositories or account mappings change.
+  const identity = useMemo(() => measure("ownership:identity", () => resolveOwnershipPeople(histories, accounts)), [histories, accounts]);
+  const selection = useMemo(() => measure("ownership:selection", () => selectOwnershipPeople(identity.index, selectedLogins)), [identity, selectedLogins]);
   const { data, series } = useMemo(
-    () => projectOwnershipHistory(prepared, {
+    () => measure("ownership:sweep", () => projectOwnershipHistory(histories, identity, selection, {
       split: deferredSplit,
       limit: deferredLimit === "all" ? Number.POSITIVE_INFINITY : Number(deferredLimit),
       repoNames,
-    }),
-    [prepared, deferredSplit, deferredLimit, repoNames],
+    })),
+    [histories, identity, selection, deferredSplit, deferredLimit, repoNames],
   );
-  const plotted = useMemo(
-    () => ownershipHistoryBuckets(data, series.map((item) => item.key), deferredPeriod, deferredReading),
-    [data, series, deferredPeriod, deferredReading],
+  const keys = useMemo(() => series.map((item) => item.key), [series]);
+  // Exact periods for the table, export and lookup.
+  const fullRows = useMemo(
+    () => measure("ownership:buckets", () => ownershipHistoryBuckets(data, keys, deferredPeriod, deferredReading)),
+    [data, keys, deferredPeriod, deferredReading],
+  );
+  // The page period, applied after bucketing so a per-period reading keeps each
+  // period's real change instead of measuring the first one from zero.
+  const fromMs = window?.fromMs ?? null;
+  const toMs = window?.toMs ?? null;
+  const periodRows = useMemo(() => {
+    if (fromMs == null || toMs == null) return fullRows;
+    // Keep the bucket that contains the start as well as those that begin inside.
+    let first = 0;
+    for (let i = 0; i < fullRows.length; i++) if (fullRows[i].week * 1000 <= fromMs) first = i;
+    return fullRows.slice(first).filter((row) => row.week * 1000 <= toMs);
+  }, [fullRows, fromMs, toMs]);
+  // A zoom belongs to the period it was made in.
+  useEffect(() => { setZoom(null); }, [fromMs, toMs]);
+  const visibleRows = useMemo(
+    () => zoom ? periodRows.filter((row) => row.week >= zoom.from && row.week <= zoom.to) : periodRows,
+    [periodRows, zoom],
+  );
+  const budget = plotBudget(width, deferredShape);
+  const plot = useMemo(
+    () => measure("ownership:plot", () => coarsenPlotRows(visibleRows, keys, budget, deferredReading)),
+    [visibleRows, keys, budget, deferredReading],
   );
   const plotStale = deferredSplit !== split || deferredLimit !== seriesLimit || deferredReading !== reading
     || deferredPeriod !== period || deferredShape !== shape || deferredStack !== stackMode || deferredValues !== values;
   const singleSeries = split === "total";
-  const waiting = data.length === 0;
-  const changed = shape !== "area" || split !== "people" || seriesLimit !== "8" || stackMode !== "stacked" || values !== "total" || reading !== "cumulative" || period !== "day";
-  const periodLabel = (week: number) => deferredPeriod === "day" ? formatDate(week * 1000) : bucketLabel(week, deferredPeriod);
+  const waiting = histories.every((h) => h.days.length === 0);
+  const changed = hideOther || yAxis !== "full" || repoLabel !== "full" || shape !== "area" || split !== "people" || seriesLimit !== "8" || stackMode !== "stacked" || values !== "total" || reading !== "cumulative" || period !== "day";
+  const periodLabel = useCallback((week: number) => deferredPeriod === "day" ? formatDate(week * 1000) : bucketLabel(week, deferredPeriod), [deferredPeriod]);
+  const plotLabel = useCallback((week: number) => {
+    const end = plot.ends.get(week);
+    return end != null && end !== week ? `${periodLabel(week)} – ${periodLabel(end)}` : periodLabel(week);
+  }, [plot, periodLabel]);
+  // Dragging the brush zooms once it settles; the zoomed plot restores detail.
+  const brushTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const onBrushChange = useCallback(({ startIndex, endIndex }: { startIndex: number; endIndex: number }) => {
+    if (brushTimer.current) clearTimeout(brushTimer.current);
+    brushTimer.current = setTimeout(() => {
+      const rows = plot.rows;
+      if (startIndex <= 0 && endIndex >= rows.length - 1) return;
+      const from = rows[Math.max(0, startIndex)]?.week;
+      const last = rows[Math.min(rows.length - 1, endIndex)]?.week;
+      if (from != null && last != null) setZoom({ from, to: plot.ends.get(last) ?? last });
+    }, 450);
+  }, [plot]);
+  useEffect(() => () => { if (brushTimer.current) clearTimeout(brushTimer.current); }, []);
+  const span = PERIOD_SPAN[deferredPeriod];
+  const partial = histories.filter((h) => h.partial).length;
+  // Animate when the chart appears and when the reader changes what it shows.
+  // Days saved in the background during a sync redraw in place: animating each
+  // refresh would replay the transition over and over. Dense plots never animate.
+  const viewKey = [
+    waiting || series.length === 0 ? "empty" : "ready", deferredShape, deferredSplit, deferredLimit, deferredStack,
+    deferredValues, deferredReading, deferredPeriod, zoom?.from, zoom?.to, fromMs, toMs, yAxis, hideOther, selectedLogins.join("\0"),
+    repositories.map((r) => r.id).join(","),
+  ].join("|");
+  // Held for the length of Recharts' animation, so a re-render moments after the
+  // change (a loading flag clearing) does not cut the transition short.
+  const viewChanged = useRef<{ key: string | null; at: number }>({ key: null, at: 0 });
+  if (viewChanged.current.key !== viewKey) viewChanged.current = { key: viewKey, at: Date.now() };
+  const animate = Date.now() - viewChanged.current.at < ANIMATION_WINDOW_MS
+    && plot.rows.length * Math.max(1, series.length) <= MAX_ANIMATED_MARKS;
   return (
     <ChartCard title="Ownership over time" loading={loading || plotStale || waiting}
-      subtitle={`Credited lines on the default branch. ${historyCaption(reading, period)} Co-authors each receive full credit, so stacked people can exceed surviving lines.`}
+      subtitle={`Credited lines on the default branch. ${historyCaption(reading, period)} Co-authors who are different people each receive full credit, so stacked people can exceed surviving lines.`}
       titleAfter={
         <FilterPopover active={changed} width={356}>
         <LabeledControl label="Reading">
@@ -172,15 +280,24 @@ export function OwnershipHistoryChart({ points, selectedLogins, repositories, ac
         <LabeledControl label="Split by">
           <Segmented ariaLabel="Split ownership" variant="bare" stretch value={split} options={HISTORY_SPLITS} onChange={(value) => remember("github-monitor.ownership.split", value, setSplit)} />
         </LabeledControl>
+        <LabeledControl label="Y axis">
+          <Segmented ariaLabel="Y axis range" variant="bare" stretch value={yAxis} options={Y_AXES} onChange={(value) => remember("github-monitor.ownership.yAxis", value, setYAxis)} />
+        </LabeledControl>
+        <LabeledControl label="Repository names">
+          <Segmented ariaLabel="Repository names" variant="bare" stretch value={repoLabel} options={REPO_LABELS} disabled={split !== "repository"} onChange={(value) => remember("github-monitor.ownership.repoLabel", value, setRepoLabel)} />
+        </LabeledControl>
         <LabeledControl label="Show">
           <Segmented ariaLabel="Series before Other" variant="bare" stretch value={seriesLimit} options={HISTORY_LIMITS} disabled={singleSeries} onChange={(value) => remember("github-monitor.ownership.seriesLimit", value, setSeriesLimit)} />
         </LabeledControl>
-        {seriesLimit === "all" && !singleSeries ? <p className="px-0.5 text-[11px] text-ink-muted">Past eight series the colours repeat — the legend and tooltip still name each one.</p> : null}
+        <Checkbox checked={hideOther} disabled={singleSeries || seriesLimit === "all"}
+          onChange={(value) => remember("github-monitor.ownership.hideOther", value, setHideOther)}
+          label={<span className="text-ink-secondary" title="Other stays in every share and total; it is only not drawn">Hide Other</span>} />
+        {seriesLimit === "all" && !singleSeries ? <p className="px-0.5 text-[11px] text-ink-muted">Every series is drawn. Past eight the colours repeat — the legend and tooltip still name each one.</p> : null}
         <Segmented ariaLabel="Stacking" stretch value={stackMode} options={HISTORY_STACKS} disabled={singleSeries} onChange={(value) => remember("github-monitor.ownership.stackMode", value, setStackMode)} />
         <Segmented ariaLabel="Values" stretch value={values} options={HISTORY_VALUES} disabled={singleSeries} onChange={(value) => remember("github-monitor.ownership.valueMode", value, setValues)} />
         </FilterPopover>
       }
-      table={series.length ? <DataTable rows={plotted} rowKey={(row) => String(row.week)} maxHeight={420} initialSort={{ key: "day", dir: "asc" }} columns={[
+      table={series.length ? <DataTable rows={periodRows} rowKey={(row) => String(row.week)} maxHeight={420} initialSort={{ key: "day", dir: "asc" }} columns={[
         { key: "day", header: "Period", render: (row) => periodLabel(row.week), sortValue: (row) => row.week },
         ...series.map((item) => ({
           key: item.key,
@@ -190,14 +307,22 @@ export function OwnershipHistoryChart({ points, selectedLogins, repositories, ac
           sortValue: (row: Record<string, number>) => row[item.key] ?? 0,
         })),
       ]} /> : undefined}>
-      {waiting ? (
-        <div className="flex h-[280px] items-center justify-center gap-2 text-[12px] text-ink-muted" role="status">
-          <Spinner /> Calculating ownership history…
-        </div>
-      ) : (
-        <HistoryPlot plotted={plotted} series={series} shape={deferredShape} stackMode={deferredStack} values={deferredValues}
-          reading={deferredReading} period={deferredPeriod} activeKeys={activeKeys} onToggleKey={toggleKey} />
-      )}
+      <div ref={plotRef}>
+        {waiting ? (
+          <div className="flex h-[280px] items-center justify-center gap-2 text-[12px] text-ink-muted" role="status">
+            <Spinner /> Calculating ownership history…
+          </div>
+        ) : (
+          <HistoryPlot plotted={plot.rows} series={series} shape={deferredShape} stackMode={deferredStack} values={deferredValues}
+            reading={deferredReading} labelOf={plotLabel} withBrush={plot.rows.length > 1} onBrushChange={onBrushChange}
+            activeKeys={activeKeys} onToggleKey={toggleKey} animate={animate} yFit={yAxis === "fit"} hideOther={hideOther} />
+        )}
+      </div>
+      {(plot.factor > 1 || zoom || partial > 0) && <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-ink-muted">
+        {plot.factor > 1 && <span role="note">Plotted at {plot.factor}-{span} resolution{deferredReading === "cumulative" ? ", each point the level at the end of its range" : ", each point the change across its range"}. Drag the handles below the chart to zoom in for {span} detail. The table lists every {span}.</span>}
+        {zoom && <><span>Showing {periodLabel(zoom.from)} – {periodLabel(zoom.to)}.</span><Button variant="ghost" onClick={() => setZoom(null)}>Reset zoom</Button></>}
+        {partial > 0 && <span>History for {full(partial)} {partial === 1 ? "repository is" : "repositories are"} still being recorded, so the latest day may change.</span>}
+      </div>}
     </ChartCard>
   );
 }
@@ -239,6 +364,9 @@ export function LineOwnershipCharts({ summary, repositories, loading }: {
           { key: "author", header: "Author", render: (a) => a.author, sortValue: (a) => a.author },
           { key: "lines", header: "Lines", align: "right", render: (a) => full(a.lines), sortValue: (a) => a.lines },
           { key: "share", header: "Share", align: "right", render: (a) => share(a.share), sortValue: (a) => a.share },
+          { key: "account", header: "Account", render: (a) => a.matched == null ? "—" : a.matched
+            ? <span title={a.githubId ? `GitHub ID ${a.githubId}` : "Login from a noreply address; no account ID yet"}>@{a.login}{a.sources.includes("manual") ? " · Manual" : " · GitHub"}</span>
+            : <span className="text-ink-muted">Unmatched Git identity</span>, sortValue: (a) => a.login ?? "" },
           { key: "aliases", header: "Names / emails", render: (a) => <span className="whitespace-normal break-all text-ink-secondary">{[...a.names, ...a.emails].join(" · ")}</span> },
         ]} />}>
         <RankedBars data={topAuthors.map((a) => ({ name: a.author, value: a.share * 100 }))} height={360}

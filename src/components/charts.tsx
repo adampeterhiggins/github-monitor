@@ -21,6 +21,7 @@ import { useVizPalette } from "../lib/viz/useVizPalette";
 import { sequentialStep, seriesColorCycled, OTHER_COLOR, type VizPalette } from "../lib/viz/palette";
 import { formatShort, formatDate, weekTickFormatter } from "../lib/agg/weeks";
 import { toShares } from "../lib/agg/series";
+import { fitAxis } from "../lib/viz/axis";
 import { compact, full, useChartHeight } from "./ui";
 
 /**
@@ -272,11 +273,26 @@ export function TimelineArea({
   onBrushChange,
   yMax,
   yMin = 0,
+  animate = true,
+  yFit = false,
+  hideOther = false,
 }: {
   data: Array<Record<string, number>>;
   series: StackSeriesSpec[];
   height?: number;
   shape?: TimelineShape;
+  /** Off for dense histories: animating thousands of marks delays every control change. */
+  animate?: boolean;
+  /**
+   * Stretch the y axis to the visible data instead of 0–100% (shares) or zero
+   * upwards (totals). Stacks and shares keep a zero baseline; overlaid totals need not.
+   */
+  yFit?: boolean;
+  /**
+   * Leave the folded "Other" band undrawn. It still counts: shares and totals are
+   * measured against every series, so hiding it rescales nothing.
+   */
+  hideOther?: boolean;
   stackMode?: "stacked" | "overlaid";
   /**
    * What the y axis measures. `share` reads the total at each point as 100% and
@@ -338,6 +354,8 @@ export function TimelineArea({
   /* A selection that nothing on screen matches is no selection at all. Without
      this the chart dims every band and the legend offers nothing to click, because
      the series that would clear the filter is not there to be clicked. */
+  /** What is drawn, in the legend and in the tooltip list. `colored` stays the base for shares and totals. */
+  const drawn = hideOther ? colored.filter((s) => s.slot != null) : colored;
   const filtered = activeKeys != null && colored.some((s) => activeKeys.has(s.key));
   const isActive = (key: string) => !filtered || activeKeys!.has(key);
   const dim = (key: string) => (isActive(key) ? 1 : 0.18);
@@ -359,6 +377,9 @@ export function TimelineArea({
      rows rather than whatever was plotted. */
   const rawByWeek =
     plotted === data ? null : new Map(data.map((row) => [row.week, row] as const));
+  // Fitted to every series, not just the highlighted ones: highlighting only dims
+  // the rest, so the axis must stay put for them to keep their place.
+  const fit = yFit ? fitAxis(plotted, drawn.map((s) => s.key), stacked && shape !== "line", normalised) : null;
 
   const axes = (
     <>
@@ -370,15 +391,17 @@ export function TimelineArea({
         tickFormatter={normalised ? share : compact}
         // Quarter ticks are decimals; the default integer-only axis would leave a
         // share chart with nothing between 0% and 100%.
-        allowDecimals={normalised}
+        allowDecimals={normalised || fit != null}
         ticks={
-          normalised
-            ? shareFloor < 0
-              ? [-1, -0.5, 0, 0.5, 1]
-              : [0, 0.25, 0.5, 0.75, 1]
-            : undefined
+          fit
+            ? fit.ticks
+            : normalised
+              ? shareFloor < 0
+                ? [-1, -0.5, 0, 0.5, 1]
+                : [0, 0.25, 0.5, 0.75, 1]
+              : undefined
         }
-        domain={normalised ? [shareFloor, 1] : yMax != null ? [yMin, yMax] : undefined}
+        domain={fit ? fit.domain : normalised ? [shareFloor, 1] : yMax != null ? [yMin, yMax] : undefined}
       />
       <Tooltip
         // A crosshair on continuous forms so the reader aims at a date rather than
@@ -392,19 +415,22 @@ export function TimelineArea({
           if (!active || !payload?.length) return null;
           const plottedRow = payload[0].payload as Record<string, number>;
           const row = rawByWeek?.get(Number(plottedRow.week)) ?? plottedRow;
-          const rows = colored
-            .filter((s) => isActive(s.key))
-            .map((s) => ({ label: s.label, raw: Number(row[s.key] ?? 0), color: s.color }))
-            .filter((r) => r.raw !== 0)
-            .sort((a, b) => Math.abs(b.raw) - Math.abs(a.raw));
-          const total = rows.reduce((a, r) => a + r.raw, 0);
-          const churn = rows.reduce((a, r) => a + Math.abs(r.raw), 0);
+          const everyRow = colored
+            .map((s) => ({ key: s.key, label: s.label, raw: Number(row[s.key] ?? 0), color: s.color }))
+            .filter((r) => r.raw !== 0);
+          // Highlighting chooses which series are listed, not what they are measured
+          // against: shares and the heading total always count every series, as the
+          // plotted shares do.
+          const shown = new Set(drawn.map((s) => s.key));
+          const rows = everyRow.filter((r) => shown.has(r.key) && isActive(r.key)).sort((a, b) => Math.abs(b.raw) - Math.abs(a.raw));
+          const total = everyRow.reduce((a, r) => a + r.raw, 0);
+          const churn = everyRow.reduce((a, r) => a + Math.abs(r.raw), 0);
           const capped = rows.slice(0, 10);
           return (
             <TooltipShell
               palette={palette}
               heading={`${labelOf(Number(row.week))}${
-                rows.length > 1 ? ` · ${full(total)} ${valueLabel}` : ""
+                everyRow.length > 1 ? ` · ${full(total)} ${valueLabel}` : ""
               }`}
               rows={[
                 ...capped.map((r) => ({
@@ -451,7 +477,7 @@ export function TimelineArea({
             stackOffset={stackOffset}
           >
             {axes}
-            {colored.map((s, i) => (
+            {drawn.map((s, i) => (
               <Bar
                 key={s.key}
                 dataKey={s.key}
@@ -459,7 +485,8 @@ export function TimelineArea({
                 fill={s.color}
                 fillOpacity={dim(s.key)}
                 maxBarSize={BAR_MAX}
-                radius={!stacked || i === colored.length - 1 ? geom.radius : [0, 0, 0, 0]}
+                radius={!stacked || i === drawn.length - 1 ? geom.radius : [0, 0, 0, 0]}
+                isAnimationActive={animate}
               />
             ))}
             {brush}
@@ -471,7 +498,7 @@ export function TimelineArea({
             stackOffset={stackOffset}
           >
             {axes}
-            {colored.map((s) => (
+            {drawn.map((s) => (
               <Line
                 key={s.key}
                 type="monotone"
@@ -483,6 +510,7 @@ export function TimelineArea({
                 strokeLinejoin="round"
                 dot={false}
                 activeDot={{ r: 4, strokeWidth: 2, stroke: palette.surface }}
+                isAnimationActive={animate}
               />
             ))}
             {brush}
@@ -494,7 +522,7 @@ export function TimelineArea({
             stackOffset={stackOffset}
           >
             {axes}
-            {colored.map((s) => (
+            {drawn.map((s) => (
               <Area
                 key={s.key}
                 type="monotone"
@@ -507,6 +535,7 @@ export function TimelineArea({
                 fillOpacity={(stacked ? 0.75 : 0.12) * dim(s.key)}
                 dot={false}
                 activeDot={{ r: 4, strokeWidth: 2, stroke: palette.surface }}
+                isAnimationActive={animate}
               />
             ))}
             {brush}
@@ -514,10 +543,10 @@ export function TimelineArea({
         )}
       </ResponsiveContainer>
 
-      {colored.length >= 2 ? (
+      {drawn.length >= 2 ? (
         <div className="mt-2">
           <ClickableLegend
-            items={colored.map((s) => ({ key: s.key, label: s.label, color: s.color }))}
+            items={drawn.map((s) => ({ key: s.key, label: s.label, color: s.color }))}
             isActive={isActive}
             onToggle={onToggleKey}
             filtered={filtered}
