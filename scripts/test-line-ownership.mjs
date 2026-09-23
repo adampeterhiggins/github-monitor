@@ -179,6 +179,37 @@ try {
   }, { email: "other@x.com", role: "author" }).matched, false);
   pass("GitHub IDs, noreply spellings, renames, commits-API matches and account selections");
 
+  // Agents write Co-authored-by lines with made-up numbers in front of a real login.
+  const fakeIndex = lib.buildAccountIndex({
+    accounts: [["adam@focaldata.com", { login: "adampeterhiggins", id: "10777450" }]],
+    users: [{ id: "289972792", login: "focaldata-symphony-agent[bot]" }, { id: "135952835", login: "Mamorus00" }, { id: "10777450", login: "adampeterhiggins" }],
+  });
+  const fakeReports = [{ credits: [
+    { lines: 10, people: [{ name: "Adam Higgins", email: "adam@focaldata.com" }] },
+    { lines: 4, people: [{ name: "focaldata-symphony-agent[bot]", email: "289972792+focaldata-symphony-agent[bot]@users.noreply.github.com" },
+      { name: "adampeterhiggins", email: "289972792+adampeterhiggins@users.noreply.github.com" }] },
+    { lines: 3, people: [{ name: "adampeterhiggins", email: "135952835+adampeterhiggins@users.noreply.github.com" }] },
+    { lines: 2, people: [{ name: "adampeterhiggins", email: "14370493+adampeterhiggins@users.noreply.github.com" }] },
+    { lines: 5, people: [{ name: "Andrei", email: "andrei@x" }, { name: "focaldata-symphony-agent[bot]", email: "andrei@x" }] },
+    { lines: 6, people: [{ name: "nathggns", email: "719814+nathggns@users.noreply.github.com" }] },
+    { lines: 1, people: [{ name: "Old", email: "719814+oldlogin@users.noreply.github.com" }] },
+  ] }];
+  const fake = aggregateOwnership(fakeReports, "person", [], fakeIndex);
+  const adam = fake.authors.find((a) => a.login === "adampeterhiggins");
+  assert.equal(adam.lines, 10 + 4 + 3 + 2, "a noreply number that disagrees with its login does not move lines to another account");
+  assert.equal(fake.authors.some((a) => a.login === "Mamorus00"), false);
+  assert.equal(fake.authors.find((a) => a.login === "nathggns").lines, 7, "a genuine rename (one number, two logins) still joins");
+  const fakeOptions = lib.ownershipContributors(fakeReports, [], fakeIndex);
+  const botOption = fakeOptions.find((o) => o.login === "focaldata-symphony-agent[bot]");
+  assert.ok(botOption.isBot);
+  assert.ok(![botOption.login, ...botOption.aliases].map((x) => x.toLowerCase()).includes("adampeterhiggins"), "a bot never carries a person's login as an alias");
+  assert.equal(fakeOptions.find((o) => o.login === "adampeterhiggins").isBot, false);
+  assert.equal(fakeOptions.find((o) => o.searchText.includes("andrei@x")).isBot, true, "an unmatched identity is judged by its names");
+  const andreiIndex = lib.buildAccountIndex({ accounts: [["andrei@x", { login: "andreiprodaniuc", id: "90896839" }]] });
+  assert.equal(lib.ownershipContributors(fakeReports, [], andreiIndex).find((o) => o.login === "andreiprodaniuc").isBot, false,
+    "an agent committing under a person's email does not make that account a bot");
+  pass("made-up noreply numbers, bot aliases and accounts judged as bots by their login");
+
   /* ── The plan's identity examples ───────────────────────────────────── */
 
   const manualRow = (over) => ({ mappingId: 1, matchKind: "email", matchValue: "", repoId: null, githubId: "42", loginAtSave: "alex", reviewedAutoConflict: false, ...over });

@@ -207,24 +207,48 @@ export function unmatchedKey(raw: RawIdentity): PersonKey {
 }
 
 /** GitHub evidence first, then a manual row for an otherwise unresolved identity, then unmatched. */
+/**
+ * The account a noreply address names. `id+login` is only proof when the two
+ * agree: anyone (often an AI agent writing a Co-authored-by line) can put any
+ * number in front of a login, and GitHub attributes the address by the number.
+ * So the ID counts when that account is known to have had the login; otherwise
+ * the login decides when it names a known account; otherwise the ID stands.
+ */
+function noreplyAccount(noreply: { id: string | null; login: string }, index: OwnershipAccountIndex): { id: string | null; loginHint: string | null } {
+  const login = noreply.login.toLowerCase();
+  const byLogin = index.loginToId.get(login) ?? null;
+  if (!noreply.id) return { id: byLogin, loginHint: noreply.login };
+  const user = index.users.get(noreply.id);
+  if (user?.logins.some((l) => l.toLowerCase() === login)) return { id: noreply.id, loginHint: noreply.login };
+  if (byLogin) return { id: byLogin, loginHint: noreply.login };
+  // The login is unknown. An unknown ID is taken at its word; a known ID with a
+  // different login keeps the ID but not the login, which would be a false alias.
+  return { id: noreply.id, loginHint: user ? null : noreply.login };
+}
+
 export function resolveIdentity(raw: RawIdentity, index: OwnershipAccountIndex): Resolution {
   const email = normalizeEmail(raw.email);
   const noreply = email ? parseNoreply(email) : null;
+  const manual = email
+    ? index.manualByEmail.get(email) ?? null
+    : raw.repoId != null ? index.manualByRepoName.get(`${raw.repoId}\0${normalizeName(raw.name)}`) ?? null : null;
+  if (noreply) {
+    // GitHub resolves noreply addresses by their number too, so its matches for
+    // them are not independent evidence; only the address itself is used.
+    const { id, loginHint } = noreplyAccount(noreply, index);
+    const base = { conflict: false, superseded: null, manual: null } as const;
+    if (id) return { ...base, key: `${GITHUB}${id}`, githubId: id, loginHint, source: "github", superseded: manual };
+    // An ID-less login that names no known account stays provisional until one does.
+    return { ...base, key: `${GITHUB_LOGIN}${noreply.login.toLowerCase()}`, githubId: null, loginHint: noreply.login, source: "github" };
+  }
   const ids = new Set<string>();
   let loginHint: string | null = null;
-  if (noreply?.id) {
-    ids.add(noreply.id);
-    loginHint = noreply.login;
-  }
   const api = email ? index.byEmail.get(email) : undefined;
   if (api) {
     ids.add(api.id);
     loginHint ??= api.login;
   }
   for (const id of (email && index.conflicts.get(email)) || []) ids.add(id);
-  const manual = email
-    ? index.manualByEmail.get(email) ?? null
-    : raw.repoId != null ? index.manualByRepoName.get(`${raw.repoId}\0${normalizeName(raw.name)}`) ?? null : null;
   const base = { conflict: false, superseded: null, manual: null } as const;
   if (ids.size === 1) {
     const [id] = ids;
@@ -235,13 +259,6 @@ export function resolveIdentity(raw: RawIdentity, index: OwnershipAccountIndex):
       return { ...base, key: `${GITHUB}${manual.githubId}`, githubId: manual.githubId, loginHint: manual.loginAtSave, source: "manual", conflict: true, manual };
     }
     return { ...base, key: unmatchedKey(raw), githubId: null, loginHint: null, source: "unmatched", conflict: true };
-  }
-  if (noreply) {
-    // An ID-less noreply address names a login, not an account. It joins a known
-    // account with that login and otherwise stays provisional until an ID is known.
-    const id = index.loginToId.get(noreply.login.toLowerCase());
-    if (id) return { ...base, key: `${GITHUB}${id}`, githubId: id, loginHint: noreply.login, source: "github" };
-    return { ...base, key: `${GITHUB_LOGIN}${noreply.login.toLowerCase()}`, githubId: null, loginHint: noreply.login, source: "github" };
   }
   if (manual) {
     return { ...base, key: `${GITHUB}${manual.githubId}`, githubId: manual.githubId, loginHint: manual.loginAtSave, source: "manual", manual };
@@ -303,6 +320,8 @@ const heaviest = (map: ReadonlyMap<string, number>, prefer?: (value: string) => 
 export class OwnershipIdentityIndex {
   readonly accounts: OwnershipAccountIndex;
   private readonly interned = new Map<string, number>();
+  /** The login each interned identity's own evidence names, if any. */
+  private readonly hints = new Map<string, string | null>();
   private readonly byKey = new Map<PersonKey, number>();
   private readonly builders: PersonBuilder[] = [];
   private finished: ResolvedPerson[] | null = null;
@@ -331,6 +350,7 @@ export class OwnershipIdentityIndex {
       builder.sources.add(resolution.source);
       builder.conflict ||= resolution.conflict;
       this.interned.set(tuple, person);
+      this.hints.set(tuple, resolution.loginHint);
       this.finished = null;
       this.tokens = null;
     }
@@ -338,9 +358,10 @@ export class OwnershipIdentityIndex {
     const name = raw.name.trim();
     weigh(builder.names, name, lines);
     if (email) weigh(builder.emails, email, lines);
-    const hint = email ? (parseNoreply(email)?.login ?? this.accounts.byEmail.get(email)?.login) : undefined;
+    // Only a login this identity's evidence vouches for: a noreply address whose
+    // number and login disagree must not give its login to the wrong account.
+    const hint = this.hints.get(tuple);
     if (hint) weigh(builder.loginHints, hint, lines);
-    else if (builder.resolution.source === "manual" && builder.resolution.loginHint) weigh(builder.loginHints, builder.resolution.loginHint, lines);
     return person;
   }
 
@@ -435,8 +456,13 @@ export function selectOwnershipPeople(
   return people;
 }
 
+/**
+ * A GitHub account is a bot when its login is; its Git names are aliases, and an
+ * agent committing under someone's own email must not make that person a bot.
+ * An unmatched Git identity has only its names and emails to go on.
+ */
 export function isBotPerson(person: ResolvedPerson, patterns: readonly string[]): boolean {
-  return (person.login != null && isBotIdentity({ name: person.login, email: "" }, patterns))
-    || person.names.some((name) => isBotIdentity({ name, email: "" }, patterns))
+  if (person.matched && person.login) return isBotIdentity({ name: person.login, email: "" }, patterns);
+  return person.names.some((name) => isBotIdentity({ name, email: "" }, patterns))
     || person.emails.some((email) => isBotIdentity({ name: "", email }, patterns));
 }
