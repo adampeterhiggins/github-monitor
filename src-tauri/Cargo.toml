@@ -1,6 +1,6 @@
 [package]
 name = "github-monitor"
-version = "0.2.2"
+version = "0.2.3"
 description = "Org-wide GitHub Insights analytics for macOS"
 authors = ["Adam Higgins"]
 license = "MIT"
