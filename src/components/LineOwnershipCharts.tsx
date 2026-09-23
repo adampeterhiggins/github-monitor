@@ -97,11 +97,15 @@ function useWidth<T extends HTMLElement>(): [React.RefObject<T | null>, number] 
   return [ref, width];
 }
 
+/** Past this many plotted marks, animating a change costs more than it shows. */
+const MAX_ANIMATED_MARKS = 6000;
+/** Recharts' default area and line animation is 1.5 s. */
+const ANIMATION_WINDOW_MS = 1600;
+
 /** The plotted series. Memoised so a control change can paint before Recharts
- * rebuilds the marks. Animation is off: interpolating thousands of daily marks
- * delays every control change for no information. */
+ * rebuilds the marks. */
 const HistoryPlot = memo(function HistoryPlot({
-  plotted, series, shape, stackMode, values, reading, labelOf, withBrush, onBrushChange, activeKeys, onToggleKey,
+  plotted, series, shape, stackMode, values, reading, labelOf, withBrush, onBrushChange, activeKeys, onToggleKey, animate,
 }: {
   plotted: Array<Record<string, number>>;
   series: OwnershipHistorySeries["series"];
@@ -114,12 +118,13 @@ const HistoryPlot = memo(function HistoryPlot({
   onBrushChange: (range: { startIndex: number; endIndex: number }) => void;
   activeKeys: Set<string>;
   onToggleKey: (key: string) => void;
+  animate: boolean;
 }) {
   return series.length === 0
     ? <p className="text-[12px] text-ink-muted">No surviving lines match these filters.</p>
     : <Profiler id="ownership-history" onRender={(id, phase, duration) => profileRender(id, phase, duration)}>
       <TimelineArea data={plotted} series={series} shape={shape} stackMode={stackMode} values={values} height={280}
-        withBrush={withBrush} onBrushChange={onBrushChange} activeKeys={activeKeys} onToggleKey={onToggleKey} animate={false}
+        withBrush={withBrush} onBrushChange={onBrushChange} activeKeys={activeKeys} onToggleKey={onToggleKey} animate={animate}
         valueLabel={values === "share" ? (reading === "period" ? "of that period's change" : "of credited lines") : "lines"} labelOf={labelOf} />
     </Profiler>;
 });
@@ -215,6 +220,20 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
   useEffect(() => () => { if (brushTimer.current) clearTimeout(brushTimer.current); }, []);
   const span = PERIOD_SPAN[deferredPeriod];
   const partial = histories.filter((h) => h.partial).length;
+  // Animate when the chart appears and when the reader changes what it shows.
+  // Days saved in the background during a sync redraw in place: animating each
+  // refresh would replay the transition over and over. Dense plots never animate.
+  const viewKey = [
+    waiting || series.length === 0 ? "empty" : "ready", deferredShape, deferredSplit, deferredLimit, deferredStack,
+    deferredValues, deferredReading, deferredPeriod, zoom?.from, zoom?.to, selectedLogins.join("\0"),
+    repositories.map((r) => r.id).join(","),
+  ].join("|");
+  // Held for the length of Recharts' animation, so a re-render moments after the
+  // change (a loading flag clearing) does not cut the transition short.
+  const viewChanged = useRef<{ key: string | null; at: number }>({ key: null, at: 0 });
+  if (viewChanged.current.key !== viewKey) viewChanged.current = { key: viewKey, at: Date.now() };
+  const animate = Date.now() - viewChanged.current.at < ANIMATION_WINDOW_MS
+    && plot.rows.length * Math.max(1, series.length) <= MAX_ANIMATED_MARKS;
   return (
     <ChartCard title="Ownership over time" loading={loading || plotStale || waiting}
       subtitle={`Credited lines on the default branch. ${historyCaption(reading, period)} Co-authors who are different people each receive full credit, so stacked people can exceed surviving lines.`}
@@ -256,7 +275,7 @@ export function OwnershipHistoryChart({ histories, selectedLogins, repositories,
         ) : (
           <HistoryPlot plotted={plot.rows} series={series} shape={deferredShape} stackMode={deferredStack} values={deferredValues}
             reading={deferredReading} labelOf={plotLabel} withBrush={!zoom && plot.rows.length > 45} onBrushChange={onBrushChange}
-            activeKeys={activeKeys} onToggleKey={toggleKey} />
+            activeKeys={activeKeys} onToggleKey={toggleKey} animate={animate} />
         )}
       </div>
       {(plot.factor > 1 || zoom || partial > 0) && <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-ink-muted">
