@@ -243,8 +243,8 @@ function HistoryEngineCard() {
       <CardHeader title="History engine" subtitle="How the daily ownership history is calculated during sync" />
       <div className="flex flex-col gap-2 text-[12px] text-ink-secondary">
         <Segmented ariaLabel="History engine" value={engine} onChange={(value) => { setOwnershipEngine(value); setEngine(value); }}
-          options={[{ value: "blame", label: "Blame (reference)" }, { value: "replay", label: "Replay (faster)" }]} />
-        <p>Blame re-runs <code>git blame</code> for every changed file at every commit. Replay applies each commit's diff to the previous attribution and falls back to blame for merges, renames and binary changes. Every finished history is checked against a full blame of the default branch; a replayed history that differs is rebuilt with blame. Changing the engine rebuilds history on the next sync while the current chart stays visible.</p>
+          options={[{ value: "replay", label: "Replay (default)" }, { value: "blame", label: "Blame (reference, slower)" }]} />
+        <p>Replay applies each commit's diff to the previous attribution and runs <code>git blame</code> only where a diff cannot decide: merges, renames and binary changes. Blame re-runs <code>git blame</code> for every changed file at every commit; choose it if a repository's history ever looks wrong. Every finished history is checked against a full blame of the default branch, and a replayed history that differs is rebuilt with blame automatically. Changing the engine rebuilds history on the next sync while the current chart stays visible.</p>
       </div>
     </Card>
   );

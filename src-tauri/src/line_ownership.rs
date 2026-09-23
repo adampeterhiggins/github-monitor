@@ -2476,6 +2476,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let target = head_revision(&repo, &cancel).unwrap();
         update_commit_graph(&repo, &target, &cancel, |_| {}).unwrap();
+        history::PLAIN_RENAME_PAIRING.store(std::env::var("OWNERSHIP_BENCH_FAST").is_ok(), Ordering::Relaxed);
         let mut finals = Vec::new();
         // OWNERSHIP_BENCH_ENGINES=replay skips the slower reference walk.
         let engines: Vec<_> = std::env::var("OWNERSHIP_BENCH_ENGINES")
@@ -3276,6 +3277,29 @@ mod tests {
         }
         commit_dated(repo, bob, "2020-01-03T00:00:00Z", "Split and move");
         dir
+    }
+
+    /// A merge taking a side branch's version that differs from the first parent
+    /// only by whitespace: blame hands the whole file to the side branch.
+    #[test]
+    fn replay_merges_hand_identical_files_to_the_parent_they_match() {
+        let dir = fixture();
+        let repo = dir.path();
+        fs::write(repo.join("style.txt"), "alpha\nbeta\ngamma\n").unwrap();
+        commit_dated(repo, "Alice Example <alice@example.com>", "2020-01-02T00:00:00Z", "Base");
+        git(repo, &["checkout", "-q", "-b", "side"]).unwrap();
+        fs::write(repo.join("style.txt"), "alpha\nchanged\ngamma\n").unwrap();
+        commit_dated(repo, "Carol Example <carol@example.com>", "2020-01-03T00:00:00Z", "Side edit");
+        fs::write(repo.join("style.txt"), "alpha\r\nbeta \r\ngamma\r\n").unwrap();
+        commit_dated(repo, "Dave Example <dave@example.com>", "2020-01-04T00:00:00Z", "Side restores with CRLF");
+        git(repo, &["checkout", "-q", "main"]).unwrap();
+        fs::write(repo.join("other.txt"), "main\n").unwrap();
+        commit_dated(repo, "Bob Example <bob@example.com>", "2020-01-05T00:00:00Z", "Main");
+        let output = Command::new("git").arg("-C").arg(repo)
+            .args(["merge", "-q", "--no-ff", "side", "-m", "Merge side"])
+            .env("GIT_COMMITTER_DATE", "2020-01-06T00:00:00Z").output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        assert_walk_matches_blame(repo, history::Engine::Replay);
     }
 
     #[test]

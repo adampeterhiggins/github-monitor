@@ -578,7 +578,7 @@ try {
   assert.equal(scans.length, 2, "every selected non-archived repository is scanned");
   assert.ok(scans.every((s) => s.previousRef === null && s.previousJson === null));
   assert.equal(walks.length, 2);
-  assert.ok(walks.every((w) => w.checkpointRef === null && w.generation === 1 && w.engine === "blame"));
+  assert.ok(walks.every((w) => w.checkpointRef === null && w.generation === 1 && w.engine === "replay"), "replay is the default engine");
   let rows = await lib.ownershipRevisions(sdb, [1, 2, 3]);
   assert.deepEqual(rows.map((r) => r.hasReport), [true, true, false], "missing snapshots stay visible");
   assert.ok(rows.slice(0, 2).every((r) => r.history.kind === "generation" && !r.history.partial));
@@ -629,6 +629,11 @@ try {
   await lib.runSync({ ...syncOptions, repoIds: [1] });
   assert.deepEqual(walks.map((w) => w.engine), ["blame"], "that repository keeps using blame");
   localStorage.setItem("github-monitor.ownership.engine", "blame");
+  walks = [];
+  revision = "9".repeat(40);
+  await lib.runSync({ ...syncOptions, repoIds: [2] });
+  assert.deepEqual(walks.map((w) => w.engine), ["blame"], "choosing blame in Settings is honoured");
+  localStorage.removeItem("github-monitor.ownership.engine");
   pass("sync: reset on rewrite, verification against the HEAD scan, replay falls back to blame");
 
   const legacyJson = JSON.stringify({ version: 2, files: {}, coauthors: {}, report: report(revision) });

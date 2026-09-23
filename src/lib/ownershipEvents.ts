@@ -34,12 +34,16 @@ const ENGINE_KEY = "github-monitor.ownership.engine";
 
 export type OwnershipEngine = "blame" | "replay";
 
-/** Blame is the reference and the default; replay is opt-in until measured on real repositories. */
+/**
+ * Replay is the default: it matched a full blame on every real repository tried
+ * and is several times faster. Blame stays selectable as the reference, and any
+ * replayed history that fails verification is rebuilt with blame automatically.
+ */
 export function ownershipEngine(): OwnershipEngine {
   try {
-    return localStorage.getItem(ENGINE_KEY) === "replay" ? "replay" : "blame";
+    return localStorage.getItem(ENGINE_KEY) === "blame" ? "blame" : "replay";
   } catch {
-    return "blame";
+    return "replay";
   }
 }
 

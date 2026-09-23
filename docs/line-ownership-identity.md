@@ -53,13 +53,20 @@ are bumped by triggers inside the writing statement.
 The walk visits every first-parent commit and keeps one origin commit per
 surviving text line in a native, checksummed checkpoint file.
 
-- **Blame** (default, reference): re-blames each changed text file per commit.
-- **Replay** (opt-in in Settings): applies each commit's `-U0 -w` diff. It falls
-  back to blame for merges, binary transitions, gitattribute binaries,
-  inconsistent hunks, and renames that full `-M` detection might pair differently
-  from blame's per-path rename search (any commit with rename pairs). A replayed
-  history that fails verification is rebuilt with blame and replay is disabled
-  for that repository.
+- **Replay** (default): applies each commit's `-U0 -w` diff. It falls back to
+  blame for merges, binary transitions, gitattribute binaries, inconsistent hunks,
+  and renames that full `-M` detection might pair differently from blame's
+  per-path rename search (any commit with rename pairs). A merge lists every file
+  whose bytes differ from the first parent, because `-w` hides whitespace-only
+  changes and blame hands a file wholly to any parent it is identical to. A
+  replayed history that fails verification is rebuilt with blame and replay is
+  disabled for that repository.
+- **Blame** (reference, selectable in Settings): re-blames each changed text file
+  per commit.
+
+A faster replay that trusted full `-M` rename pairing was tried and rejected: it
+disagreed with blame on three of six active Focaldata repositories. It remains
+only as a benchmark toggle (`OWNERSHIP_BENCH_FAST=1`).
 
 Diff settings are pinned (`diff.algorithm=myers`, indent heuristic) for blame and
 replay, so a user's Git config cannot make them disagree.
@@ -72,9 +79,22 @@ Rust `history_engine_benchmark`.
 - Local data copy (216 repositories, legacy history): history preparation
   3,746 ms → ~21 ms; a contributor change on history 541 ms → ~16 ms; snapshot
   selection 22 ms → 3.5 ms.
-- `t3code` (3,768 first-parent commits): blame engine 641 s, 61,544 blame
-  processes. Replay results are recorded in the pull request.
+- `t3code` (3,768 first-parent commits): blame engine 641 s with 61,544 blame
+  processes; replay 167 s with 22,475 (6,424 for merges, 16,049 for contested
+  renames), ending with attribution identical to a full HEAD blame. Replay with
+  plain `-M` pairing was faster (61 s) but wrong: it missed a deleted file copied
+  to two new paths, which blame credits in both (`replay_follows_renames_the_way_blame_does`).
+- Five smaller local repositories (35–165 commits): replay matches HEAD blame.
+- Six active Focaldata repositories, replay against a full HEAD blame, all
+  matching: fd-participant-experience (481 commits, 2.3 s), fd-core-respondent
+  (490, 1.5 s), cin-questionnaire (929, 4.1 s; blame engine 33 s),
+  raincloud-playground (903, 54 s), fd-symphony (1,410, 6.9 s), orchestra
+  (3,816, 13.7 s). The rejected fast variant failed on cin-questionnaire,
+  raincloud-playground and orchestra. cin-questionnaire also exposed the merge
+  whitespace case above (`replay_merges_hand_identical_files_to_the_parent_they_match`).
 
-Still to measure before changing defaults: packaged-app input-to-paint, full-org
-sync wall time and memory with two calculation permits, database size after
-rebuild, and replay parity on more real repositories.
+Still to measure: packaged-app input-to-paint, full-org sync wall time and memory
+with two calculation permits, and database size after the rebuild. Every
+replayed history is verified at the default-branch head in production; that
+check cannot see an error confined to earlier days that later disappears, which
+is why the fixtures compare every commit.

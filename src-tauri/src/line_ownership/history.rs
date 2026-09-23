@@ -20,6 +20,17 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 
+/// Benchmarks only: trust full `-M` pairing, as the faster (unsafe) variant did.
+#[cfg(test)]
+pub static PLAIN_RENAME_PAIRING: AtomicBool = AtomicBool::new(false);
+
+fn plain_rename_pairing() -> bool {
+    #[cfg(test)]
+    return PLAIN_RENAME_PAIRING.load(Ordering::Relaxed);
+    #[cfg(not(test))]
+    false
+}
+
 /// Version of the saved day rows. Bump when their meaning changes.
 pub const HISTORY_FORMAT: u32 = 2;
 /// Version of the native checkpoint file.
@@ -855,8 +866,24 @@ pub fn run_batch(
             Some(from) => format!("{from}..{}", job.schedule[end - 1].sha),
             None => job.schedule[end - 1].sha.clone(),
         };
-        let changes = read_changes(repo, &range, job.state.engine == Engine::Replay, cancelled)?;
+        let mut changes = read_changes(repo, &range, job.state.engine == Engine::Replay, cancelled)?;
         let slice: Vec<WalkCommit> = job.schedule[job.position..end].to_vec();
+        if job.state.engine == Engine::Replay && slice.iter().any(|c| c.parents.len() > 1) {
+            // `-w` drops files whose change is whitespace-only. At a merge, blame
+            // hands a file wholly to any parent it is identical to, so a merge
+            // needs every file whose bytes differ from the first parent.
+            let exact = read_changes(repo, &range, false, cancelled)?;
+            if exact.len() != changes.len() {
+                return Err("Ownership history changed while it was read".into());
+            }
+            for ((commit, change), plain) in slice.iter().zip(&mut changes).zip(exact) {
+                if commit.parents.len() > 1 && plain.sha == change.sha {
+                    change.raw = plain.raw;
+                    change.hunks.clear();
+                    change.binary.clear();
+                }
+            }
+        }
         if changes.len() != slice.len() || changes.iter().zip(&slice).any(|(c, s)| c.sha != s.sha) {
             return Err("Ownership history changed while it was read".into());
         }
@@ -972,6 +999,7 @@ fn apply_commit(
     // except for an exact rename from a unique blob, which pairs the same way.
     let dests = change.raw.iter().filter(|r| (r.status == 'A' || r.status == 'R') && is_text(r)).count();
     let contested = replay
+        && !plain_rename_pairing()
         && !merge
         && !removed.is_empty()
         && (change.raw.iter().any(|r| r.status == 'R') || removed.len().saturating_mul(dests) > 1_000_000);
