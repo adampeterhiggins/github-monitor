@@ -1,4 +1,5 @@
 mod line_ownership;
+mod save_file;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -10,8 +11,11 @@ pub fn run() {
             line_ownership::sync_line_ownership,
             line_ownership::advance_line_ownership_history,
             line_ownership::cancel_line_ownership,
+            save_file::save_text_file,
         ])
         .plugin(tauri_plugin_opener::init())
+        // Used only from Rust, by save_text_file: the page never chooses a path.
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_http::init())
