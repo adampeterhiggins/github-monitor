@@ -738,6 +738,21 @@ try {
   assert.equal(lib.verifyHistoryFinal({ totalLines: 3, groups: [[[["Alice", "alice@x"], ["Alice", "alice@x"]], 3]] }, report("x")), null, "duplicate co-author entries compare as one person");
   assert.match(lib.verifyHistoryFinal({ totalLines: 3, groups: [[[["Bob", "bob@x"]], 3]] }, report("x")), /does not match/);
   pass("history verification compares raw attribution with the HEAD scan");
+
+  const coSamples = [
+    { email: "cursoragent@cursor.com", sha: "a".repeat(40), role: "coauthor" },
+    { email: "noreply@opencode.ai", sha: "b".repeat(40), role: "coauthor" },
+    { email: "ghost@x", sha: "c".repeat(40), role: "coauthor" },
+    { email: "gone@x", sha: "d".repeat(40), role: "coauthor" },
+  ];
+  assert.deepEqual(lib.coauthorAccounts(coSamples, [
+    { authors: { nodes: [{ email: "Peter@focaldata.com", user: { login: "peterlogg", databaseId: 1 } }, { email: "CursorAgent@cursor.com", user: { login: "cursoragent", databaseId: 199161495 } }] } },
+    { authors: { nodes: [{ email: "noreply@opencode.ai", user: null }] } },
+    { authors: { nodes: [{ email: "someone@else", user: null }] } },
+    null,
+  ]), [["cursoragent@cursor.com", "cursoragent", "199161495"], ["noreply@opencode.ai", null, null]],
+  "co-authors resolve from GitHub's commit author list; unlisted emails and missing commits wait for the next sync");
+  pass("co-author emails resolve to accounts through GitHub's commit author list");
 } finally {
   for (const sqlite of sqlites) try { sqlite.close(); } catch { /* already closed */ }
   rmSync(work, { recursive: true, force: true });

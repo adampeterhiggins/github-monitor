@@ -1593,9 +1593,12 @@ fn normalize_email(email: &str) -> String {
 /// Git log is newest first, so the kept commit is the latest use of that email.
 /// The author side wins when an email is used both ways: a lookup then reads
 /// that side of the commit and cannot attach the other person's account.
+/// Emails seen only in `Co-authored-by` trailers are sampled as `coauthor`:
+/// the commits API cannot resolve those, but GitHub's commit author list can.
 fn account_samples(log: &str) -> Vec<AccountSample> {
     let mut as_author = BTreeMap::<String, String>::new();
     let mut as_committer = BTreeMap::<String, String>::new();
+    let mut as_coauthor = BTreeMap::<String, String>::new();
     for line in log.lines() {
         if line.is_empty() {
             continue;
@@ -1615,6 +1618,15 @@ fn account_samples(log: &str) -> Vec<AccountSample> {
                 .entry(committer)
                 .or_insert_with(|| sha.to_owned());
         }
+        for trailer in parts.next().unwrap_or("").split('\u{1e}') {
+            let Some((_, email)) = trailer.rsplit_once('<') else {
+                continue;
+            };
+            let email = normalize_email(email);
+            if !email.is_empty() && github_account(&email).is_none() {
+                as_coauthor.entry(email).or_insert_with(|| sha.to_owned());
+            }
+        }
     }
     let mut samples = Vec::new();
     for (email, sha) in &as_author {
@@ -1632,6 +1644,16 @@ fn account_samples(log: &str) -> Vec<AccountSample> {
             email: email.clone(),
             sha: sha.clone(),
             role: "committer".into(),
+        });
+    }
+    for (email, sha) in &as_coauthor {
+        if as_author.contains_key(email) || as_committer.contains_key(email) {
+            continue;
+        }
+        samples.push(AccountSample {
+            email: email.clone(),
+            sha: sha.clone(),
+            role: "coauthor".into(),
         });
     }
     samples
@@ -1656,16 +1678,16 @@ pub async fn line_ownership_account_samples(
         if !repo.exists() {
             return Ok(Vec::new());
         }
-        match git_text_cancel(
-            &repo,
-            &[
-                "log",
-                "--format=%H%x1f%aE%x1f%cE",
-                "--end-of-options",
-                "HEAD",
-            ],
-            &active.cancelled,
-        ) {
+        let log = |format: &str| {
+            git_text_cancel(&repo, &["log", format, "--end-of-options", "HEAD"], &active.cancelled)
+        };
+        // Older Git cannot select trailers by key; it still matches authors and committers.
+        let result = log("--format=%H%x1f%aE%x1f%cE%x1f%(trailers:key=Co-authored-by,valueonly,unfold,separator=%x1e)")
+            .or_else(|error| {
+                check_cancel(&active.cancelled)?;
+                log("--format=%H%x1f%aE%x1f%cE").map_err(|_| error)
+            });
+        match result {
             Ok(log) => Ok(account_samples(&log)),
             Err(error) => {
                 check_cancel(&active.cancelled)?;
@@ -3522,5 +3544,13 @@ mod tests {
         assert_eq!(by_email["solo@x.com"].role, "committer");
         assert!(!by_email.contains_key("1+login@users.noreply.github.com"));
         assert_eq!(samples.len(), 4);
+        let trailers = format!(
+            "{author}\u{1f}a@x.com\u{1f}a@x.com\u{1f}Cursor <CursorAgent@cursor.com>\u{1e}Alice <a@x.com>\u{1e}Bot <2+b@users.noreply.github.com>\n{later}\u{1f}a@x.com\u{1f}a@x.com\u{1f}Cursor <cursoragent@cursor.com>\n"
+        );
+        let samples = account_samples(&trailers);
+        let coauthors: Vec<_> = samples.iter().filter(|s| s.role == "coauthor").collect();
+        assert_eq!(coauthors.len(), 1, "a co-author who never authors is sampled once; noreply and authors are not");
+        assert_eq!(coauthors[0].email, "cursoragent@cursor.com");
+        assert_eq!(coauthors[0].sha, author, "the newest commit naming the co-author");
     }
 }

@@ -30,6 +30,45 @@ const REFRESH_LOGINS_AFTER = 30 * DAY_MS;
 const isAbort = (error: unknown, signal?: AbortSignal) =>
   signal?.aborted || (error instanceof DOMException && error.name === "AbortError");
 
+type AccountRow = [string, string | null, string | null];
+
+interface CommitAuthors {
+  authors?: { nodes?: Array<{ email?: string | null; user?: { login: string; databaseId: number } | null } | null> } | null;
+}
+
+/**
+ * Accounts for co-author samples, from GitHub's own author list for each commit
+ * (which includes `Co-authored-by` trailers). A listed email with no user is a
+ * miss; a commit or email GitHub did not return is left for the next sync.
+ */
+export function coauthorAccounts(
+  samples: readonly AccountSample[],
+  commits: ReadonlyArray<CommitAuthors | null | undefined>,
+): AccountRow[] {
+  const rows: AccountRow[] = [];
+  samples.forEach((sample, i) => {
+    const nodes = commits[i]?.authors?.nodes;
+    if (!nodes) return;
+    const node = nodes.find((n) => n?.email?.trim().toLowerCase() === sample.email);
+    if (!node) return;
+    rows.push(node.user ? [sample.email, node.user.login, String(node.user.databaseId)] : [sample.email, null, null]);
+  });
+  return rows;
+}
+
+async function lookupCoauthors(
+  client: GitHubClient, owner: string, name: string, samples: readonly AccountSample[], signal?: AbortSignal,
+): Promise<AccountRow[]> {
+  const valid = samples.filter((s) => /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(s.sha));
+  if (!valid.length) return [];
+  const fields = valid.map((s, i) => `c${i}: object(oid: "${s.sha}") { ... on Commit { authors(first: 50) { nodes { email user { login databaseId } } } } }`);
+  const data = await client.graphql<{ repository: Record<string, CommitAuthors | null> | null }>(
+    `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ${fields.join(" ")} } }`,
+    { owner, name }, { signal },
+  );
+  return coauthorAccounts(valid, valid.map((_, i) => data.repository?.[`c${i}`]));
+}
+
 /** Ask GitHub which account authored each git email. New emails always; old misses a few at a time. */
 async function matchGithubAccounts(options: {
   db: Database; fullName: string; jobId: string; full: boolean; client: GitHubClient;
@@ -49,10 +88,30 @@ async function matchGithubAccounts(options: {
   const todo = [...fresh, ...retries];
   if (!todo.length) return;
   const [owner, name] = fullName.split("/");
+  const coauthors = todo.filter((sample) => sample.role === "coauthor");
+  const direct = todo.filter((sample) => sample.role !== "coauthor");
   let completed = 0;
-  for (let index = 0; index < todo.length; index += 6) {
+  // Co-authors resolve through GraphQL, many commits per request.
+  for (let index = 0; index < coauthors.length; index += 25) {
     aborted();
-    const batch = todo.slice(index, index + 6);
+    const batch = coauthors.slice(index, index + 25);
+    let found: AccountRow[] = [];
+    try {
+      found = await lookupCoauthors(client, owner, name, batch, signal);
+    } catch (error) {
+      if (isAbort(error, signal)) throw error;
+      if (error instanceof GitHubError && (error.status === 401 || error.status === 403)) throw error;
+    }
+    if (found.length) {
+      await writeGithubAccounts(db, found);
+      publishOwnership({ kind: "accounts" });
+    }
+    completed += batch.length;
+    options.onProgress?.({ completed: 0, total: 0, phase: `Matching GitHub accounts (${completed}/${todo.length})` });
+  }
+  for (let index = 0; index < direct.length; index += 6) {
+    aborted();
+    const batch = direct.slice(index, index + 6);
     const rows = await Promise.all(batch.map(async (sample) => {
       const path = `repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/commits/${sample.sha}`;
       try {
