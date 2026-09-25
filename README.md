@@ -180,7 +180,8 @@ Other useful targets: `make version` (reports drift across the three files),
 `make set-version-0.3.0`, `make app` (build and install into `/Applications`,
 verifying the installed version), `make runs`, `make watch`,
 `make verify-release`, and `make release-local` if CI is broken and you need to
-publish from your laptop.
+publish from your laptop. Like `make release`, it bumps the patch version if it
+isn't ahead of the latest tag, commits the bump and pushes it along with the tag.
 
 The equivalent long-hand, if you prefer:
 

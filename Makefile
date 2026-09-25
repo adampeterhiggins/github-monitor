@@ -47,6 +47,7 @@ help: ## Show the available targets
 	@printf "  make release-0.3.0           release exactly 0.3.0\n"
 	@printf "  make release YES=1           same, no prompts\n"
 	@printf "  make release PUSH=0          rehearse locally, push nothing\n"
+	@printf "  make release-local           bump if needed, commit, build and publish from here\n"
 	@printf "  make app                     build and install into /Applications\n\n"
 
 install: ## Install npm dependencies
@@ -360,11 +361,32 @@ verify-release-%:
 	echo "  release v$* is live and installable"
 
 release-local: ## Build, publish and update the manifest from this machine (bypasses CI)
-	@echo "==> Local release of v$(VERSION) — normally CI does this"
 	@$(MAKE) --no-print-directory deps
 	@$(MAKE) --no-print-directory version
-	@$(MAKE) --no-print-directory check-version-$(VERSION) FORCE=$(FORCE)
+	@# Checks run before the bump, as in `release`, so a failure never leaves a
+	@# half-done bump behind.
+	@echo "--> Running checks"
 	@npm run check
+	@# The gate compares against local tags, so pick up any cut elsewhere (CI, another
+	@# machine) first — otherwise it could bump to a version that already exists.
+	@git fetch --tags --quiet origin 2>/dev/null || echo "  (could not fetch tags; gating on local tags)"
+	@$(MAKE) --no-print-directory ensure-version FORCE=$(FORCE) YES=$(YES)
+	@# ensure-version may have bumped the files; commit just those so the tag
+	@# lands on a commit carrying the version it names. Pushed with the tag below.
+	@VER="$$(node -p 'require("./package.json").version')"; \
+	if [ -n "$$(git status --porcelain -- package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock)" ]; then \
+		git commit --quiet -m "chore(release): $$VER" -- package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock; \
+		echo "Committed version bump: chore(release): $$VER"; \
+	fi
+	@# VERSION is read when make parses the file, so a fresh make is needed to see
+	@# the bumped value.
+	@$(MAKE) --no-print-directory release-local-publish FORCE=$(FORCE)
+
+.PHONY: release-local-publish
+release-local-publish:
+	@echo "==> Local release of v$(VERSION) — normally CI does this"
+	@$(MAKE) --no-print-directory version
+	@$(MAKE) --no-print-directory check-version-$(VERSION) FORCE=$(FORCE)
 	@$(MAKE) --no-print-directory build
 	@set -e; \
 	V="$(VERSION)"; \
