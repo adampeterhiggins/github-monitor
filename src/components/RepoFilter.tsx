@@ -4,7 +4,7 @@ import { useScope, useScopedQuery } from "../lib/hooks";
 import { activeRepoIds, myRepoIds, useRepoSelectionData } from "../lib/repoSelection";
 import { commitsByRepo } from "../lib/db/queries";
 import { formatDate } from "../lib/agg/weeks";
-import { Button, Checkbox, Dropdown, DropdownRow, compact, full } from "./ui";
+import { Button, Checkbox, Dropdown, DropdownRow, OnlyButton, compact, full } from "./ui";
 import { SavedSelections } from "./SavedSelections";
 import type { RepoRow } from "../lib/db/queries";
 
@@ -255,7 +255,7 @@ export function RepoFilter() {
               </div>
               <div className="my-1 border-t border-hairline" />
               {visible.map((r) => (
-                <div key={r.id} className="flex items-center gap-2 px-1.5 py-[3px]">
+                <div key={r.id} className="group flex items-center rounded px-1.5 py-[3px] hover:bg-wash">
                   <div className="min-w-0 flex-1">
                     <Checkbox
                       checked={selectedSet.has(r.id)}
@@ -269,11 +269,14 @@ export function RepoFilter() {
                       label={<RepoLabel repo={r} />}
                     />
                   </div>
-                  <RepoMeta
-                    commits={commitsById.get(r.id) ?? 0}
-                    pushedAt={r.pushed_at}
-                    sort={sort}
-                  />
+                  <OnlyButton name={r.name} onClick={() => apply([r.id])} />
+                  <div className="ml-2">
+                    <RepoMeta
+                      commits={commitsById.get(r.id) ?? 0}
+                      pushedAt={r.pushed_at}
+                      sort={sort}
+                    />
+                  </div>
                 </div>
               ))}
             </>
