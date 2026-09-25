@@ -615,6 +615,40 @@ export function Checkbox({
   );
 }
 
+/**
+ * Narrows a checkbox menu to one row. Hidden until the row is hovered or the
+ * button itself is focused, so the resting layout stays put.
+ */
+export function OnlyButton({
+  name,
+  onClick,
+}: {
+  /** Item name, used in the accessible name and tooltip. */
+  name: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      title={`Select only ${name}`}
+      aria-label={`Select only ${name}`}
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        onClick();
+      }}
+      className={clsx(
+        "w-0 min-w-0 shrink-0 overflow-hidden whitespace-nowrap p-0 text-[12px] font-medium text-accent opacity-0",
+        "group-hover:w-auto group-hover:px-1 group-hover:opacity-100",
+        "focus-visible:w-auto focus-visible:px-1 focus-visible:opacity-100",
+        "hover:underline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent",
+      )}
+    >
+      Only
+    </button>
+  );
+}
+
 /* ── Stat tile ──────────────────────────────────────────────────────────── */
 
 export function StatTile({

@@ -5,7 +5,7 @@ import { listContributors } from "../lib/db/queries";
 import { contributorKeys as keys, deselectContributors, NO_CONTRIBUTORS } from "../lib/contributorSelection";
 import { isBot } from "../lib/bots";
 import { isUnmatchedToken } from "../lib/ownershipIdentity";
-import { Button, Checkbox, Dropdown, DropdownRow, compact, full } from "./ui";
+import { Button, Checkbox, Dropdown, DropdownRow, OnlyButton, compact, full } from "./ui";
 import { SavedSelections } from "./SavedSelections";
 
 /**
@@ -314,7 +314,7 @@ export function UserFilter({ support, snapshot }: {
             visible.map((c) => {
               const periodCommits = Number(c.commits);
               return (
-                <div key={c.login} className="flex items-center gap-2 px-1.5 py-[3px]">
+                <div key={c.login} className="group flex items-center rounded px-1.5 py-[3px] hover:bg-wash">
                   <div className="min-w-0 flex-1">
                     <Checkbox
                       checked={keys(c).some((key) => selectedSet.has(key))}
@@ -351,8 +351,9 @@ export function UserFilter({ support, snapshot }: {
                       }
                     />
                   </div>
+                  <OnlyButton name={c.label ?? c.login} onClick={() => apply([c.login])} />
                   <span
-                    className="shrink-0 text-[10px] tabular text-ink-muted"
+                    className="ml-2 shrink-0 text-[10px] tabular text-ink-muted"
                     title={
                       periodCommits > 0
                         ? `${full(periodCommits)} ${snapshot ? "surviving lines" : "commits"} across ${full(Number(c.repos))} repositories${snapshot ? "" : " in this period"}`
