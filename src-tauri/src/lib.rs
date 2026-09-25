@@ -11,6 +11,7 @@ pub fn run() {
             line_ownership::sync_line_ownership,
             line_ownership::advance_line_ownership_history,
             line_ownership::cancel_line_ownership,
+            line_ownership::line_ownership_breakdown,
             save_file::save_text_file,
         ])
         .plugin(tauri_plugin_opener::init())

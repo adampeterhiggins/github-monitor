@@ -5,13 +5,17 @@ import {
   BarChart,
   Brush,
   CartesianGrid,
+  Cell,
   Line,
   LineChart,
+  Pie,
+  PieChart,
   ReferenceLine,
   ResponsiveContainer,
   Scatter,
   ScatterChart,
   Tooltip,
+  Treemap,
   XAxis,
   YAxis,
   ZAxis,
@@ -1021,6 +1025,193 @@ export function RankedBars({
           }}
         />
       </BarChart>
+    </ResponsiveContainer>
+  );
+}
+
+/* ── Part-to-whole: donut and treemap ──────────────────────────────────────
+   The caller folds the tail into Other and chooses each slice's colour, so the
+   same entity keeps its colour across forms. Slices are separated by a 2px
+   surface gap; values are named in ink beside the mark, never in its colour. */
+
+export interface PartDatum {
+  key: string;
+  name: string;
+  value: number;
+  color: string;
+  /** Extra tooltip rows, value then label. */
+  detail?: Array<{ label: string; value: string }>;
+}
+
+export function DonutChart({
+  data,
+  total,
+  totalLabel,
+  valueLabel,
+  valueFormatter = full,
+  height = 300,
+  onSelect,
+}: {
+  data: PartDatum[];
+  total: number;
+  totalLabel: string;
+  valueLabel: string;
+  valueFormatter?: (value: number) => string;
+  height?: number;
+  /** A slice is clickable when this returns true for it. */
+  onSelect?: (datum: PartDatum) => boolean;
+}) {
+  const palette = useVizPalette();
+  const h = useHeight(height);
+  if (data.length === 0 || total <= 0) return <NoData height={h} />;
+  const size = Math.min(h, 300);
+  return (
+    <div className="flex flex-wrap items-center gap-6" style={{ minHeight: h }}>
+      <div className="relative shrink-0" style={{ width: size, height: size }}>
+        <ResponsiveContainer width="100%" height="100%">
+          <PieChart>
+            <Tooltip
+              content={({ active, payload }) => {
+                if (!active || !payload?.length) return null;
+                const d = payload[0].payload as PartDatum;
+                return (
+                  <TooltipShell
+                    palette={palette}
+                    heading={d.name}
+                    rows={[
+                      { label: valueLabel, value: valueFormatter(d.value), color: d.color },
+                      { label: "of the total", value: share(d.value / total) },
+                      ...(d.detail ?? []),
+                    ]}
+                  />
+                );
+              }}
+            />
+            <Pie
+              data={data}
+              dataKey="value"
+              nameKey="name"
+              innerRadius="62%"
+              outerRadius="100%"
+              startAngle={90}
+              endAngle={-270}
+              stroke={palette.surface}
+              strokeWidth={2}
+              isAnimationActive={data.length <= 24}
+              onClick={(entry) => { onSelect?.(entry.payload as PartDatum); }}
+            >
+              {data.map((d) => (
+                <Cell key={d.key} fill={d.color} cursor={onSelect ? "pointer" : undefined} />
+              ))}
+            </Pie>
+          </PieChart>
+        </ResponsiveContainer>
+        <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center">
+          <span className="text-[20px] font-semibold tabular text-ink">{compact(total)}</span>
+          <span className="text-[11px] text-ink-muted">{totalLabel}</span>
+        </div>
+      </div>
+      <ul className="min-w-[220px] max-w-[460px] flex-1 space-y-1">
+        {data.map((d) => (
+          <li key={d.key} className="flex items-center gap-2 text-[12px]">
+            <span aria-hidden="true" className="shrink-0" style={{ background: d.color, width: 9, height: 9, borderRadius: 2 }} />
+            <span className="min-w-0 flex-1 truncate text-ink-secondary" title={d.name}>{d.name}</span>
+            <span className="tabular font-semibold text-ink">{share(d.value / total)}</span>
+            <span className="w-16 text-right tabular text-ink-muted">{compact(d.value)}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+/** Ink that stays legible on a filled mark: near-black on light fills, white on dark. */
+function inkOn(fill: string): string {
+  const hex = fill.replace("#", "");
+  if (hex.length !== 6) return "#ffffff";
+  const channel = (i: number) => {
+    const c = parseInt(hex.slice(i, i + 2), 16) / 255;
+    return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+  };
+  const luminance = 0.2126 * channel(0) + 0.7152 * channel(2) + 0.0722 * channel(4);
+  // Contrast against white vs near-black; pick the larger.
+  return (1.05 / (luminance + 0.05)) >= ((luminance + 0.05) / 0.0555) ? "#ffffff" : "#0b0b0b";
+}
+
+export function TreemapChart({
+  data,
+  total,
+  valueLabel,
+  valueFormatter = full,
+  height = 340,
+  onSelect,
+}: {
+  data: PartDatum[];
+  total: number;
+  valueLabel: string;
+  valueFormatter?: (value: number) => string;
+  height?: number;
+  onSelect?: (datum: PartDatum) => boolean;
+}) {
+  const palette = useVizPalette();
+  const h = useHeight(height);
+  if (data.length === 0 || total <= 0) return <NoData height={h} />;
+  const byKey = new Map(data.map((d) => [d.key, d]));
+  return (
+    <ResponsiveContainer width="100%" height={h}>
+      <Treemap
+        // Plain rows keyed by `id`: React would strip a `key` prop from the cell content.
+        data={data.map((d) => ({ id: d.key, name: d.name, value: d.value }))}
+        dataKey="value"
+        nameKey="name"
+        aspectRatio={4 / 3}
+        isAnimationActive={false}
+        onClick={(node) => {
+          const d = byKey.get((node as unknown as { id?: string }).id ?? "");
+          if (d) onSelect?.(d);
+        }}
+        content={(props: { x?: number; y?: number; width?: number; height?: number; id?: string; depth?: number }) => {
+          const d = byKey.get(props.id ?? "");
+          const { x = 0, y = 0, width = 0, height: cellHeight = 0 } = props;
+          if (!d || props.depth === 0) return <g />;
+          const ink = inkOn(d.color);
+          const room = width > 56 && cellHeight > 30;
+          const maxChars = Math.max(3, Math.floor((width - 12) / 6.5));
+          const label = d.name.length > maxChars ? `${d.name.slice(0, maxChars - 1)}…` : d.name;
+          return (
+            <g style={{ cursor: onSelect ? "pointer" : undefined }}>
+              <rect x={x} y={y} width={width} height={cellHeight} rx={3} fill={d.color} stroke={palette.surface} strokeWidth={2} />
+              {room ? (
+                <>
+                  <text x={x + 6} y={y + 16} fill={ink} fontSize={11} fontWeight={600}>{label}</text>
+                  {cellHeight > 46 ? (
+                    <text x={x + 6} y={y + 31} fill={ink} fillOpacity={0.8} fontSize={11}>{share(d.value / total)}</text>
+                  ) : null}
+                </>
+              ) : null}
+            </g>
+          );
+        }}
+      >
+        <Tooltip
+          content={({ active, payload }) => {
+            if (!active || !payload?.length) return null;
+            const d = byKey.get((payload[0].payload as { id?: string }).id ?? "");
+            if (!d) return null;
+            return (
+              <TooltipShell
+                palette={palette}
+                heading={d.name}
+                rows={[
+                  { label: valueLabel, value: valueFormatter(d.value), color: d.color },
+                  { label: "of the total", value: share(d.value / total) },
+                  ...(d.detail ?? []),
+                ]}
+              />
+            );
+          }}
+        />
+      </Treemap>
     </ResponsiveContainer>
   );
 }

@@ -24,7 +24,7 @@ try {
   const modules = [
     "src/lib/lineOwnership.ts", "src/lib/ownershipIdentity.ts", "src/lib/ownershipHistory.ts", "src/lib/ownershipMappings.ts",
     "src/lib/contributorSelection.ts", "src/lib/db/lineOwnership.ts", "src/lib/db/index.ts", "src/lib/db/schema.ts",
-    "src/lib/ingest/sync.ts", "src/lib/ingest/lineOwnership.ts", "src/lib/viz/axis.ts",
+    "src/lib/ingest/sync.ts", "src/lib/ingest/lineOwnership.ts", "src/lib/viz/axis.ts", "src/lib/ownershipBreakdown.ts",
   ];
   await build({
     stdin: { contents: modules.map((path) => `export * from ${JSON.stringify(resolve(path))};`).join("\n"), resolveDir: process.cwd() },
@@ -793,6 +793,53 @@ try {
   ]), [["cursoragent@cursor.com", "cursoragent", "199161495"], ["noreply@opencode.ai", null, null]],
   "co-authors resolve from GitHub's commit author list; unlisted emails and missing commits wait for the next sync");
   pass("co-author emails resolve to accounts through GitHub's commit author list");
+
+  /* ── Repository breakdown ───────────────────────────────────────────── */
+
+  {
+    const now = Date.UTC(2026, 0, 1);
+    const at = (iso) => Date.parse(iso) / 1000;
+    const data = {
+      revision: "r",
+      people: [{ name: "Alice", email: "alice@x" }, { name: "Bob", email: "bob@x" }, { name: "Alice Work", email: "12+alice@users.noreply.github.com" }],
+      commits: [
+        { authoredAt: at("2025-12-20T00:00:00Z"), people: [0] },
+        { authoredAt: at("2022-06-01T00:00:00Z"), people: [1, 0] },
+        { authoredAt: 0, people: [1] },
+      ],
+      files: [
+        { path: "src/app.ts", lines: [0, 6, 1, 4] },
+        { path: "src/lib/util.ts", lines: [2, 5] },
+        { path: "README.md", lines: [0, 3] },
+        { path: "Dockerfile", lines: [1, 2] },
+      ],
+    };
+    const identity = new lib.OwnershipIdentityIndex(lib.buildAccountIndex({}));
+    const run = (split, extra = {}) => lib.breakdownOwnership(data, { split, identity, repoId: 1, selection: null, nowMs: now, ...extra });
+    const byPerson = run("person");
+    assert.equal(byPerson.totalLines, 20);
+    assert.equal(byPerson.coauthoredLines, 6);
+    assert.equal(byPerson.slices.reduce((n, s) => n + s.lines, 0), 20, "divided person lines sum to the whole");
+    const alice = byPerson.slices.find((s) => s.label.startsWith("Alice"));
+    assert.deepEqual([alice.lines, alice.creditedLines], [12, 15], "co-authored lines are halved; full credit is kept alongside");
+    assert.deepEqual(run("language").slices.map((s) => [s.label, s.lines]), [["TypeScript", 15], ["Markdown", 3], ["Dockerfile", 2]]);
+    const dirs = run("directory");
+    assert.deepEqual(dirs.slices.map((s) => [s.label, s.lines, s.directory ?? null]), [["src/", 15, "src/"], ["Files in root", 5, null]]);
+    const inSrc = run("directory", { prefix: "src/" });
+    assert.deepEqual(inSrc.slices.map((s) => [s.label, s.lines]), [["Files in src/", 10], ["lib/", 5]], "a directory scope splits its own children");
+    assert.equal(inSrc.files, 2);
+    assert.deepEqual(run("age").slices.map((s) => [s.label, s.lines]), [["Under 1 month", 9], ["2–5 years", 6], ["Undated", 5]], "age bands keep their order; undated lines stay visible");
+    assert.equal(Math.round(run("age").medianAgeDays), 12, "median age is line-weighted over dated lines");
+    const bobOnly = run("file", { selection: lib.selectOwnershipPeople(identity, [lib.unmatchedKey({ name: "Bob", email: "bob@x" })]) });
+    assert.equal(bobOnly.totalLines, 11, "a contributor selection keeps only lines that person is on");
+    assert.deepEqual(bobOnly.slices.map((s) => s.label), ["src/lib/util.ts", "src/app.ts", "Dockerfile"]);
+    const folded = lib.foldSlices(run("file").slices, 3, 20);
+    assert.deepEqual(folded.map((s) => [s.label, s.lines]), [["src/app.ts", 10], ["src/lib/util.ts", 5], ["Other (2)", 5]]);
+    assert.equal(lib.languageOf("a/b/.gitignore"), "Git config");
+    assert.equal(lib.languageOf("LICENSE"), "No extension");
+    assert.equal(lib.languageOf("x.weird"), ".weird");
+    pass("repository breakdown by person, language, directory scope, file and age");
+  }
 } finally {
   for (const sqlite of sqlites) try { sqlite.close(); } catch { /* already closed */ }
   rmSync(work, { recursive: true, force: true });

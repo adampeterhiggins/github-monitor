@@ -130,6 +130,8 @@ export interface OwnershipRevision {
   hasReport: boolean;
   /** Changes whenever the saved report changes. */
   reportRevision: string;
+  /** The native per-file cache behind the report; null for legacy snapshots. */
+  cacheRef: string | null;
   history: HistorySource;
   /** Changes whenever the shown history changes. */
   historyRevision: string;
@@ -174,6 +176,7 @@ export async function ownershipRevisions(db: Db, repoIds: readonly number[]): Pr
       error: row.error,
       hasReport: Boolean(row.has_report),
       reportRevision: `${row.calculated_at ?? ""}:${row.cache_ref ?? ""}:${row.revision ?? ""}`,
+      cacheRef: row.cache_ref,
       history,
       // Only the shown rows matter: a rebuild into another generation does not change them.
       historyRevision: history.kind === "generation"

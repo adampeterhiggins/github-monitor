@@ -1708,6 +1708,131 @@ pub async fn line_ownership_account_samples(
     .map_err(|e| e.to_string())?
 }
 
+/// A commit that still owns surviving lines: when it was authored and the
+/// people it credits, as indexes into `OwnershipBreakdown::people`.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BreakdownCommit {
+    authored_at: i64,
+    people: Vec<u32>,
+}
+
+/// One scanned text file. `lines` is flat pairs of commit index and line count.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BreakdownFile {
+    path: String,
+    lines: Vec<u64>,
+}
+
+/// The saved HEAD cache of one repository, per file and per commit, for
+/// inspecting where its surviving lines live. Read on demand; never synced.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnershipBreakdown {
+    revision: String,
+    people: Vec<Identity>,
+    commits: Vec<BreakdownCommit>,
+    files: Vec<BreakdownFile>,
+}
+
+fn breakdown(repo: &Path, snapshot: &Snapshot) -> Result<OwnershipBreakdown, String> {
+    let mut commit_index = BTreeMap::<&str, u32>::new();
+    let mut commit_authors = Vec::<&Identity>::new();
+    let mut files = Vec::new();
+    for (path, file) in &snapshot.files {
+        if file.binary || file.counts.is_empty() {
+            continue;
+        }
+        let mut lines = Vec::with_capacity(file.counts.len() * 2);
+        for (sha, count) in &file.counts {
+            if count.lines == 0 {
+                continue;
+            }
+            let next = commit_index.len() as u32;
+            let index = *commit_index.entry(sha.as_str()).or_insert_with(|| {
+                commit_authors.push(&count.author);
+                next
+            });
+            lines.extend([u64::from(index), count.lines]);
+        }
+        if !lines.is_empty() {
+            files.push(BreakdownFile { path: path.clone(), lines });
+        }
+    }
+    // Author dates for exactly the commits that own lines. A repository whose
+    // clone is gone still breaks down by person and path, just not by age.
+    let mut authored = BTreeMap::<String, i64>::new();
+    let shas: Vec<&str> = commit_index.keys().copied().collect();
+    if repo.exists() {
+        let cancelled = AtomicBool::new(false);
+        for chunk in shas.chunks(500) {
+            let mut args = vec!["log", "--no-walk=unsorted", "--format=%H %at"];
+            args.extend_from_slice(chunk);
+            args.push("--");
+            let Ok(log) = git_text_cancel(repo, &args, &cancelled) else { break };
+            for line in log.lines() {
+                if let Some((sha, time)) = line.split_once(' ') {
+                    if let Ok(time) = time.trim().parse() {
+                        authored.insert(sha.to_owned(), time);
+                    }
+                }
+            }
+        }
+    }
+    let mut people = Vec::<Identity>::new();
+    let mut person_index = BTreeMap::<Identity, u32>::new();
+    let mut intern = |person: &Identity| {
+        *person_index.entry(person.clone()).or_insert_with(|| {
+            people.push(person.clone());
+            (people.len() - 1) as u32
+        })
+    };
+    let mut commits: Vec<Option<BreakdownCommit>> = (0..shas.len()).map(|_| None).collect();
+    for (sha, &index) in &commit_index {
+        let author = commit_authors[index as usize];
+        let mut credited = vec![intern(author)];
+        for coauthor in snapshot.coauthors.get(*sha).into_iter().flatten() {
+            let person = intern(coauthor);
+            if !credited.contains(&person) {
+                credited.push(person);
+            }
+        }
+        commits[index as usize] = Some(BreakdownCommit {
+            authored_at: authored.get(*sha).copied().unwrap_or(0),
+            people: credited,
+        });
+    }
+    Ok(OwnershipBreakdown {
+        revision: snapshot.report.revision.clone(),
+        people,
+        commits: commits.into_iter().flatten().collect(),
+        files,
+    })
+}
+
+#[tauri::command]
+pub async fn line_ownership_breakdown(
+    github_repo: String,
+    cache_ref: String,
+    app: tauri::AppHandle,
+) -> Result<OwnershipBreakdown, String> {
+    github_url(&github_repo)?;
+    let cache = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("line-ownership");
+    tauri::async_runtime::spawn_blocking(move || {
+        let snapshot = read_head_cache(&heads_dir(&cache, &github_repo), &cache_ref)
+            .ok_or("The saved ownership for this repository has changed or is missing. Sync it again to inspect it.")?;
+        let repo = cache.join(format!("{}.git", github_repo.to_lowercase()));
+        breakdown(&repo, &snapshot)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 fn github_url(full_name: &str) -> Result<String, String> {
     let parts: Vec<_> = full_name.split('/').collect();
     if parts.len() != 2
@@ -2599,6 +2724,51 @@ mod tests {
         let mut opts = options(dir.path());
         opts.excludes = vec!["code.*".into()];
         assert_eq!(scan(opts, &cancel, |_| {}).unwrap().total_lines, 0);
+    }
+    #[test]
+    fn breakdown_splits_surviving_lines_by_file_commit_and_author_date() {
+        let dir = fixture();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/lib.rs"), "a\nb\n").unwrap();
+        commit_dated(dir.path(), "Carol <carol@example.com>", "2021-03-04T05:06:07Z", "Add lib");
+        let cancel = AtomicBool::new(false);
+        let snapshot = scan_snapshot(options(dir.path()), None, &cancel, |_| {}).unwrap();
+        let result = breakdown(dir.path(), &snapshot).unwrap();
+        let paths: Vec<_> = result.files.iter().map(|f| f.path.as_str()).collect();
+        // Binary and generated files never reach the breakdown.
+        assert_eq!(paths, ["code.txt", "src/lib.rs"]);
+        let total: u64 = result.files.iter().flat_map(|f| f.lines.chunks(2).map(|p| p[1])).sum();
+        assert_eq!(total, snapshot.report.total_lines);
+        let lib = &result.files[1];
+        assert_eq!(lib.lines.len(), 2);
+        let commit = &result.commits[lib.lines[0] as usize];
+        assert_eq!(commit.authored_at, 1_614_834_367);
+        assert_eq!(result.people[commit.people[0] as usize].email, "carol@example.com");
+        // The initial commit credits its author and both co-authors.
+        let initial = &result.commits[result.files[0].lines[0] as usize];
+        assert_eq!(initial.people.len(), 3);
+        // Without the clone, paths and people remain; dates are unknown.
+        let missing = breakdown(&dir.path().join("gone"), &snapshot).unwrap();
+        assert!(missing.commits.iter().all(|c| c.authored_at == 0));
+    }
+    /// GM_BREAKDOWN_CACHE=<heads file> GM_BREAKDOWN_REPO=<bare clone> cargo test breakdown_real -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn breakdown_real_cache() {
+        let cache = std::env::var("GM_BREAKDOWN_CACHE").unwrap();
+        let repo = std::env::var("GM_BREAKDOWN_REPO").unwrap();
+        let snapshot: Snapshot = serde_json::from_slice(&fs::read(cache).unwrap()).unwrap();
+        let start = std::time::Instant::now();
+        let result = breakdown(Path::new(&repo), &snapshot).unwrap();
+        let json = serde_json::to_vec(&result).unwrap();
+        if let Ok(out) = std::env::var("GM_BREAKDOWN_OUT") {
+            fs::write(out, &json).unwrap();
+        }
+        let dated = result.commits.iter().filter(|c| c.authored_at > 0).count();
+        println!(
+            "{} files, {} commits ({dated} dated), {} people, {} KB JSON in {:?}",
+            result.files.len(), result.commits.len(), result.people.len(), json.len() / 1024, start.elapsed()
+        );
     }
     #[test]
     fn whitespace_mailmap_bare_repositories_and_errors() {
