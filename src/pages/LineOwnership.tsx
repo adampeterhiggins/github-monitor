@@ -1,8 +1,9 @@
-import { useDeferredValue, useEffect, useMemo, useRef } from "react";
+import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { keepPreviousData, useQueries, useQuery, useQueryClient, type UseQueryResult } from "@tanstack/react-query";
 import { useApp } from "../lib/state/app";
 import { PageShell } from "../components/PageShell";
 import { LineOwnershipCharts, OwnershipHistoryChart } from "../components/LineOwnershipCharts";
+import { OwnershipInspector } from "../components/OwnershipInspector";
 import { UserFilter } from "../components/UserFilter";
 import { RepoFilter } from "../components/RepoFilter";
 import { PeriodFilter } from "../components/FilterBar";
@@ -158,6 +159,16 @@ export function LineOwnership() {
   const summaryStale = deferredReports !== withReports || deferredLogins !== selectedLogins;
   const historyStale = deferredHistories !== histories || deferredLogins !== selectedLogins;
   const filteredLinesByRepo = useMemo(() => new Map(chartRepositories.map((r, i) => [r.id, summary.byRepository[i]?.totalLines ?? 0])), [chartRepositories, summary]);
+  const [inspectRepoId, setInspectRepoId] = useState<number | null>(null);
+  const inspectRef = useRef<HTMLDivElement>(null);
+  // Until one is chosen, inspect the repository with the most surviving lines.
+  const inspected = inspectRepoId != null && rows.some((r) => r.repoId === inspectRepoId && r.hasReport)
+    ? inspectRepoId
+    : [...filteredLinesByRepo].sort((a, b) => b[1] - a[1])[0]?.[0] ?? null;
+  const inspect = (repoId: number) => {
+    setInspectRepoId(repoId);
+    inspectRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
   const missing = rows.filter((r) => !r.hasReport).length;
   const failed = rows.filter((r) => r.status === "error").length;
   const legacy = rows.filter((r) => r.history.kind === "legacy").length;
@@ -212,12 +223,17 @@ export function LineOwnership() {
             loading={historyQueries.loading || historyStale} repositories={historyRepositories}
             window={period === "all" ? null : { fromMs: range.fromMs, toMs: range.toMs }} />}
         <LineOwnershipCharts summary={summary} repositories={chartRepositories} loading={reportQueries.fetching.some(Boolean) || summaryStale} />
+        <div ref={inspectRef} className="scroll-mt-4">
+          <OwnershipInspector rows={rows} identity={identity} selectedLogins={deferredLogins} repoId={inspected} onRepoChange={setInspectRepoId} />
+        </div>
         <p className="text-[12px] text-ink-muted">Person grouping is by GitHub account: every email GitHub or a manual mapping links to an account counts as that login, the same login the Contributors page shows. Authors marked * have no GitHub match: they are unmatched Git identities and are never joined by name; map them in Settings → Contributor mappings. The Top owners table lists each person's Git names and emails.</p>
       </>}
       {rows.length > 0 && <Card>
         <CardHeader title="Repository snapshots" subtitle="Saved commit and last successful calculation for each repository. Sync changes updates touched files; Full re-sync rebuilds all ownership." />
         <DataTable rows={rows} rowKey={(r) => r.repoId} columns={[
-          { key: "repo", header: "Repository", render: (r) => r.fullName, sortValue: (r) => r.fullName },
+          { key: "repo", header: "Repository", render: (r) => r.hasReport
+            ? <button className="text-left text-accent hover:underline" title="Inspect this repository" onClick={() => inspect(r.repoId)}>{r.fullName}</button>
+            : r.fullName, sortValue: (r) => r.fullName },
           { key: "lines", header: "Lines", align: "right", render: (r) => r.hasReport ? full(filteredLinesByRepo.get(r.repoId) ?? 0) : "—", sortValue: (r) => filteredLinesByRepo.get(r.repoId) ?? -1 },
           { key: "commit", header: "Commit", render: (r) => r.revision ? <code title={r.revision}>{r.revision.slice(0, 12)}</code> : r.hasReport ? "Empty repository" : "—" },
           { key: "calculated", header: "Calculated", render: (r) => r.calculatedAt ? new Date(r.calculatedAt).toLocaleString() : "—", sortValue: (r) => r.calculatedAt ?? "" },
