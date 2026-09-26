@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useApp } from "../lib/state/app";
 import { useScope, useScopedQuery } from "../lib/hooks";
 import { activeRepoIds, myRepoIds, useRepoSelectionData } from "../lib/repoSelection";
-import { commitsByRepo } from "../lib/db/queries";
+import { commitsByRepo, repoLabel } from "../lib/db/queries";
 import { formatDate } from "../lib/agg/weeks";
 import { Button, Checkbox, Dropdown, DropdownRow, OnlyButton, compact, full } from "./ui";
 import { SavedSelections } from "./SavedSelections";
@@ -32,6 +32,8 @@ export function RepoFilter() {
   const setSelectedRepos = useApp((s) => s.setSelectedRepos);
   const { myCommits, login } = useRepoSelectionData();
   const scope = useScope();
+  const multipleOrgs = useApp((s) => s.orgs.length > 1);
+  const nameOf = (r: RepoRow) => repoLabel(r, multipleOrgs);
 
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
@@ -78,7 +80,7 @@ export function RepoFilter() {
     const q = query.trim().toLowerCase();
     const rows = repos
       .filter((r) => (showArchived ? true : r.archived === 0))
-      .filter((r) => (q ? r.name.toLowerCase().includes(q) : true))
+      .filter((r) => (q ? nameOf(r).toLowerCase().includes(q) : true))
       // Hides on activity alone. Exempting selected repositories was the first
       // attempt, on the grounds that a hidden one still scopes the page — but with
       // everything selected by default that exempted almost everything, and the
@@ -87,12 +89,12 @@ export function RepoFilter() {
       .filter((r) => !hideInactive || (commitsById.get(r.id) ?? 0) > 0);
 
     return rows.sort((a, b) => {
-      if (sort === "name") return a.name.localeCompare(b.name);
+      if (sort === "name") return nameOf(a).localeCompare(nameOf(b));
       if (sort === "pushed") return (b.pushed_at ?? "").localeCompare(a.pushed_at ?? "");
       const diff = (commitsById.get(b.id) ?? 0) - (commitsById.get(a.id) ?? 0);
-      return diff !== 0 ? diff : a.name.localeCompare(b.name);
+      return diff !== 0 ? diff : nameOf(a).localeCompare(nameOf(b));
     });
-  }, [repos, query, showArchived, hideInactive, commitsById, selectedSet, sort]);
+  }, [repos, query, showArchived, hideInactive, commitsById, selectedSet, sort, multipleOrgs]);
 
   /** Everything the activity rule is currently withholding. */
   const hidden = useMemo(() => {
@@ -113,7 +115,8 @@ export function RepoFilter() {
     if (selected.length === 0) return "No repositories";
     if (selected.length === repos.length) return `All ${full(repos.length)} repositories`;
     if (selected.length === 1) {
-      return repos.find((r) => r.id === selected[0])?.name ?? "1 repository";
+      const only = repos.find((r) => r.id === selected[0]);
+      return only ? nameOf(only) : "1 repository";
     }
     return `${full(selected.length)} of ${full(repos.length)} repositories`;
   })();
@@ -269,7 +272,7 @@ export function RepoFilter() {
                       label={<RepoLabel repo={r} />}
                     />
                   </div>
-                  <OnlyButton name={r.name} onClick={() => apply([r.id])} />
+                  <OnlyButton name={nameOf(r)} onClick={() => apply([r.id])} />
                   <div className="ml-2">
                     <RepoMeta
                       commits={commitsById.get(r.id) ?? 0}
@@ -324,9 +327,10 @@ function RepoMeta({
 }
 
 function RepoLabel({ repo }: { repo: RepoRow }) {
+  const multipleOrgs = useApp((s) => s.orgs.length > 1);
   return (
     <span className="flex min-w-0 items-center gap-1.5">
-      <span className="truncate">{repo.name}</span>
+      <span className="truncate">{repoLabel(repo, multipleOrgs)}</span>
       {repo.archived ? (
         <span className="shrink-0 rounded border border-hairline-strong px-1 text-[9px] uppercase text-ink-muted">
           archived

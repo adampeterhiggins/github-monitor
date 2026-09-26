@@ -4,7 +4,9 @@ import { LazyStore } from "@tauri-apps/plugin-store";
 const store = new LazyStore("settings.json");
 
 const TOKEN_KEY = "github_token";
-const ORG_KEY = "org";
+/** Pre-multi-organisation builds stored a single login here; read once to migrate. */
+const LEGACY_ORG_KEY = "org";
+const ORGS_KEY = "orgs";
 const LOGIN_KEY = "github_login";
 
 /**
@@ -45,12 +47,37 @@ export async function setLogin(login: string): Promise<void> {
   await store.save();
 }
 
-export async function getOrg(): Promise<string | null> {
-  return (await store.get<string>(ORG_KEY)) ?? null;
+/** Trimmed, de-duplicated case-insensitively (GitHub logins are), order kept. */
+export function normaliseOrgs(orgs: readonly string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of orgs) {
+    const org = raw.trim();
+    if (!org || seen.has(org.toLowerCase())) continue;
+    seen.add(org.toLowerCase());
+    out.push(org);
+  }
+  return out;
 }
 
-export async function setOrg(org: string): Promise<void> {
-  await store.set(ORG_KEY, org.trim());
+/** "a", "a and b", "a, b and c" — for labels naming every organisation in play. */
+export function describeOrgs(orgs: readonly string[]): string {
+  if (orgs.length <= 1) return orgs[0] ?? "";
+  return `${orgs.slice(0, -1).join(", ")} and ${orgs[orgs.length - 1]}`;
+}
+
+export async function getOrgs(): Promise<string[]> {
+  const stored = await store.get<unknown>(ORGS_KEY);
+  if (Array.isArray(stored)) {
+    return normaliseOrgs(stored.filter((x): x is string => typeof x === "string"));
+  }
+  const legacy = await store.get<string>(LEGACY_ORG_KEY);
+  return legacy ? normaliseOrgs([legacy]) : [];
+}
+
+export async function setOrgs(orgs: readonly string[]): Promise<void> {
+  await store.set(ORGS_KEY, normaliseOrgs(orgs));
+  await store.delete(LEGACY_ORG_KEY);
   await store.save();
 }
 

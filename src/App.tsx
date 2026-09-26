@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-quer
 import { useApp, startThemeSync } from "./lib/state/app";
 import { useUpdates } from "./lib/state/updates";
 import { syncProblems } from "./lib/db/queries";
+import { describeOrgs } from "./lib/auth";
 import { UpdateBadge } from "./components/UpdatePanel";
 import { Button, Card, Spinner, full } from "./components/ui";
 import { Setup } from "./pages/Setup";
@@ -67,7 +68,7 @@ export default function App() {
 }
 
 function Shell() {
-  const { booted, bootError, boot, token, org } = useApp();
+  const { booted, bootError, boot, token, orgs } = useApp();
   const [page, setPage] = useState<PageId>("contributors");
   const [settingsSub, setSettingsSub] = useState<SettingsSubId>("repositories");
   // Where "Back" from settings lands — the page the user was actually on, not a
@@ -104,7 +105,7 @@ function Shell() {
     );
   }
 
-  if (!token || !org) return <Setup />;
+  if (!token || !orgs.length) return <Setup />;
 
   const navigate = (p: PageId) => {
     if (p !== "settings") lastContentPage.current = p;
@@ -185,7 +186,7 @@ function Sidebar({
   onNavigate: (p: PageId) => void;
   onOpenSettings: (sub?: SettingsSubId) => void;
 }) {
-  const org = useApp((s) => s.org);
+  const orgs = useApp((s) => s.orgs);
   const lastSyncAt = useApp((s) => s.lastSyncAt);
   const syncing = useApp((s) => s.syncing);
   const repos = useApp((s) => s.repos);
@@ -194,8 +195,12 @@ function Sidebar({
   return (
     <nav className="flex w-[212px] shrink-0 flex-col border-r border-hairline bg-sidebar">
       <div className="px-4 pt-4 pb-3">
-        <div className="text-[11px] uppercase tracking-wide text-ink-muted">Organisation</div>
-        <div className="mt-0.5 truncate text-[14px] font-semibold text-ink">{org}</div>
+        <div className="text-[11px] uppercase tracking-wide text-ink-muted">
+          {orgs.length > 1 ? "Organisations" : "Organisation"}
+        </div>
+        <div className="mt-0.5 truncate text-[14px] font-semibold text-ink" title={describeOrgs(orgs)}>
+          {describeOrgs(orgs)}
+        </div>
         <div className="mt-0.5 text-[11px] tabular text-ink-muted">
           {selected.length} of {repos.length} repos
         </div>
@@ -240,7 +245,7 @@ function SettingsSidebar({
   onSelect: (s: SettingsSubId) => void;
   onBack: () => void;
 }) {
-  const org = useApp((s) => s.org);
+  const orgs = useApp((s) => s.orgs);
   const db = useApp((s) => s.db);
   const syncing = useApp((s) => s.syncing);
   const lastSyncAt = useApp((s) => s.lastSyncAt);
@@ -286,7 +291,9 @@ function SettingsSidebar({
         <div className="text-[11px] uppercase tracking-wide text-ink-muted">
           Settings &amp; sync
         </div>
-        <div className="mt-0.5 truncate text-[14px] font-semibold text-ink">{org}</div>
+        <div className="mt-0.5 truncate text-[14px] font-semibold text-ink" title={describeOrgs(orgs)}>
+          {describeOrgs(orgs)}
+        </div>
       </div>
 
       <ul className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">

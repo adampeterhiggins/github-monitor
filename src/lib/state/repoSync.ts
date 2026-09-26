@@ -66,7 +66,7 @@ export function useRepoSync(
   repoIds: number[],
   endpoints: EndpointId[] = ALL_ENDPOINTS,
 ): RepoSyncController {
-  const { db, token, org, syncing, setSyncing, setSync, reloadSyncTime } = useApp();
+  const { db, token, orgs, syncing, setSyncing, setSync, reloadSyncTime } = useApp();
   const queryClient = useQueryClient();
   const [activeRepoId, setActiveRepoId] = useState<number | null>(null);
   const [activePair, setActivePair] = useState<string | null>(null);
@@ -140,14 +140,14 @@ export function useRepoSync(
 
   const syncRepo = useCallback(
     async (repoId: number, mode: SyncMode) => {
-      if (!db || !token || !org || syncing) return;
+      if (!db || !token || !orgs.length || syncing) return;
       setActiveRepoId(repoId);
       setSyncing(true);
       try {
         await runSync({
           db,
           token,
-          org,
+          orgs,
           mode,
           endpoints,
           repoIds: [repoId],
@@ -163,19 +163,19 @@ export function useRepoSync(
         setActiveRepoId(null);
       }
     },
-    [db, token, org, syncing, endpoints, setSyncing, setSync, reloadSyncTime, queryClient],
+    [db, token, orgs, syncing, endpoints, setSyncing, setSync, reloadSyncTime, queryClient],
   );
 
   const retryPair = useCallback(
     async (repoId: number, endpoint: EndpointId) => {
-      if (!db || !token || !org || syncing) return;
+      if (!db || !token || !orgs.length || syncing) return;
       setActivePair(`${repoId}:${endpoint}`);
       setSyncing(true);
       try {
         await runSync({
           db,
           token,
-          org,
+          orgs,
           // `full` rather than `resume`: the user is pointing at this exact item
           // and asking for it to be done now. Resume would reach the same result
           // for a pending or errored pair, but only by coincidence of it not being
@@ -194,7 +194,7 @@ export function useRepoSync(
         setActivePair(null);
       }
     },
-    [db, token, org, syncing, setSyncing, setSync, reloadSyncTime, queryClient],
+    [db, token, orgs, syncing, setSyncing, setSync, reloadSyncTime, queryClient],
   );
 
   return {
