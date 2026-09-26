@@ -208,7 +208,8 @@ export function incrementalSince(
 export interface SyncOptions {
   db: Database;
   token: string;
-  org: string;
+  /** Every organisation to inventory; targets are drawn from all of them. */
+  orgs: string[];
   endpoints?: EndpointId[];
   /** Restrict to these repo ids; defaults to every non-archived repo. */
   repoIds?: number[];
@@ -326,12 +327,28 @@ interface RepoTarget {
   canPush: boolean;
 }
 
+/**
+ * List one organisation's repositories and store them under it. Also run on its
+ * own when an organisation is added, so its repositories can be chosen before
+ * the first sync — a sync only fetches repositories that are already selected.
+ */
+export async function inventoryOrg(
+  db: Database,
+  client: GitHubClient,
+  org: string,
+  signal?: AbortSignal,
+): Promise<GhRepo[]> {
+  const listed = await api.listOrgRepos(client, org, signal);
+  await write.writeRepos(db, org, listed);
+  return listed;
+}
+
 export async function runSync(options: SyncOptions): Promise<SyncResult> {
   const started = Date.now();
   const {
     db,
     token,
-    org,
+    orgs,
     endpoints = ALL_ENDPOINTS,
     includeArchived = false,
     activeSince = null,
@@ -400,24 +417,31 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
 
   /* ── 1. Repository inventory ───────────────────────────────────────────── */
 
-  let repos: GhRepo[];
-  try {
-    repos = await api.listOrgRepos(client, org, signal);
-  } catch (err) {
-    if (cancelled()) {
-      return {
-        reposSynced: 0,
-        errors,
-        cancelled: true,
-        durationMs: Date.now() - started,
-        skipped,
-        attempted,
-        mode,
-      };
+  // Each organisation is listed and stored separately so its rows carry the right
+  // owner. One failed listing stops the run, as a single organisation always did:
+  // carrying on would quietly sync a partial inventory.
+  const repos: Array<GhRepo & { owner: string }> = [];
+  for (const org of orgs) {
+    let listed: GhRepo[];
+    try {
+      listed = await inventoryOrg(db, client, org, signal);
+    } catch (err) {
+      if (cancelled()) {
+        return {
+          reposSynced: 0,
+          errors,
+          cancelled: true,
+          durationMs: Date.now() - started,
+          skipped,
+          attempted,
+          mode,
+        };
+      }
+      if (orgs.length === 1) throw err;
+      throw new Error(`Could not list repositories for ${org}: ${(err as Error)?.message ?? String(err)}`);
     }
-    throw err;
+    for (const r of listed) repos.push({ ...r, owner: org });
   }
-  await write.writeRepos(db, org, repos);
 
   const targets: RepoTarget[] = repos
     .filter((r) => (includeArchived ? true : !r.archived))
@@ -426,7 +450,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     .filter((r) => (activeSince ? (r.pushed_at ?? "") >= activeSince : true))
     .map((r) => ({
       id: r.id,
-      owner: org,
+      owner: r.owner,
       name: r.name,
       fullName: r.full_name,
       // A zero-byte repo has no commits, so an empty stats payload is real, not pending.
@@ -690,22 +714,20 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
 
   /* ── 5b. Org-level Dependabot alerts ───────────────────────────────────── */
 
-  const dependabotTask = (async () => {
+  const dependabotTask = pool(orgs, orgs.length, async (org) => {
     if (!endpoints.includes("dependencies") || cancelled()) return;
+    // Each organisation's payload restates only its own repositories, so another
+    // organisation's alerts are never cleared by this one's response.
+    const orgTargets = targets.filter((repo) => repo.owner === org).map((repo) => repo.id);
+    if (!orgTargets.length) return;
     try {
       const alerts = await api.dependabotAlerts(client, org, signal);
       // null means the token cannot read them; leave whatever we already have.
-      if (alerts) {
-        await write.writeDependabotAlerts(
-          db,
-          alerts,
-          targets.map((repo) => repo.id),
-        );
-      }
+      if (alerts) await write.writeDependabotAlerts(db, alerts, orgTargets);
     } catch (err) {
       if (!cancelled()) noteError(org, "dependencies", err);
     }
-  })();
+  });
 
   /* ── 6. Pulse (PRs and issues, via GraphQL) ────────────────────────────── */
 
@@ -777,7 +799,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   await Promise.all([statsTask, extrasTask, dependabotTask, pulseTask, ownershipTask]);
 
   await setMeta(db, "last_sync_at", new Date().toISOString());
-  await setMeta(db, "last_sync_org", org);
+  await setMeta(db, "last_sync_org", orgs.join(","));
 
   phase = cancelled() ? "cancelled" : "done";
   label = cancelled() ? "Sync cancelled" : "Sync complete";

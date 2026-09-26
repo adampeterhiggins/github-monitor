@@ -272,7 +272,7 @@ export function planMappingImport(
         ?? (typeof m.repository === "string" ? byName.get(m.repository.toLowerCase()) : undefined);
       if (!repo) {
         if (!githubId && !login) return { status: "unfilled", label };
-        return bad(`Repository ${m.repository ?? m.repoId ?? "(none)"} is not in this organisation`, value);
+        return bad(`Repository ${m.repository ?? m.repoId ?? "(none)"} is not in the listed organisations`, value);
       }
       repoId = repo.id;
       label = `${value} · only in ${repo.fullName}`;

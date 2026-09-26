@@ -1,19 +1,47 @@
 import { useState } from "react";
 import { useApp } from "../lib/state/app";
-import { importTokenFromGhCli, summariseScopes } from "../lib/auth";
+import { importTokenFromGhCli, normaliseOrgs, summariseScopes } from "../lib/auth";
 import { GitHubClient } from "../lib/github/client";
 import { listOrgs } from "../lib/github/endpoints";
-import { Button, Callout, Card, Spinner } from "../components/ui";
+import { Button, Callout, Card, Checkbox, Spinner } from "../components/ui";
 
-/** First-run: get a token, then pick the organisation to analyse. */
+/** First-run: get a token, then pick the organisations to analyse. */
 export function Setup() {
-  const { token, setToken, setLogin, setOrg } = useApp();
+  const { token, setToken, setLogin, setOrgs: saveOrgs } = useApp();
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [info, setInfo] = useState<string | null>(null);
   const [orgs, setOrgs] = useState<Array<{ login: string; avatar_url: string }> | null>(null);
   const [orgInput, setOrgInput] = useState("");
+  const [chosen, setChosen] = useState<string[]>([]);
+
+  const isChosen = (login: string) => chosen.some((o) => o.toLowerCase() === login.toLowerCase());
+  const toggle = (login: string, on: boolean) =>
+    setChosen((current) =>
+      on ? normaliseOrgs([...current, login]) : current.filter((o) => o.toLowerCase() !== login.toLowerCase()),
+    );
+  // Typed logins the membership list does not cover (outside collaborator, or an
+  // org that hides membership) still need a checkbox so they can be unticked.
+  const typed = chosen.filter((o) => !orgs?.some((m) => m.login.toLowerCase() === o.toLowerCase()));
+  const [saving, setSaving] = useState(false);
+  const [orgError, setOrgError] = useState<string | null>(null);
+  const finish = async () => {
+    setSaving(true);
+    setOrgError(null);
+    try {
+      await saveOrgs([...chosen, orgInput]);
+    } catch (err) {
+      setOrgError((err as Error)?.message ?? String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+  const addTyped = () => {
+    if (!orgInput.trim()) return;
+    toggle(orgInput, true);
+    setOrgInput("");
+  };
 
   const verifyAndSave = async (candidate: string) => {
     setBusy(true);
@@ -109,17 +137,19 @@ export function Setup() {
 
         {token ? (
           <Card>
-            <h2 className="mb-1 text-[14px] font-semibold text-ink">2. Choose an organisation</h2>
+            <h2 className="mb-1 text-[14px] font-semibold text-ink">2. Choose organisations</h2>
             <p className="mb-3 text-[12px] text-ink-secondary">
-              Every page aggregates across this organisation's repositories.
+              Every page aggregates across the chosen organisations' repositories. Pick one or
+              several; you can add or remove them later in Settings.
             </p>
 
-            {orgs && orgs.length > 0 ? (
-              <div className="mb-3 flex flex-wrap gap-1.5">
-                {orgs.map((o) => (
-                  <Button key={o.login} onClick={() => void setOrg(o.login)}>
-                    {o.login}
-                  </Button>
+            {(orgs && orgs.length > 0) || typed.length > 0 ? (
+              <div className="mb-3 grid grid-cols-2 gap-1.5">
+                {(orgs ?? []).map((o) => (
+                  <Checkbox key={o.login} label={o.login} checked={isChosen(o.login)} onChange={(on) => toggle(o.login, on)} />
+                ))}
+                {typed.map((o) => (
+                  <Checkbox key={o} label={o} checked onChange={(on) => toggle(o, on)} />
                 ))}
               </div>
             ) : null}
@@ -128,13 +158,32 @@ export function Setup() {
               <input
                 value={orgInput}
                 onChange={(e) => setOrgInput(e.target.value)}
-                placeholder="organisation login, e.g. focaldata"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") addTyped();
+                }}
+                placeholder="another organisation login, e.g. focaldata"
                 className="h-8 flex-1 rounded-md border border-hairline-strong bg-surface px-2.5 text-[12px] text-ink placeholder:text-ink-muted focus:outline-2 focus:outline-offset-0 focus:outline-accent"
               />
-              <Button size="md" variant="primary" onClick={() => void setOrg(orgInput)} disabled={!orgInput.trim()}>
-                Continue
+              <Button size="md" onClick={addTyped} disabled={!orgInput.trim()}>
+                Add
+              </Button>
+              <Button
+                size="md"
+                variant="primary"
+                // A login still in the box counts, so typing one name and pressing
+                // Continue works as it always did.
+                onClick={() => void finish()}
+                disabled={saving || (chosen.length === 0 && !orgInput.trim())}
+              >
+                {saving ? <Spinner /> : null} Continue
               </Button>
             </div>
+
+            {orgError ? (
+              <div className="mt-3">
+                <Callout tone="critical">{orgError}</Callout>
+              </div>
+            ) : null}
           </Card>
         ) : null}
       </div>

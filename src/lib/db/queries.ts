@@ -40,9 +40,22 @@ export interface RepoRow {
   included: number;
 }
 
-export async function listRepos(db: Database, owner?: string): Promise<RepoRow[]> {
+/**
+ * The name to show for a repository: bare while one organisation is in play, and
+ * `owner/name` once there are several, where two could share a name.
+ */
+export function repoLabel(repo: Pick<RepoRow, "name" | "full_name">, multipleOrgs: boolean): string {
+  return multipleOrgs ? repo.full_name : repo.name;
+}
+
+/**
+ * Repositories owned by any of `owners`, or every cached repository when omitted.
+ * Owners compare case-insensitively, as GitHub logins do, so a login typed with
+ * different casing still finds what an earlier sync stored.
+ */
+export async function listRepos(db: Database, owners?: readonly string[]): Promise<RepoRow[]> {
   const p = new Params();
-  const where = owner ? `WHERE r.owner = ${p.add(owner)}` : "";
+  const where = owners ? `WHERE LOWER(r.owner) IN ${p.in(owners.map((o) => o.toLowerCase()))}` : "";
   return db.select<RepoRow[]>(
     `SELECT r.*, COALESCE(s.included, 1) AS included
      FROM repos r
