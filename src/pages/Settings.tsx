@@ -57,7 +57,7 @@ export const SETTINGS_GROUPS: ReadonlyArray<{
   {
     label: "Organisation",
     items: [
-      { id: "organisation", label: "Organisations" },
+      { id: "organisation", label: "Organisations & users" },
       { id: "cache", label: "Cache & sign-in" },
     ],
   },
@@ -123,7 +123,10 @@ export function Settings({ sub }: { sub: SettingsSubId }) {
       );
     case "organisation":
       return (
-        <SubPage title="Organisations" subtitle="Repositories from every organisation listed here are analysed together">
+        <SubPage
+          title="Organisations & users"
+          subtitle="Repositories from every organisation or user account listed here are analysed together"
+        >
           <OrganisationCard />
         </SubPage>
       );
@@ -314,8 +317,8 @@ function OrganisationCard() {
   return (
     <Card>
       <CardHeader
-        title="Organisations"
-        subtitle="Removing one hides its repositories but keeps its cache on disk"
+        title="Organisations & users"
+        subtitle="Removing one hides its repositories but keeps its cache on disk. Other users' accounts show only their public repositories."
       />
       {notice ? (
         <div className="mb-3">
@@ -332,7 +335,7 @@ function OrganisationCard() {
               // The last organisation cannot go: with none the app has nothing to
               // show and would drop back to first-run setup.
               disabled={orgs.length === 1 || syncing}
-              title={orgs.length === 1 ? "At least one organisation is needed" : undefined}
+              title={orgs.length === 1 ? "At least one organisation or user is needed" : undefined}
               onClick={async () => {
                 await removeOrg(org);
                 await queryClient.invalidateQueries();
@@ -351,11 +354,11 @@ function OrganisationCard() {
           onKeyDown={(e) => {
             if (e.key === "Enter") void add();
           }}
-          placeholder="organisation login, e.g. focaldata"
+          placeholder="organisation or user login, e.g. focaldata"
           className="h-8 flex-1 rounded-md border border-hairline-strong bg-surface px-2.5 text-[12px] text-ink placeholder:text-ink-muted focus:outline-2 focus:outline-offset-0 focus:outline-accent"
         />
         <Button size="md" onClick={() => void add()} disabled={!orgInput.trim() || alreadyAdded || syncing || adding}>
-          {adding ? <Spinner /> : null} Add organisation
+          {adding ? <Spinner /> : null} Add
         </Button>
       </div>
     </Card>

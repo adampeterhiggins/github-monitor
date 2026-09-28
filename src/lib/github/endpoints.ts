@@ -35,6 +35,37 @@ export async function listOrgRepos(
   return client.paginate<GhRepo>(`orgs/${enc(org)}/repos?per_page=100&type=all`, { signal });
 }
 
+/** Whether a tracked login is an organisation or a personal account. */
+export type OwnerKind = "org" | "user";
+
+/**
+ * Every repository an owner holds, whether that owner is an organisation or a
+ * personal account. GitHub has no endpoint that serves both, so the organisation
+ * listing is tried first and a 404 falls through to the user listings.
+ *
+ * `users/{login}/repos` only ever returns public repositories, even to the owner,
+ * so the signed-in user's own account is listed through `user/repos` instead.
+ */
+export async function listOwnerRepos(
+  client: GitHubClient,
+  login: string,
+  signal?: AbortSignal,
+): Promise<{ kind: OwnerKind; repos: GhRepo[] }> {
+  try {
+    return { kind: "org", repos: await listOrgRepos(client, login, signal) };
+  } catch (err) {
+    if (!(err instanceof GitHubError && err.status === 404)) throw err;
+  }
+  const viewer = await client.request<{ login: string }>("user", { signal });
+  if (viewer.data?.login.toLowerCase() === login.toLowerCase()) {
+    const repos = await client.paginate<GhRepo>("user/repos?per_page=100&affiliation=owner", { signal });
+    return { kind: "user", repos };
+  }
+  // A 404 here means the login names no account at all, and is left to surface.
+  const repos = await client.paginate<GhRepo>(`users/${enc(login)}/repos?per_page=100&type=owner`, { signal });
+  return { kind: "user", repos };
+}
+
 export async function listUserRepos(
   client: GitHubClient,
   signal?: AbortSignal,
@@ -273,6 +304,30 @@ export async function dependabotAlerts(
     );
   } catch (err) {
     if (err instanceof GitHubError && (err.status === 403 || err.status === 404)) return null;
+    return null;
+  }
+}
+
+/**
+ * Open Dependabot alerts for one repository. Personal accounts have no
+ * account-wide endpoint, so their repositories are asked one at a time. The
+ * per-repository payload omits `repository`; it is filled in so the result can
+ * go through the same writer as the organisation-level alerts. Same `null`
+ * contract as {@link dependabotAlerts}.
+ */
+export async function repoDependabotAlerts(
+  client: GitHubClient,
+  repo: RepoRef & { id: number },
+  signal?: AbortSignal,
+): Promise<GhDependabotAlert[] | null> {
+  try {
+    const alerts = await client.paginate<GhDependabotAlert>(
+      `${base(repo)}/dependabot/alerts?per_page=100&state=open`,
+      { signal },
+    );
+    const repository = { id: repo.id, name: repo.name, full_name: `${repo.owner}/${repo.name}` };
+    return alerts.map((a) => ({ ...a, repository }));
+  } catch {
     return null;
   }
 }
