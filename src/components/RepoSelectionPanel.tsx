@@ -16,6 +16,7 @@ import {
   DataTable,
   Dropdown,
   DropdownRow,
+  OnlyButton,
   Spinner,
   compact,
   full,
@@ -23,25 +24,32 @@ import {
 
 const repoCount = (n: number) => `${full(n)} ${n === 1 ? "repository" : "repositories"}`;
 
-/** "all" leaves a dimension unfiltered. */
+/**
+ * Each list names the values hidden from the list, so an empty one leaves that
+ * dimension unfiltered and a value that appears later (a new language, say) is
+ * shown by default. Activity stays a single choice: its options are nested
+ * thresholds rather than categories, so ticking several would say nothing more.
+ */
 interface RepoListFilters {
-  /** Lower-cased owner. */
-  org: string;
-  selection: "all" | "selected" | "unselected";
-  visibility: "all" | "public" | "private";
-  sync: "all" | RepoSyncSummary["state"];
+  /** Lower-cased owners. */
+  org: string[];
+  selection: Array<"selected" | "unselected">;
+  visibility: Array<"public" | "private">;
+  sync: Array<RepoSyncSummary["state"]>;
   activity: "all" | "pushed" | "commits" | "mine";
-  language: string;
+  language: string[];
 }
 
 const NO_FILTERS: RepoListFilters = {
-  org: "all",
-  selection: "all",
-  visibility: "all",
-  sync: "all",
+  org: [],
+  selection: [],
+  visibility: [],
+  sync: [],
   activity: "all",
-  language: "all",
+  language: [],
 };
+
+const isFiltering = (v: RepoListFilters[keyof RepoListFilters]) => (Array.isArray(v) ? v.length > 0 : v !== "all");
 
 /** Stands in for a null language, so "None detected" is a choosable value. */
 const NO_LANGUAGE = "\u0000none";
@@ -77,6 +85,58 @@ function FilterSelect<T extends string>({
           ))}
         </div>
       )}
+    </Dropdown>
+  );
+}
+
+/** A checkbox filter whose label names what is shown; `hidden` lists the unticked values. */
+function FilterChecklist<T extends string>({
+  name,
+  hidden,
+  onChange,
+  options,
+}: {
+  name: string;
+  hidden: T[];
+  onChange: (hidden: T[]) => void;
+  options: Array<{ id: T; label: string }>;
+}) {
+  const hiddenSet = new Set(hidden);
+  const shown = options.filter((o) => !hiddenSet.has(o.id));
+  const summary =
+    shown.length === options.length
+      ? "All"
+      : shown.length === 0
+        ? "None"
+        : shown.length === 1
+          ? shown[0].label
+          : `${full(shown.length)} of ${full(options.length)}`;
+  return (
+    <Dropdown label={<span className="max-w-[200px] truncate">{`${name}: ${summary}`}</span>} width={240} align="left">
+      <div className="flex flex-col">
+        <div className="flex items-center gap-1.5 border-b border-hairline p-2">
+          <Button variant="ghost" onClick={() => onChange([])}>
+            Select all
+          </Button>
+          <Button variant="ghost" onClick={() => onChange(options.map((o) => o.id))}>
+            Clear
+          </Button>
+        </div>
+        <div className="max-h-[320px] overflow-y-auto p-1.5">
+          {options.map((o) => (
+            <div key={o.id} className="group flex items-center rounded px-1.5 py-[3px] hover:bg-wash">
+              <div className="min-w-0 flex-1">
+                <Checkbox
+                  checked={!hiddenSet.has(o.id)}
+                  onChange={(on) => onChange(on ? hidden.filter((h) => h !== o.id) : [...hidden, o.id])}
+                  label={o.label}
+                />
+              </div>
+              <OnlyButton name={o.label} onClick={() => onChange(options.filter((x) => x.id !== o.id).map((x) => x.id))} />
+            </div>
+          ))}
+        </div>
+      </div>
     </Dropdown>
   );
 }
@@ -120,7 +180,7 @@ export function RepoSelectionPanel() {
   const [filters, setFilters] = useState<RepoListFilters>(NO_FILTERS);
   const setFilter = <K extends keyof RepoListFilters>(key: K, value: RepoListFilters[K]) =>
     setFilters((f) => ({ ...f, [key]: value }));
-  const filtersActive = query.trim() !== "" || Object.values(filters).some((v) => v !== "all");
+  const filtersActive = query.trim() !== "" || Object.values(filters).some(isFiltering);
   const [notice, setNotice] = useState<string | null>(null);
   const [detecting, setDetecting] = useState(false);
   const [discovery, setDiscovery] = useState<DiscoverProgress | null>(null);
@@ -151,16 +211,11 @@ export function RepoSelectionPanel() {
         !(r.description ?? "").toLowerCase().includes(q) &&
         !(r.language ?? "").toLowerCase().includes(q)
       ) return false;
-      if (filters.org !== "all" && r.owner.toLowerCase() !== filters.org) return false;
-      if (filters.selection === "selected" && !selectedSet.has(r.id)) return false;
-      if (filters.selection === "unselected" && selectedSet.has(r.id)) return false;
-      if (filters.visibility === "private" && !r.private) return false;
-      if (filters.visibility === "public" && r.private) return false;
-      if (filters.language !== "all" && (r.language ?? NO_LANGUAGE) !== filters.language) return false;
-      if (filters.sync !== "all") {
-        const state = repoSync.summaries.get(r.id)?.state ?? "never";
-        if (filters.sync !== state) return false;
-      }
+      if (filters.org.includes(r.owner.toLowerCase())) return false;
+      if (filters.selection.includes(selectedSet.has(r.id) ? "selected" : "unselected")) return false;
+      if (filters.visibility.includes(r.private ? "private" : "public")) return false;
+      if (filters.language.includes(r.language ?? NO_LANGUAGE)) return false;
+      if (filters.sync.includes(repoSync.summaries.get(r.id)?.state ?? "never")) return false;
       if (filters.activity === "pushed" && (r.pushed_at ?? "") < activeSince) return false;
       if (filters.activity === "commits" && (allCommits.get(r.id) ?? 0) === 0) return false;
       if (filters.activity === "mine" && (myCommits.get(r.id) ?? 0) === 0) return false;
@@ -445,34 +500,34 @@ export function RepoSelectionPanel() {
 
       <div className="mb-2 flex flex-wrap items-center gap-1.5">
         {orgs.length > 1 ? (
-          <FilterSelect
+          <FilterChecklist
             name="Organisation"
-            value={filters.org}
+            hidden={filters.org}
             onChange={(v) => setFilter("org", v)}
             options={orgs.map((o) => ({ id: o.toLowerCase(), label: o }))}
           />
         ) : null}
-        <FilterSelect
+        <FilterChecklist
           name="Selection"
-          value={filters.selection}
+          hidden={filters.selection}
           onChange={(v) => setFilter("selection", v)}
           options={[
             { id: "selected", label: "Selected" },
             { id: "unselected", label: "Not selected" },
           ]}
         />
-        <FilterSelect
+        <FilterChecklist
           name="Visibility"
-          value={filters.visibility}
+          hidden={filters.visibility}
           onChange={(v) => setFilter("visibility", v)}
           options={[
             { id: "public", label: "Public" },
             { id: "private", label: "Private" },
           ]}
         />
-        <FilterSelect
+        <FilterChecklist
           name="Sync"
-          value={filters.sync}
+          hidden={filters.sync}
           onChange={(v) => setFilter("sync", v)}
           options={[
             { id: "complete", label: "Synced" },
@@ -491,9 +546,9 @@ export function RepoSelectionPanel() {
           ]}
         />
         {languages.length > 0 ? (
-          <FilterSelect
+          <FilterChecklist
             name="Language"
-            value={filters.language}
+            hidden={filters.language}
             onChange={(v) => setFilter("language", v)}
             options={[
               ...languages.map((l) => ({ id: l, label: l })),
