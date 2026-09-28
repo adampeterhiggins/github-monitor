@@ -12,6 +12,7 @@ import {
 import { commitWeekBounds } from "../lib/db/queries";
 import { useScope, useScopedQuery, type UserFilterSupport } from "../lib/hooks";
 import { Button, Dropdown, DropdownRow } from "./ui";
+import { OrgFilter } from "./OrgFilter";
 import { RepoFilter } from "./RepoFilter";
 import { UserFilter } from "./UserFilter";
 
@@ -40,6 +41,7 @@ export function FilterBar({
     <div className="flex flex-wrap items-center gap-2 border-b border-hairline bg-plane px-5 py-2.5">
       <PeriodFilter />
 
+      <OrgFilter />
       <RepoFilter />
       <UserFilter support={userFilter} />
 
