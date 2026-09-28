@@ -5,7 +5,7 @@ import { GitHubClient } from "../lib/github/client";
 import { listOrgs } from "../lib/github/endpoints";
 import { Button, Callout, Card, Checkbox, Spinner } from "../components/ui";
 
-/** First-run: get a token, then pick the organisations to analyse. */
+/** First-run: get a token, then pick the organisations and user accounts to analyse. */
 export function Setup() {
   const { token, setToken, setLogin, setOrgs: saveOrgs } = useApp();
   const [input, setInput] = useState("");
@@ -54,7 +54,8 @@ export function Setup() {
       await setToken(candidate);
       await setLogin(login);
       const list = await listOrgs(client);
-      setOrgs(list);
+      // Your own account is offered alongside your organisations, for personal repositories.
+      setOrgs([{ login, avatar_url: "" }, ...list]);
       setInfo(
         `Signed in as ${login}.` +
           (scopes.missing.length
@@ -137,10 +138,10 @@ export function Setup() {
 
         {token ? (
           <Card>
-            <h2 className="mb-1 text-[14px] font-semibold text-ink">2. Choose organisations</h2>
+            <h2 className="mb-1 text-[14px] font-semibold text-ink">2. Choose organisations and users</h2>
             <p className="mb-3 text-[12px] text-ink-secondary">
-              Every page aggregates across the chosen organisations' repositories. Pick one or
-              several; you can add or remove them later in Settings.
+              Every page aggregates across the chosen organisations' and users' repositories.
+              Pick one or several; you can add or remove them later in Settings.
             </p>
 
             {(orgs && orgs.length > 0) || typed.length > 0 ? (
@@ -161,7 +162,7 @@ export function Setup() {
                 onKeyDown={(e) => {
                   if (e.key === "Enter") addTyped();
                 }}
-                placeholder="another organisation login, e.g. focaldata"
+                placeholder="another organisation or user login, e.g. focaldata"
                 className="h-8 flex-1 rounded-md border border-hairline-strong bg-surface px-2.5 text-[12px] text-ink placeholder:text-ink-muted focus:outline-2 focus:outline-offset-0 focus:outline-accent"
               />
               <Button size="md" onClick={addTyped} disabled={!orgInput.trim()}>

@@ -208,7 +208,7 @@ export function incrementalSince(
 export interface SyncOptions {
   db: Database;
   token: string;
-  /** Every organisation to inventory; targets are drawn from all of them. */
+  /** Every organisation or user account to inventory; targets are drawn from all of them. */
   orgs: string[];
   endpoints?: EndpointId[];
   /** Restrict to these repo ids; defaults to every non-archived repo. */
@@ -328,18 +328,19 @@ interface RepoTarget {
 }
 
 /**
- * List one organisation's repositories and store them under it. Also run on its
- * own when an organisation is added, so its repositories can be chosen before
- * the first sync — a sync only fetches repositories that are already selected.
+ * List one owner's repositories — an organisation or a personal account — and
+ * store them under it. Also run on its own when an owner is added, so its
+ * repositories can be chosen before the first sync — a sync only fetches
+ * repositories that are already selected.
  */
-export async function inventoryOrg(
+export async function inventoryOwner(
   db: Database,
   client: GitHubClient,
-  org: string,
+  owner: string,
   signal?: AbortSignal,
-): Promise<GhRepo[]> {
-  const listed = await api.listOrgRepos(client, org, signal);
-  await write.writeRepos(db, org, listed);
+): Promise<{ kind: api.OwnerKind; repos: GhRepo[] }> {
+  const listed = await api.listOwnerRepos(client, owner, signal);
+  await write.writeRepos(db, owner, listed.repos);
   return listed;
 }
 
@@ -417,14 +418,17 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
 
   /* ── 1. Repository inventory ───────────────────────────────────────────── */
 
-  // Each organisation is listed and stored separately so its rows carry the right
-  // owner. One failed listing stops the run, as a single organisation always did:
+  // Each owner is listed and stored separately so its rows carry the right owner.
+  // One failed listing stops the run, as a single organisation always did:
   // carrying on would quietly sync a partial inventory.
   const repos: Array<GhRepo & { owner: string }> = [];
+  const kindOf = new Map<string, api.OwnerKind>();
   for (const org of orgs) {
     let listed: GhRepo[];
     try {
-      listed = await inventoryOrg(db, client, org, signal);
+      const inventory = await inventoryOwner(db, client, org, signal);
+      kindOf.set(org, inventory.kind);
+      listed = inventory.repos;
     } catch (err) {
       if (cancelled()) {
         return {
@@ -712,18 +716,27 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     }
   });
 
-  /* ── 5b. Org-level Dependabot alerts ───────────────────────────────────── */
+  /* ── 5b. Dependabot alerts ─────────────────────────────────────────────── */
 
   const dependabotTask = pool(orgs, orgs.length, async (org) => {
     if (!endpoints.includes("dependencies") || cancelled()) return;
-    // Each organisation's payload restates only its own repositories, so another
-    // organisation's alerts are never cleared by this one's response.
-    const orgTargets = targets.filter((repo) => repo.owner === org).map((repo) => repo.id);
-    if (!orgTargets.length) return;
+    // Each payload restates only its own repositories, so another owner's
+    // alerts are never cleared by this one's response.
+    const ownerTargets = targets.filter((repo) => repo.owner === org);
+    if (!ownerTargets.length) return;
     try {
+      if (kindOf.get(org) === "user") {
+        // Personal accounts have no account-wide endpoint; ask each repository.
+        await pool(ownerTargets, 4, async (repo) => {
+          if (cancelled()) return;
+          const alerts = await api.repoDependabotAlerts(client, repo, signal);
+          if (alerts) await write.writeDependabotAlerts(db, alerts, [repo.id]);
+        });
+        return;
+      }
       const alerts = await api.dependabotAlerts(client, org, signal);
       // null means the token cannot read them; leave whatever we already have.
-      if (alerts) await write.writeDependabotAlerts(db, alerts, orgTargets);
+      if (alerts) await write.writeDependabotAlerts(db, alerts, ownerTargets.map((repo) => repo.id));
     } catch (err) {
       if (!cancelled()) noteError(org, "dependencies", err);
     }

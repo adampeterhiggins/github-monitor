@@ -13,7 +13,7 @@ import {
 } from "../auth";
 import type { PeriodId } from "../agg/weeks";
 import type { ContributionMetric } from "../agg/metrics";
-import { inventoryOrg, type SyncProgress } from "../ingest/sync";
+import { inventoryOwner, type SyncProgress } from "../ingest/sync";
 import { GitHubClient } from "../github/client";
 import {
   applyDocumentTheme,
@@ -31,7 +31,10 @@ interface AppState {
   bootError: string | null;
 
   token: string | null;
-  /** Organisations whose repositories are listed and synced, in the order added. */
+  /**
+   * Organisations and user accounts whose repositories are listed and synced, in
+   * the order added. Which of the two each login is gets resolved at listing time.
+   */
   orgs: string[];
   /** The authenticated user's own login, for "repositories I've committed in". */
   login: string | null;
@@ -260,7 +263,7 @@ export const useApp = create<AppState>((set, get) => ({
       const client = new GitHubClient({ token });
       await Promise.all(
         added.map((org) =>
-          inventoryOrg(db, client, org).catch((err) => {
+          inventoryOwner(db, client, org).catch((err) => {
             throw new Error(`Could not list repositories for ${org}: ${(err as Error)?.message ?? String(err)}`);
           }),
         ),

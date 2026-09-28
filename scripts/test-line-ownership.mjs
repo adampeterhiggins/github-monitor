@@ -768,6 +768,48 @@ try {
     pass("sync: several organisations are inventoried and synced together");
   }
 
+  {
+    const json = (body, status = 200) =>
+      new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+    const alert = { number: 1, state: "open", created_at: "2020-01-01T00:00:00Z", dismissed_at: null, fixed_at: null,
+      dependency: { package: { ecosystem: "npm", name: "left-pad" } },
+      security_advisory: { ghsa_id: "GHSA-1", severity: "high", summary: "bad" } };
+    const requested = [];
+    const previousHttp = globalThis.__http;
+    globalThis.__http = async (url) => {
+      const path = new URL(String(url)).pathname;
+      requested.push(path);
+      if (path === "/orgs/org/repos") return json(repos.slice(0, 1));
+      if (path.startsWith("/orgs/org/dependabot")) return json([]);
+      if (path.startsWith("/orgs/")) return json({ message: "Not Found" }, 404);
+      if (path === "/user") return json({ login: "Me" });
+      if (path === "/user/repos") return json([{ ...repos[0], id: 21, full_name: "Me/secret" }]);
+      if (path === "/users/pal/repos") return json([{ ...repos[0], id: 31, full_name: "pal/public" }]);
+      if (path.startsWith("/users/")) return json({ message: "Not Found" }, 404);
+      if (path.endsWith("/dependabot/alerts")) return json([alert]);
+      if (path.endsWith("/dependency-graph/sbom")) return json({ message: "Not Found" }, 404);
+      throw new Error(`unexpected ${path}`);
+    };
+    const udb = openDb(join(work, "users.sqlite"));
+    await lib.migrate(udb);
+    const result = await lib.runSync({ db: udb, token: "fixture-token", orgs: ["org", "me", "pal"],
+      endpoints: ["dependencies"], repoIds: [1, 21, 31] });
+    assert.equal(result.reposSynced, 3, "user accounts contribute repositories alongside organisations");
+    const owners = udb.sqlite.prepare("SELECT id, owner FROM repos ORDER BY id").all().map((r) => `${r.id}:${r.owner}`);
+    assert.deepEqual(owners, ["1:org", "21:me", "31:pal"], "each repository is stored under the login that listed it");
+    assert.ok(requested.includes("/user/repos"), "your own account is listed with its private repositories");
+    assert.ok(!requested.includes("/users/me/repos"), "and not through the public-only listing");
+    const alerted = udb.sqlite.prepare("SELECT repo_id FROM dependabot_alerts ORDER BY repo_id").all().map((r) => r.repo_id);
+    assert.deepEqual(alerted, [21, 31], "user repositories get per-repository Dependabot alerts");
+    await assert.rejects(
+      lib.runSync({ db: udb, token: "fixture-token", orgs: ["org", "nobody"], endpoints: ["dependencies"], repoIds: [1] }),
+      /nobody/,
+      "a login that is neither an organisation nor a user still fails by name",
+    );
+    globalThis.__http = previousHttp;
+    pass("sync: user accounts are inventoried alongside organisations");
+  }
+
   const legacyJson = JSON.stringify({ version: 2, files: {}, coauthors: {}, report: report(revision) });
   sdb.sqlite.prepare("UPDATE line_ownership SET snapshot = ?, report = NULL, metadata = NULL, cache_ref = NULL WHERE repo_id = 2").run(legacyJson);
   scans = [];

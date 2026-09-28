@@ -31,11 +31,13 @@ On first launch the app asks for a GitHub token. If you have the `gh` CLI
 authenticated, **Import from gh CLI** lifts the token straight out of it; otherwise
 paste a PAT. It is stored via `tauri-plugin-store` in the app's data directory.
 
-Then choose one or more organisations. Every page aggregates across the selected
-repositories of all of them, and repository pickers show `owner/name` once more
-than one organisation is in play. Add or remove organisations later under
-**Settings & sync → Organisations**; adding one lists its repositories straight
-away, and removing one hides them while keeping their cached analytics on disk.
+Then choose one or more organisations or user accounts. Every page aggregates
+across the selected repositories of all of them, and repository pickers show
+`owner/name` once more than one owner is in play. Add or remove them later under
+**Settings & sync → Organisations & users**; adding one lists its repositories
+straight away, and removing one hides them while keeping their cached analytics
+on disk. Your own account includes its private repositories; another user's
+account lists only their public ones, since GitHub offers no more.
 
 ### Token scopes
 
