@@ -1,15 +1,15 @@
 {
-  "version": "0.2.9",
-  "notes": "## What's Changed\n* Analyse repositories from several organisations at once by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/15\n* Build release-local in its own worktree, off the branch, as setgist does. by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/16\n* Track a user account's repositories alongside organisations by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/17\n* Add an organisation filter beside the repository filter by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/18\n* Add search and filters to the Settings repository list by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/19\n\n\n**Full Changelog**: https://github.com/adampeterhiggins/github-monitor/compare/v0.2.5...v0.2.9\n\n## What's Changed\n* Add search and filters to the Settings repository list by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/19\n\n\n**Full Changelog**: https://github.com/adampeterhiggins/github-monitor/compare/v0.2.8...v0.2.9",
-  "pub_date": "2026-09-28T11:59:05Z",
+  "version": "0.2.10",
+  "notes": "## What's Changed\n* Analyse repositories from several organisations at once by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/15\n* Build release-local in its own worktree, off the branch, as setgist does. by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/16\n* Track a user account's repositories alongside organisations by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/17\n* Add an organisation filter beside the repository filter by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/18\n* Add search and filters to the Settings repository list by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/19\n* Turn the Settings repository filters into checkbox lists by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/20\n\n\n**Full Changelog**: https://github.com/adampeterhiggins/github-monitor/compare/v0.2.5...v0.2.10",
+  "pub_date": "2026-09-28T17:27:38Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUowTEhoWjh2cUlQbTRRanRTUEw4cFdPeGFUOEtQdThSdW9BQ3g2ZVNDdU4yTnEvQkpaaHpnRmYwdlAvclEvTjBKU2dZdlloVFhhS1hmNXRxTVNvYlFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNTk3NDYwCWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negpCdmdCZnQxOGR2WjFRZDMzOG5BZVI3dDREYUtWSnRaanpBbXM0Ui9kdmpGdFFZSThmRWxxUURkaXFIc001Rkl3aGJsOFFDVzAreUMybStERXIrekJCZz09Cg==",
-      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/595330280"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUpqZ2xNc1o2NWVBN2crcHkwbGVhcld2NWxPdXVNNlBqSjB4WUhNRUU2TWxMY2hrQWsxaENOTkkzeW15Znl1QWFHK0tFSGx3MmdlbTFNdjZ4VENJYlFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNjE2NDUwCWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negptd3NXQmdhTDZFVU02Z21uZmhsM1E5azRZY08zdFVMRDcwbjI5Y3JCQVlEYnNsUzkxWmtUeitvQUJML1QxRkgxMllIQWdHOXB2MXNSbm13bTNrSCtCQT09Cg==",
+      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/595978929"
     },
     "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUowTEhoWjh2cUlQbTRRanRTUEw4cFdPeGFUOEtQdThSdW9BQ3g2ZVNDdU4yTnEvQkpaaHpnRmYwdlAvclEvTjBKU2dZdlloVFhhS1hmNXRxTVNvYlFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNTk3NDYwCWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negpCdmdCZnQxOGR2WjFRZDMzOG5BZVI3dDREYUtWSnRaanpBbXM0Ui9kdmpGdFFZSThmRWxxUURkaXFIc001Rkl3aGJsOFFDVzAreUMybStERXIrekJCZz09Cg==",
-      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/595330280"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUpqZ2xNc1o2NWVBN2crcHkwbGVhcld2NWxPdXVNNlBqSjB4WUhNRUU2TWxMY2hrQWsxaENOTkkzeW15Znl1QWFHK0tFSGx3MmdlbTFNdjZ4VENJYlFjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNjE2NDUwCWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negptd3NXQmdhTDZFVU02Z21uZmhsM1E5azRZY08zdFVMRDcwbjI5Y3JCQVlEYnNsUzkxWmtUeitvQUJML1QxRkgxMllIQWdHOXB2MXNSbm13bTNrSCtCQT09Cg==",
+      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/595978929"
     }
   }
 }
