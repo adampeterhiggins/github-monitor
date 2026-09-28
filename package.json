@@ -16,6 +16,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "postinstall": "node scripts/worktree-scratch.mjs >/dev/null",
     "typecheck": "tsc --noEmit",
     "verify:aggregation": "node scripts/verify-aggregation.mjs",
     "test:queries": "node scripts/test-queries.mjs",

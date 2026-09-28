@@ -12,7 +12,19 @@ TAG           := v$(VERSION)
 REPO       := adampeterhiggins/github-monitor
 TAP_REPO   := adampeterhiggins/homebrew-tap
 APP_NAME   := GitHub Monitor
-BUNDLE_DIR := src-tauri/target/universal-apple-darwin/release/bundle
+
+# A linked worktree builds out of its own way (scripts/worktree-scratch.mjs):
+# Cargo's intermediate artifacts, the gigabytes, go to one cache every worktree
+# shares, and the final binaries and bundles stay in the worktree under
+# node_modules/, the one ignored path T3 Code's automatic cleanup will delete.
+# The script also syncs the Cargo config that tells cargo so. The main checkout
+# and the release worktree keep src-tauri/target. A CARGO_TARGET_DIR or
+# CARGO_BUILD_BUILD_DIR you set yourself wins.
+SCRATCH          := $(shell node scripts/worktree-scratch.mjs 2>/dev/null)
+SHARED_BUILD_DIR := $(HOME)/Library/Caches/github-monitor/cargo-build
+TARGET     := $(or $(CARGO_TARGET_DIR),$(if $(SCRATCH),$(SCRATCH)/target,src-tauri/target))
+BUNDLE_DIR := $(TARGET)/universal-apple-darwin/release/bundle
+FRONTEND_DIST := node_modules/.cache/github-monitor/dist
 TARBALL    := $(BUNDLE_DIR)/macos/$(APP_NAME).app.tar.gz
 KEY_FILE   := .updater/signing.key
 
@@ -30,7 +42,7 @@ SUBMAKE := $(MAKE) --no-print-directory -f $(abspath $(firstword $(MAKEFILE_LIST
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install deps dev check build app clean version keygen secrets \
+.PHONY: help install deps dev check build app clean clean-shared version keygen secrets \
         check-version ensure-version set-version prepare-release tag-version \
         release release-local publish-local verify-release watch runs doctor tap-update
 
@@ -156,9 +168,12 @@ app: build ## Build and install into /Applications
 	echo "Verified installed version $$INSTALLED"
 
 clean: ## Remove build output
-	rm -rf dist
-	rm -rf src-tauri/target/universal-apple-darwin/release/bundle
+	rm -rf dist "$(FRONTEND_DIST)" "$(BUNDLE_DIR)"
 	rm -f latest.json
+
+clean-shared: ## Remove the Cargo cache worktrees share (the next worktree build starts cold)
+	@du -sh "$(SHARED_BUILD_DIR)" 2>/dev/null || echo "No shared cache at $(SHARED_BUILD_DIR)"
+	rm -rf "$(SHARED_BUILD_DIR)"
 
 ##@ Versioning
 
@@ -446,7 +461,7 @@ release-local: signing-key ## Full release without CI of this checkout's commit 
 	cp "$(abspath $(firstword $(MAKEFILE_LIST)))" "$$MK" || exit 1; \
 	KEY="$${TAURI_SIGNING_PRIVATE_KEY:-$$(cat "$(KEY_FILE)")}"; \
 	echo "==> Releasing $$(git log -1 --format='%h %s' "$$COMMIT") in $$WT"; \
-	( cd "$$WT" && TAURI_SIGNING_PRIVATE_KEY="$$KEY" \
+	( cd "$$WT" && GITHUB_MONITOR_WORKTREE_SCRATCH=0 TAURI_SIGNING_PRIVATE_KEY="$$KEY" \
 		$(MAKE) --no-print-directory -f "$$MK" release-local-here REF= OFFBRANCH=1 FORCE=$(FORCE) YES=$(YES) PUSH=$(PUSH) ); \
 	RC=$$?; \
 	rm -f "$$MK"; \
