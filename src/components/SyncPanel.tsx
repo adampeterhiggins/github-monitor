@@ -11,7 +11,7 @@ import {
 } from "../lib/ingest/sync";
 import { outstandingWork } from "../lib/db/queries";
 import { describeOrgs } from "../lib/auth";
-import { Button, Callout, Card, CardHeader, Checkbox, DataTable, Spinner, full } from "./ui";
+import { Button, Callout, Card, CardHeader, Checkbox, DataTable, OnlyButton, Spinner, full } from "./ui";
 
 const ENDPOINT_KEY = "github-monitor.syncEndpoints";
 const ARCHIVED_KEY = "github-monitor.syncIncludeArchived";
@@ -275,7 +275,7 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
             ) : null}
             <div className="grid grid-cols-1 gap-x-4 sm:grid-cols-2">
               {ALL_ENDPOINTS.map((endpoint) => (
-                <div key={endpoint} className="flex items-center gap-1 py-[3px]">
+                <div key={endpoint} className="group flex items-center rounded px-1.5 py-[3px] hover:bg-wash">
                   <div className="min-w-0 flex-1">
                     <Checkbox
                       checked={selectedEndpoints.includes(endpoint)}
@@ -290,14 +290,9 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
                       label={ENDPOINT_LABELS[endpoint]}
                     />
                   </div>
-                  <Button
-                    variant="ghost"
-                    disabled={syncing}
-                    title={`Sync only ${ENDPOINT_LABELS[endpoint]}`}
-                    onClick={() => applyEndpoints([endpoint])}
-                  >
-                    Only
-                  </Button>
+                  {syncing ? null : (
+                    <OnlyButton name={ENDPOINT_LABELS[endpoint]} onClick={() => applyEndpoints([endpoint])} />
+                  )}
                 </div>
               ))}
             </div>
