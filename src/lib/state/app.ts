@@ -44,6 +44,14 @@ interface AppState {
   /** Repo ids the analytics are scoped to. Empty means "nothing selected". */
   selectedRepoIds: number[];
   /**
+   * Lower-cased organisations the organisation filter has switched off. Their
+   * repositories drop out of the repository filter and the analytics, but stay
+   * in `selectedRepoIds`, so switching an organisation back on restores exactly
+   * what was selected in it. Stored as the hidden set so a newly added
+   * organisation starts visible.
+   */
+  hiddenOrgs: string[];
+  /**
    * Contributor logins the analytics are scoped to.
    *
    * Note the deliberate asymmetry with `selectedRepoIds`: empty here means
@@ -82,6 +90,7 @@ interface AppState {
   refreshRepos: () => Promise<void>;
   setSelectedRepos: (ids: number[]) => Promise<void>;
   toggleRepo: (id: number) => Promise<void>;
+  setHiddenOrgs: (orgs: string[]) => void;
   selectAllRepos: (filter?: (r: RepoRow) => boolean) => Promise<void>;
   setSelectedLogins: (logins: string[]) => void;
   toggleLogin: (login: string) => void;
@@ -104,6 +113,25 @@ const PERIOD_KEY = "github-monitor.period";
 const CUSTOM_RANGE_KEY = "github-monitor.customRange";
 const LOGINS_KEY = "github-monitor.logins";
 const EXCLUDE_FORKS_KEY = "github-monitor.excludeForks";
+const HIDDEN_ORGS_KEY = "github-monitor.hiddenOrgs";
+
+function readStoredHiddenOrgs(): string[] {
+  try {
+    const raw = localStorage.getItem(HIDDEN_ORGS_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredHiddenOrgs(orgs: string[]): void {
+  try {
+    localStorage.setItem(HIDDEN_ORGS_KEY, JSON.stringify(orgs));
+  } catch {
+    // Blocked storage: the choice lasts for this session.
+  }
+}
 
 function readStoredExcludeForks(): boolean {
   try {
@@ -210,6 +238,7 @@ export const useApp = create<AppState>((set, get) => ({
 
   repos: [],
   selectedRepoIds: [],
+  hiddenOrgs: readStoredHiddenOrgs(),
   selectedLogins: readStoredLogins(),
 
   period: readStoredPeriod(),
@@ -270,7 +299,10 @@ export const useApp = create<AppState>((set, get) => ({
       );
     }
     await persistOrgs(orgs);
-    set({ orgs });
+    const kept = new Set(orgs.map((o) => o.toLowerCase()));
+    const hiddenOrgs = get().hiddenOrgs.filter((o) => kept.has(o));
+    writeStoredHiddenOrgs(hiddenOrgs);
+    set({ orgs, hiddenOrgs });
     if (orgs.length) await get().refreshRepos();
     else set({ repos: [], selectedRepoIds: [] });
   },
@@ -306,6 +338,12 @@ export const useApp = create<AppState>((set, get) => ({
     const current = get().selectedRepoIds;
     const next = current.includes(id) ? current.filter((x) => x !== id) : [...current, id];
     await get().setSelectedRepos(next);
+  },
+
+  setHiddenOrgs: (orgs) => {
+    const hiddenOrgs = [...new Set(orgs.map((o) => o.toLowerCase()))];
+    writeStoredHiddenOrgs(hiddenOrgs);
+    set({ hiddenOrgs });
   },
 
   setExcludeForks: async (exclude) => {

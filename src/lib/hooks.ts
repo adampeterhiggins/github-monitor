@@ -1,8 +1,9 @@
+import { useMemo } from "react";
 import { keepPreviousData, useQuery, type UseQueryResult } from "@tanstack/react-query";
 import type Database from "@tauri-apps/plugin-sql";
 import { useApp } from "./state/app";
 import { dayKey, resolvePeriod, type ResolvedRange } from "./agg/weeks";
-import type { Logins } from "./db/queries";
+import type { Logins, RepoRow } from "./db/queries";
 
 /**
  * How completely a page can honour the contributor filter.
@@ -38,13 +39,41 @@ export interface Scope {
 }
 
 /**
+ * Repositories in organisations the organisation filter leaves switched on. The
+ * filter only exists with several organisations, so with one it never hides
+ * anything — otherwise removing the others could strand a hidden last one.
+ */
+export function useOrgVisibleRepos(): RepoRow[] {
+  const repos = useApp((s) => s.repos);
+  const orgCount = useApp((s) => s.orgs.length);
+  const hiddenOrgs = useApp((s) => s.hiddenOrgs);
+  return useMemo(() => {
+    if (orgCount < 2 || hiddenOrgs.length === 0) return repos;
+    const hidden = new Set(hiddenOrgs);
+    return repos.filter((r) => !hidden.has(r.owner.toLowerCase()));
+  }, [repos, orgCount, hiddenOrgs]);
+}
+
+/** Selected repositories, less those in organisations filtered out. */
+export function useScopedRepoIds(): number[] {
+  const selected = useApp((s) => s.selectedRepoIds);
+  const visible = useOrgVisibleRepos();
+  const allRepos = useApp((s) => s.repos);
+  return useMemo(() => {
+    if (visible === allRepos) return selected;
+    const ids = new Set(visible.map((r) => r.id));
+    return selected.filter((id) => ids.has(id));
+  }, [selected, visible, allRepos]);
+}
+
+/**
  * The slice every page renders against: selected repositories, selected
  * contributors, and the resolved date range. Keeping it in one place is what makes
  * the numbers agree across pages.
  */
 export function useScope(): Scope {
   const db = useApp((s) => s.db);
-  const repoIds = useApp((s) => s.selectedRepoIds);
+  const repoIds = useScopedRepoIds();
   const selectedLogins = useApp((s) => s.selectedLogins);
   const period = useApp((s) => s.period);
   const customFrom = useApp((s) => s.customFrom);

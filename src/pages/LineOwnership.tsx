@@ -16,7 +16,7 @@ import { normalizeRepoHistory, type NormalizedRepoHistory, type RepoHistoryData 
 import { EMPTY_ACCOUNT_INDEX } from "../lib/ownershipIdentity";
 import { subscribeOwnership } from "../lib/ownershipEvents";
 import { measure } from "../lib/perf";
-import { useScope } from "../lib/hooks";
+import { useScope, useScopedRepoIds } from "../lib/hooks";
 import { formatDate } from "../lib/agg/weeks";
 
 // Stable references keep useQueries from re-running its combine on every render.
@@ -45,7 +45,7 @@ const HISTORY_REFRESH_MS = 1500;
 
 export function LineOwnership() {
   const db = useApp((s) => s.db);
-  const selectedRepoIds = useApp((s) => s.selectedRepoIds);
+  const selectedRepoIds = useScopedRepoIds();
   const syncing = useApp((s) => s.syncing);
   const botPatterns = useApp((s) => s.botPatterns);
   const selectedLogins = useApp((s) => s.selectedLogins);

@@ -4,86 +4,81 @@ import { Button, Checkbox, Dropdown, OnlyButton, full } from "./ui";
 
 /**
  * Organisation filter, shown only when more than one organisation or user is
- * connected. It has no state of its own: it reads and writes the repository
- * selection, so an organisation is ticked when all of its repositories are and
- * every page keeps scoping by repository alone.
+ * connected. Switching an organisation off removes its repositories from the
+ * repository filter and from every page, without touching which of them are
+ * selected, so switching it back on restores the same selection.
  */
 export function OrgFilter() {
   const orgs = useApp((s) => s.orgs);
   const allRepos = useApp((s) => s.repos);
   const excludeForks = useApp((s) => s.excludeForks);
   const selected = useApp((s) => s.selectedRepoIds);
-  const setSelectedRepos = useApp((s) => s.setSelectedRepos);
+  const hiddenOrgs = useApp((s) => s.hiddenOrgs);
+  const setHiddenOrgs = useApp((s) => s.setHiddenOrgs);
 
-  const repoIdsByOrg = useMemo(() => {
-    const byOrg = new Map(orgs.map((o) => [o.toLowerCase(), [] as number[]]));
+  const counts = useMemo(() => {
+    const selectedSet = new Set(selected);
+    const byOrg = new Map(orgs.map((o) => [o.toLowerCase(), { total: 0, selected: 0 }]));
     for (const r of allRepos) {
       if (excludeForks && r.fork) continue;
-      byOrg.get(r.owner.toLowerCase())?.push(r.id);
+      const c = byOrg.get(r.owner.toLowerCase());
+      if (!c) continue;
+      c.total++;
+      if (selectedSet.has(r.id)) c.selected++;
     }
     return byOrg;
-  }, [orgs, allRepos, excludeForks]);
-
-  const selectedSet = useMemo(() => new Set(selected), [selected]);
-
-  const stateOf = (org: string) => {
-    const ids = repoIdsByOrg.get(org.toLowerCase()) ?? [];
-    const count = ids.filter((id) => selectedSet.has(id)).length;
-    return { ids, count, all: ids.length > 0 && count === ids.length, some: count > 0 };
-  };
+  }, [orgs, allRepos, excludeForks, selected]);
 
   if (orgs.length < 2) return null;
 
-  const states = orgs.map((org) => ({ org, ...stateOf(org) }));
-  const fullyIncluded = states.filter((s) => s.all);
-  const touched = states.filter((s) => s.some);
+  const hidden = new Set(hiddenOrgs);
+  const shown = orgs.filter((o) => !hidden.has(o.toLowerCase()));
 
   const label = (() => {
-    if (touched.length === 0) return "No organisations";
-    if (fullyIncluded.length === orgs.length) return `All ${full(orgs.length)} organisations`;
-    if (touched.length === 1) return touched[0].all ? touched[0].org : `${touched[0].org} (partial)`;
-    return `${full(touched.length)} of ${full(orgs.length)} organisations`;
+    if (shown.length === 0) return "No organisations";
+    if (shown.length === orgs.length) return `All ${full(orgs.length)} organisations`;
+    if (shown.length === 1) return shown[0];
+    return `${full(shown.length)} of ${full(orgs.length)} organisations`;
   })();
 
-  const apply = (ids: number[]) => void setSelectedRepos(ids);
-
-  const toggle = (ids: number[], checked: boolean) => {
-    const drop = new Set(ids);
-    apply(checked ? [...new Set([...selected, ...ids])] : selected.filter((id) => !drop.has(id)));
+  const toggle = (org: string, on: boolean) => {
+    const key = org.toLowerCase();
+    setHiddenOrgs(on ? hiddenOrgs.filter((o) => o !== key) : [...hiddenOrgs, key]);
   };
 
   return (
     <Dropdown label={<span className="max-w-[200px] truncate">{label}</span>} width={280} align="left">
       <div className="flex flex-col">
         <div className="flex items-center gap-1.5 border-b border-hairline p-2">
-          <Button variant="ghost" onClick={() => apply([...repoIdsByOrg.values()].flat())}>
+          <Button variant="ghost" onClick={() => setHiddenOrgs([])}>
             Select all
           </Button>
-          <Button variant="ghost" onClick={() => apply([])}>
+          <Button variant="ghost" onClick={() => setHiddenOrgs(orgs)}>
             Clear
           </Button>
         </div>
         <div className="overflow-y-auto p-1.5" style={{ maxHeight: 360 }}>
-          {states.map((s) => (
-            <div key={s.org} className="group flex items-center rounded px-1.5 py-[3px] hover:bg-wash">
-              <div className="min-w-0 flex-1">
-                <Checkbox
-                  checked={s.all}
-                  indeterminate={s.some}
-                  disabled={s.ids.length === 0}
-                  onChange={(checked) => toggle(s.ids, checked)}
-                  label={s.org}
-                />
+          {orgs.map((org) => {
+            const c = counts.get(org.toLowerCase()) ?? { total: 0, selected: 0 };
+            return (
+              <div key={org} className="group flex items-center rounded px-1.5 py-[3px] hover:bg-wash">
+                <div className="min-w-0 flex-1">
+                  <Checkbox
+                    checked={!hidden.has(org.toLowerCase())}
+                    onChange={(on) => toggle(org, on)}
+                    label={org}
+                  />
+                </div>
+                <OnlyButton name={org} onClick={() => setHiddenOrgs(orgs.filter((o) => o !== org))} />
+                <span
+                  className="ml-2 shrink-0 text-[10px] tabular text-ink-muted"
+                  title={`${full(c.selected)} of ${full(c.total)} repositories selected`}
+                >
+                  {full(c.selected)}/{full(c.total)}
+                </span>
               </div>
-              <OnlyButton name={s.org} onClick={() => apply(s.ids)} />
-              <span
-                className="ml-2 shrink-0 text-[10px] tabular text-ink-muted"
-                title={`${full(s.count)} of ${full(s.ids.length)} repositories selected`}
-              >
-                {full(s.count)}/{full(s.ids.length)}
-              </span>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </Dropdown>

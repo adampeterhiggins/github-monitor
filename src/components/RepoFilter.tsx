@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useApp } from "../lib/state/app";
-import { useScope, useScopedQuery } from "../lib/hooks";
+import { useOrgVisibleRepos, useScope, useScopedQuery, useScopedRepoIds } from "../lib/hooks";
 import { activeRepoIds, myRepoIds, useRepoSelectionData } from "../lib/repoSelection";
 import { commitsByRepo, repoLabel } from "../lib/db/queries";
 import { formatDate } from "../lib/agg/weeks";
@@ -25,10 +25,11 @@ const SORT_KEY = "github-monitor.repoSort";
 const HIDE_KEY = "github-monitor.repoHideInactive";
 
 export function RepoFilter() {
-  const allRepos = useApp((s) => s.repos);
+  const allRepos = useOrgVisibleRepos();
   const excludeForks = useApp((s) => s.excludeForks);
   const repos = useMemo(() => (excludeForks ? allRepos.filter((r) => !r.fork) : allRepos), [allRepos, excludeForks]);
-  const selected = useApp((s) => s.selectedRepoIds);
+  const selected = useScopedRepoIds();
+  const selectedEverywhere = useApp((s) => s.selectedRepoIds);
   const setSelectedRepos = useApp((s) => s.setSelectedRepos);
   const { myCommits, login } = useRepoSelectionData();
   const scope = useScope();
@@ -121,7 +122,11 @@ export function RepoFilter() {
     return `${full(selected.length)} of ${full(repos.length)} repositories`;
   })();
 
-  const apply = (ids: number[]) => void setSelectedRepos(ids);
+  /** Replaces the selection within the visible organisations, leaving hidden ones as they were. */
+  const apply = (ids: number[]) => {
+    const inView = new Set(allRepos.map((r) => r.id));
+    void setSelectedRepos([...ids, ...selectedEverywhere.filter((id) => !inView.has(id))]);
+  };
 
   const toggleVisible = (checked: boolean) => {
     const visibleIds = new Set(visible.map((r) => r.id));
@@ -234,8 +239,10 @@ export function RepoFilter() {
           onApply={(values) => {
             // Ids can outlive the repositories they point at, so drop any that no
             // longer exist rather than carrying phantom selections forward.
-            const known = new Set(repos.map((r) => r.id));
-            apply(values.map(Number).filter((id) => known.has(id)));
+            // Restored whole, hidden organisations included: a saved selection is
+            // a complete selection, not an edit to the visible part of one.
+            const known = new Set(useApp.getState().repos.map((r) => r.id));
+            void setSelectedRepos(values.map(Number).filter((id) => known.has(id)));
           }}
         />
 

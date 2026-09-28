@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { useApp, startThemeSync } from "./lib/state/app";
 import { useUpdates } from "./lib/state/updates";
+import { useOrgVisibleRepos, useScopedRepoIds } from "./lib/hooks";
 import { syncProblems } from "./lib/db/queries";
 import { describeOrgs } from "./lib/auth";
 import { UpdateBadge } from "./components/UpdatePanel";
@@ -189,8 +190,8 @@ function Sidebar({
   const orgs = useApp((s) => s.orgs);
   const lastSyncAt = useApp((s) => s.lastSyncAt);
   const syncing = useApp((s) => s.syncing);
-  const repos = useApp((s) => s.repos);
-  const selected = useApp((s) => s.selectedRepoIds);
+  const repos = useOrgVisibleRepos();
+  const selected = useScopedRepoIds();
 
   return (
     <nav className="flex w-[212px] shrink-0 flex-col border-r border-hairline bg-sidebar">
