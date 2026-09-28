@@ -1,7 +1,7 @@
 # GitHub Monitor
 
 A native macOS app that gives you GitHub's **Insights** analytics across a whole
-organisation instead of one repository at a time. Every page GitHub offers per repo
+organisation — or several at once — instead of one repository at a time. Every page GitHub offers per repo
 is here, with **repository turned into a filter** you slice by — plus a
 **contributor filter**, which GitHub has no equivalent of.
 
@@ -30,6 +30,12 @@ npm run tauri build    # produce .app + .dmg in src-tauri/target/release/bundle
 On first launch the app asks for a GitHub token. If you have the `gh` CLI
 authenticated, **Import from gh CLI** lifts the token straight out of it; otherwise
 paste a PAT. It is stored via `tauri-plugin-store` in the app's data directory.
+
+Then choose one or more organisations. Every page aggregates across the selected
+repositories of all of them, and repository pickers show `owner/name` once more
+than one organisation is in play. Add or remove organisations later under
+**Settings & sync → Organisations**; adding one lists its repositories straight
+away, and removing one hides them while keeping their cached analytics on disk.
 
 ### Token scopes
 

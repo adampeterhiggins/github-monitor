@@ -10,6 +10,7 @@ import {
   type SyncMode,
 } from "../lib/ingest/sync";
 import { outstandingWork } from "../lib/db/queries";
+import { describeOrgs } from "../lib/auth";
 import { Button, Callout, Card, CardHeader, Checkbox, DataTable, Spinner, full } from "./ui";
 
 const ENDPOINT_KEY = "github-monitor.syncEndpoints";
@@ -33,7 +34,7 @@ function storedEndpoints(): EndpointId[] {
  * a visible warm/collect breakdown that looks like a hang.
  */
 export function SyncPanel({ compact: compactView = false }: { compact?: boolean }) {
-  const { db, token, org, sync, syncing, setSync, setSyncing, reloadSyncTime, refreshRepos } = useApp();
+  const { db, token, orgs, sync, syncing, setSync, setSyncing, reloadSyncTime, refreshRepos } = useApp();
   const abortRef = useRef<AbortController | null>(null);
   const queryClient = useQueryClient();
   const [selectedEndpoints, setSelectedEndpoints] = useState<EndpointId[]>(storedEndpoints);
@@ -63,7 +64,7 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
   });
 
   const start = useCallback(async (mode: SyncMode) => {
-    if (!db || !token || !org) return;
+    if (!db || !token || !orgs.length) return;
     const controller = new AbortController();
     abortRef.current = controller;
     setFatal(null);
@@ -72,7 +73,7 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
       await runSync({
         db,
         token,
-        org,
+        orgs,
         mode,
         endpoints: selectedEndpoints,
         repoIds: selectedRepoIds,
@@ -91,7 +92,7 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
       setSyncing(false);
       abortRef.current = null;
     }
-  }, [db, token, org, selectedEndpoints, selectedRepoIds, includeArchived, setSync, setSyncing, refreshRepos, reloadSyncTime, queryClient, work]);
+  }, [db, token, orgs, selectedEndpoints, selectedRepoIds, includeArchived, setSync, setSyncing, refreshRepos, reloadSyncTime, queryClient, work]);
 
   const cancel = () => abortRef.current?.abort();
 
@@ -103,7 +104,7 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
     localStorage.setItem(ARCHIVED_KEY, String(value));
     setIncludeArchived(value);
   };
-  const canSync = Boolean(db && token && org && selectedRepoIds.length > 0 && selectedEndpoints.length > 0);
+  const canSync = Boolean(db && token && orgs.length && selectedRepoIds.length > 0 && selectedEndpoints.length > 0);
 
   const grouped = useMemo(() => groupErrors(sync?.errors ?? []), [sync?.errors]);
 
@@ -117,7 +118,7 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
       <CardHeader
         title="Sync"
         subtitle={
-          org ? `Pulling analytics for ${org} into the local cache` : "Choose an organisation first"
+          orgs.length ? `Pulling analytics for ${describeOrgs(orgs)} into the local cache` : "Choose an organisation first"
         }
         actions={
           syncing ? (

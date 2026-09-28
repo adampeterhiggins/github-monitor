@@ -57,7 +57,7 @@ export const SETTINGS_GROUPS: ReadonlyArray<{
   {
     label: "Organisation",
     items: [
-      { id: "organisation", label: "Organisation" },
+      { id: "organisation", label: "Organisations" },
       { id: "cache", label: "Cache & sign-in" },
     ],
   },
@@ -123,7 +123,7 @@ export function Settings({ sub }: { sub: SettingsSubId }) {
       );
     case "organisation":
       return (
-        <SubPage title="Organisation" subtitle="Switching keeps the existing cache on disk">
+        <SubPage title="Organisations" subtitle="Repositories from every organisation listed here are analysed together">
           <OrganisationCard />
         </SubPage>
       );
@@ -285,35 +285,77 @@ function SyncProblemsCard() {
 }
 
 function OrganisationCard() {
-  const { org, setOrg } = useApp();
+  const { orgs, repos, syncing, addOrg, removeOrg } = useApp();
   const queryClient = useQueryClient();
-  const [orgInput, setOrgInput] = useState(org ?? "");
-  const [notice, setNotice] = useState<string | null>(null);
+  const [orgInput, setOrgInput] = useState("");
+  const [notice, setNotice] = useState<{ tone?: "critical"; text: string } | null>(null);
+  const [adding, setAdding] = useState(false);
+
+  const repoCount = (org: string) => repos.filter((r) => r.owner.toLowerCase() === org.toLowerCase()).length;
+  const alreadyAdded = orgs.some((o) => o.toLowerCase() === orgInput.trim().toLowerCase());
+
+  const add = async () => {
+    const org = orgInput.trim();
+    if (!org || alreadyAdded) return;
+    setAdding(true);
+    setNotice(null);
+    try {
+      await addOrg(org);
+      await queryClient.invalidateQueries();
+      setOrgInput("");
+      setNotice({ text: `Added ${org}. Its repositories are selected; run a sync to populate them.` });
+    } catch (err) {
+      setNotice({ tone: "critical", text: (err as Error)?.message ?? String(err) });
+    } finally {
+      setAdding(false);
+    }
+  };
 
   return (
     <Card>
-      <CardHeader title="Organisation" subtitle="Switching keeps the existing cache on disk" />
+      <CardHeader
+        title="Organisations"
+        subtitle="Removing one hides its repositories but keeps its cache on disk"
+      />
       {notice ? (
         <div className="mb-3">
-          <Callout>{notice}</Callout>
+          <Callout tone={notice.tone}>{notice.text}</Callout>
         </div>
       ) : null}
+      <ul className="mb-3 divide-y divide-hairline rounded-md border border-hairline">
+        {orgs.map((org) => (
+          <li key={org} className="flex items-center gap-2 px-2.5 py-1.5 text-[12px]">
+            <span className="min-w-0 flex-1 truncate font-medium text-ink">{org}</span>
+            <span className="tabular text-ink-muted">{full(repoCount(org))} repos</span>
+            <Button
+              variant="ghost"
+              // The last organisation cannot go: with none the app has nothing to
+              // show and would drop back to first-run setup.
+              disabled={orgs.length === 1 || syncing}
+              title={orgs.length === 1 ? "At least one organisation is needed" : undefined}
+              onClick={async () => {
+                await removeOrg(org);
+                await queryClient.invalidateQueries();
+                setNotice({ text: `Removed ${org}. Its cached analytics stay on disk if you add it back.` });
+              }}
+            >
+              Remove
+            </Button>
+          </li>
+        ))}
+      </ul>
       <div className="flex gap-2">
         <input
           value={orgInput}
           onChange={(e) => setOrgInput(e.target.value)}
-          className="h-8 flex-1 rounded-md border border-hairline-strong bg-surface px-2.5 text-[12px] text-ink focus:outline-2 focus:outline-offset-0 focus:outline-accent"
-        />
-        <Button
-          size="md"
-          onClick={async () => {
-            await setOrg(orgInput);
-            await queryClient.invalidateQueries();
-            setNotice(`Switched to ${orgInput}. Run a sync to populate it.`);
+          onKeyDown={(e) => {
+            if (e.key === "Enter") void add();
           }}
-          disabled={!orgInput.trim() || orgInput === org}
-        >
-          Switch
+          placeholder="organisation login, e.g. focaldata"
+          className="h-8 flex-1 rounded-md border border-hairline-strong bg-surface px-2.5 text-[12px] text-ink placeholder:text-ink-muted focus:outline-2 focus:outline-offset-0 focus:outline-accent"
+        />
+        <Button size="md" onClick={() => void add()} disabled={!orgInput.trim() || alreadyAdded || syncing || adding}>
+          {adding ? <Spinner /> : null} Add organisation
         </Button>
       </div>
     </Card>

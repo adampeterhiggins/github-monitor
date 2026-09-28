@@ -6,7 +6,7 @@ import { discoverAuthorRepos, type DiscoverProgress } from "../lib/ingest/discov
 import { runPreSync, type PreSyncProgress } from "../lib/ingest/presync";
 import { GitHubClient } from "../lib/github/client";
 import { formatDate } from "../lib/agg/weeks";
-import type { RepoRow } from "../lib/db/queries";
+import { repoLabel, type RepoRow } from "../lib/db/queries";
 import {
   Button,
   Callout,
@@ -34,6 +34,7 @@ export function RepoSelectionPanel() {
   const repos = useMemo(() => (excludeForks ? allRepos.filter((r) => !r.fork) : allRepos), [allRepos, excludeForks]);
   const forkCount = useMemo(() => allRepos.filter((r) => r.fork).length, [allRepos]);
   const selected = useApp((s) => s.selectedRepoIds);
+  const multipleOrgs = useApp((s) => s.orgs.length > 1);
   const setSelectedRepos = useApp((s) => s.setSelectedRepos);
   const token = useApp((s) => s.token);
   const login = useApp((s) => s.login);
@@ -383,7 +384,7 @@ export function RepoSelectionPanel() {
             header: "Repository",
             render: (r: RepoRow) => (
               <span className="flex min-w-0 items-center gap-1.5">
-                <span className="truncate">{r.name}</span>
+                <span className="truncate">{repoLabel(r, multipleOrgs)}</span>
                 {r.archived ? (
                   <span className="shrink-0 rounded border border-hairline-strong px-1 text-[9px] uppercase text-ink-muted">
                     archived
@@ -399,7 +400,7 @@ export function RepoSelectionPanel() {
                 ) : null}
               </span>
             ),
-            sortValue: (r: RepoRow) => r.name,
+            sortValue: (r: RepoRow) => repoLabel(r, multipleOrgs),
           },
           {
             key: "mine",

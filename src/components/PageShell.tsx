@@ -61,7 +61,7 @@ export function PageShell({
             }
             body={
               !lastSyncAt || repos.length === 0
-                ? "Run a sync from Settings & sync to pull this organisation's analytics into the local cache."
+                ? "Run a sync from Settings & sync to pull your organisations' analytics into the local cache."
                 : "Pick at least one repository in the filter above."
             }
           />

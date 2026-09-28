@@ -520,7 +520,7 @@ try {
   assert.equal(plan.rows[1].input.matchValue, "new@example.com", "imported values are normalized");
   assert.match(plan.rows[2].reason, /twice/);
   assert.match(plan.rows[3].reason, /account ID/);
-  assert.match(plan.rows[4].reason, /not in this organisation/);
+  assert.match(plan.rows[4].reason, /not in the listed organisations/);
   assert.match(lib.planMappingImport("{", savedMappings, reposHere).error, /not JSON/);
   assert.match(lib.planMappingImport(JSON.stringify({ format: "other", mappings: [] }), savedMappings, reposHere).error, /not a contributor mappings file/);
   assert.match(lib.planMappingImport(JSON.stringify({ ...exported, version: 99 }), savedMappings, reposHere).error, /newer version/);
@@ -671,7 +671,7 @@ try {
     return { report: JSON.stringify(report(args.revision)), metadata: JSON.stringify({ version: 2, revision: args.revision, options: options0 }), cacheRef: `head-${++refs}` };
   };
   setScanner(scanner);
-  const syncOptions = { db: sdb, token: "fixture-token", org: "org", endpoints: ["line_ownership"], repoIds: [1, 2, 3] };
+  const syncOptions = { db: sdb, token: "fixture-token", orgs: ["org"], endpoints: ["line_ownership"], repoIds: [1, 2, 3] };
   await lib.runSync(syncOptions);
   assert.equal(maxPreparations, 2, "both repositories prepare concurrently");
   assert.equal(scans.length, 2, "every selected non-archived repository is scanned");
@@ -734,6 +734,39 @@ try {
   assert.deepEqual(walks.map((w) => w.engine), ["blame"], "choosing blame in Settings is honoured");
   localStorage.removeItem("github-monitor.ownership.engine");
   pass("sync: reset on rewrite, verification against the HEAD scan, replay falls back to blame");
+
+  {
+    const byOrg = {
+      org: repos.slice(0, 1),
+      Other: [{ ...repos[0], id: 11, full_name: "Other/repo1" }],
+    };
+    const singleOrgHttp = globalThis.__http;
+    globalThis.__http = async (url) => {
+      const org = Object.keys(byOrg).find((o) => String(url).includes(`/orgs/${o}/repos`));
+      assert.ok(org, String(url));
+      return new Response(JSON.stringify(byOrg[org]), { status: 200, headers: { "content-type": "application/json" } });
+    };
+    const mdb = openDb(join(work, "multi-org.sqlite"));
+    await lib.migrate(mdb);
+    const prepared = [];
+    globalThis.__invoke = ((inner) => async (command, args) => {
+      if (command === "prepare_line_ownership") prepared.push(args.githubRepo);
+      return inner(command, args);
+    })(globalThis.__invoke);
+    const result = await lib.runSync({ ...syncOptions, db: mdb, orgs: ["org", "Other"], repoIds: [1, 11] });
+    assert.equal(result.reposSynced, 2, "targets are drawn from every organisation");
+    assert.deepEqual(prepared.sort(), ["Other/repo1", "org/repo1"]);
+    const owners = mdb.sqlite.prepare("SELECT id, owner FROM repos ORDER BY id").all().map((r) => `${r.id}:${r.owner}`);
+    assert.deepEqual(owners, ["1:org", "11:Other"], "each repository is stored under the organisation that listed it");
+    await assert.rejects(
+      lib.runSync({ ...syncOptions, db: mdb, orgs: ["org", "missing"], repoIds: [1] }),
+      /missing/,
+      "a failed listing names the organisation",
+    );
+    setScanner(scanner);
+    globalThis.__http = singleOrgHttp;
+    pass("sync: several organisations are inventoried and synced together");
+  }
 
   const legacyJson = JSON.stringify({ version: 2, files: {}, coauthors: {}, report: report(revision) });
   sdb.sqlite.prepare("UPDATE line_ownership SET snapshot = ?, report = NULL, metadata = NULL, cache_ref = NULL WHERE repo_id = 2").run(legacyJson);

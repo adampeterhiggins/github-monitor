@@ -4,15 +4,17 @@ import { getDb, getMeta } from "../db";
 import { listRepos, setRepoSelection, type RepoRow } from "../db/queries";
 import {
   getLogin,
-  getOrg,
+  getOrgs,
   getToken,
+  normaliseOrgs,
   setLogin as persistLogin,
-  setOrg as persistOrg,
+  setOrgs as persistOrgs,
   setToken as persistToken,
 } from "../auth";
 import type { PeriodId } from "../agg/weeks";
 import type { ContributionMetric } from "../agg/metrics";
-import type { SyncProgress } from "../ingest/sync";
+import { inventoryOrg, type SyncProgress } from "../ingest/sync";
+import { GitHubClient } from "../github/client";
 import {
   applyDocumentTheme,
   DEFAULT_THEME_ID,
@@ -29,7 +31,8 @@ interface AppState {
   bootError: string | null;
 
   token: string | null;
-  org: string | null;
+  /** Organisations whose repositories are listed and synced, in the order added. */
+  orgs: string[];
   /** The authenticated user's own login, for "repositories I've committed in". */
   login: string | null;
   lastSyncAt: string | null;
@@ -69,7 +72,10 @@ interface AppState {
   boot: () => Promise<void>;
   setToken: (token: string) => Promise<void>;
   setLogin: (login: string) => Promise<void>;
-  setOrg: (org: string) => Promise<void>;
+  /** Replace the organisation list. Selections in organisations that stay are kept. */
+  setOrgs: (orgs: string[]) => Promise<void>;
+  addOrg: (org: string) => Promise<void>;
+  removeOrg: (org: string) => Promise<void>;
   refreshRepos: () => Promise<void>;
   setSelectedRepos: (ids: number[]) => Promise<void>;
   toggleRepo: (id: number) => Promise<void>;
@@ -195,7 +201,7 @@ export const useApp = create<AppState>((set, get) => ({
   bootError: null,
 
   token: null,
-  org: null,
+  orgs: [],
   login: null,
   lastSyncAt: null,
 
@@ -220,14 +226,14 @@ export const useApp = create<AppState>((set, get) => ({
     try {
       applyCurrentTheme();
       const db = await getDb();
-      const [token, org, login, lastSyncAt] = await Promise.all([
+      const [token, orgs, login, lastSyncAt] = await Promise.all([
         getToken(),
-        getOrg(),
+        getOrgs(),
         getLogin(),
         getMeta(db, "last_sync_at"),
       ]);
-      set({ db, token, org, login, lastSyncAt, booted: true, bootError: null });
-      if (org) await get().refreshRepos();
+      set({ db, token, orgs, login, lastSyncAt, booted: true, bootError: null });
+      if (orgs.length) await get().refreshRepos();
     } catch (err) {
       set({ bootError: (err as Error)?.message ?? String(err), booted: true });
     }
@@ -243,16 +249,38 @@ export const useApp = create<AppState>((set, get) => ({
     set({ login: login.trim() });
   },
 
-  setOrg: async (org) => {
-    await persistOrg(org);
-    set({ org: org.trim(), repos: [], selectedRepoIds: [] });
-    await get().refreshRepos();
+  setOrgs: async (requested) => {
+    const { db, token } = get();
+    const orgs = normaliseOrgs(requested);
+    const known = new Set(get().orgs.map((o) => o.toLowerCase()));
+    const added = orgs.filter((o) => !known.has(o.toLowerCase()));
+    if (db && token && added.length) {
+      // Listed before saving, so a mistyped login fails here rather than at the
+      // next sync, and the new repositories are selectable straight away.
+      const client = new GitHubClient({ token });
+      await Promise.all(
+        added.map((org) =>
+          inventoryOrg(db, client, org).catch((err) => {
+            throw new Error(`Could not list repositories for ${org}: ${(err as Error)?.message ?? String(err)}`);
+          }),
+        ),
+      );
+    }
+    await persistOrgs(orgs);
+    set({ orgs });
+    if (orgs.length) await get().refreshRepos();
+    else set({ repos: [], selectedRepoIds: [] });
   },
 
+  addOrg: async (org) => get().setOrgs([...get().orgs, org]),
+
+  removeOrg: async (org) =>
+    get().setOrgs(get().orgs.filter((o) => o.toLowerCase() !== org.trim().toLowerCase())),
+
   refreshRepos: async () => {
-    const { db, org } = get();
-    if (!db || !org) return;
-    const repos = await listRepos(db, org);
+    const { db, orgs } = get();
+    if (!db || !orgs.length) return;
+    const repos = await listRepos(db, orgs);
     set({
       repos,
       selectedRepoIds: withoutForks(repos.filter((r) => r.included === 1).map((r) => r.id), repos, get().excludeForks),

@@ -1249,7 +1249,7 @@ const spy = {
   },
 };
 await q.setRepoSelection(spy, [{ repoId: 1, included: true }]);
-await q.listRepos(spy, "o");
+await q.listRepos(spy, ["o"]);
 T(
   "no query issues BEGIN/COMMIT/ROLLBACK",
   !seen.some((s) => /^\s*(BEGIN|COMMIT|ROLLBACK)/i.test(s)),
@@ -1618,6 +1618,24 @@ sqlite.exec(`INSERT INTO dependabot_alerts (repo_id,number,severity,ecosystem,pa
     "clearAnalytics keeps the pre-sync counts",
     sqlite.prepare("SELECT count(*) n FROM repo_stats").get().n === 3,
   );
+}
+
+/* ── Repositories across several organisations ────────────────────────────── */
+
+{
+  sqlite.exec(`INSERT INTO repos (id,owner,name,full_name) VALUES
+    (901,'Second-Org','a','Second-Org/a'),(902,'third','z','third/z')`);
+  const ids = async (owners) => (await q.listRepos(db, owners)).map((r) => r.id).sort((x, y) => x - y);
+  T("listRepos for one owner leaves other organisations out", !(await ids(["o"])).some((id) => id > 900));
+  const both = await ids(["o", "second-org"]);
+  T(
+    "listRepos unions several owners, matching case-insensitively",
+    both.includes(1) && both.includes(901) && !both.includes(902),
+    both.join(","),
+  );
+  T("listRepos with no owners lists nothing", (await ids([])).length === 0);
+  T("listRepos without an owner filter lists every repository", (await ids(undefined)).includes(902));
+  sqlite.exec("DELETE FROM repos WHERE id IN (901, 902)");
 }
 
 console.log(failures === 0 ? "\nAll query tests passed." : `\n${failures} test(s) failed.`);
