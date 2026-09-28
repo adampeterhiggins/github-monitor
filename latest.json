@@ -1,15 +1,15 @@
 {
-  "version": "0.2.6",
-  "notes": "## What's Changed\n* Analyse repositories from several organisations at once by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/15\n* Build release-local in its own worktree, off the branch, as setgist does. by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/16\n\n\n**Full Changelog**: https://github.com/adampeterhiggins/github-monitor/compare/v0.2.5...v0.2.6\n\n## What's Changed\n* Analyse repositories from several organisations at once by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/15\n* Build release-local in its own worktree, off the branch, as setgist does. by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/16\n\n\n**Full Changelog**: https://github.com/adampeterhiggins/github-monitor/compare/v0.2.5...v0.2.6",
-  "pub_date": "2026-09-28T10:50:41Z",
+  "version": "0.2.8",
+  "notes": "## What's Changed\n* Analyse repositories from several organisations at once by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/15\n* Build release-local in its own worktree, off the branch, as setgist does. by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/16\n* Track a user account's repositories alongside organisations by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/17\n* Add an organisation filter beside the repository filter by @adampeterhiggins in https://github.com/adampeterhiggins/github-monitor/pull/18\n\n\n**Full Changelog**: https://github.com/adampeterhiggins/github-monitor/compare/v0.2.5...v0.2.8",
+  "pub_date": "2026-09-28T11:08:48Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUVZS0R0L1V3T2tYSGV2STFHSGU2dDFacmJZWjJPOEZTL2YvM09kNTZCZnQvb2Y3VC9DYmZaQlVFeURabU9PeUdaTkFic0t4QlR6c3BVbGpzUk1XVVFRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNTkzMjI0CWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negp4bVkrQmkwYlZhTUpubVJKMVhpbzJTaXRmTDA5SHhlanl2emxodTJJaHFrbk1QK1NYRkFRcTk3WXlncFUvZlBnVS84T0piWGJMUzRMSWZCN0NIaVRDUT09Cg==",
-      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/595196305"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUlKU3R0UkpoYytsYVoyOGNJaEFGRngxQXJjZFZCaVdEU3VWeDQyd3JOdW9hQ25EbVdUaTJ0OHUyeXVOVG4rWU5XaktPSmRtNzdnaW5tQlhnZlhuSWdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNTkzNzIyCWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negpscVFTTERRNVgwbGN1cU43WHdsQlZWK0hzbGN4S2VOb1pVdWZTNHc4QmdyRHJuTThyUjdZUGZqdHZmcDdyT3lRa1dWNEtkdWRXNG9KckJiK1B1SHZDQT09Cg==",
+      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/595210894"
     },
     "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUVZS0R0L1V3T2tYSGV2STFHSGU2dDFacmJZWjJPOEZTL2YvM09kNTZCZnQvb2Y3VC9DYmZaQlVFeURabU9PeUdaTkFic0t4QlR6c3BVbGpzUk1XVVFRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNTkzMjI0CWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negp4bVkrQmkwYlZhTUpubVJKMVhpbzJTaXRmTDA5SHhlanl2emxodTJJaHFrbk1QK1NYRkFRcTk3WXlncFUvZlBnVS84T0piWGJMUzRMSWZCN0NIaVRDUT09Cg==",
-      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/595196305"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRc0pEalY0Mk5mNUlKU3R0UkpoYytsYVoyOGNJaEFGRngxQXJjZFZCaVdEU3VWeDQyd3JOdW9hQ25EbVdUaTJ0OHUyeXVOVG4rWU5XaktPSmRtNzdnaW5tQlhnZlhuSWdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwNTkzNzIyCWZpbGU6R2l0SHViIE1vbml0b3IuYXBwLnRhci5negpscVFTTERRNVgwbGN1cU43WHdsQlZWK0hzbGN4S2VOb1pVdWZTNHc4QmdyRHJuTThyUjdZUGZqdHZmcDdyT3lRa1dWNEtkdWRXNG9KckJiK1B1SHZDQT09Cg==",
+      "url": "https://api.github.com/repos/adampeterhiggins/github-monitor/releases/assets/595210894"
     }
   }
 }
