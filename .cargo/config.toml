@@ -1,0 +1,6 @@
+# A linked worktree builds into node_modules/.cache/github-monitor and a Cargo
+# cache every worktree shares. scripts/worktree-scratch.mjs writes the included
+# file there, and only in a linked worktree; elsewhere it is absent.
+include = [
+    { path = "../node_modules/.cache/github-monitor/cargo.toml", optional = true },
+]

@@ -9,6 +9,13 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [react(), tailwindcss()],
 
+  // Under node_modules, the one ignored path T3 Code's automatic worktree
+  // cleanup will delete. tauri.conf.json's frontendDist points here too.
+  build: {
+    outDir: "node_modules/.cache/github-monitor/dist",
+    emptyOutDir: true,
+  },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors

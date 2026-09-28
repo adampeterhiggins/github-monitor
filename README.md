@@ -24,8 +24,32 @@ xattr -dr com.apple.quarantine "/Applications/GitHub Monitor.app"
 ```bash
 npm install
 npm run tauri dev      # develop
-npm run tauri build    # produce .app + .dmg in src-tauri/target/release/bundle
+npm run tauri build    # produce .app + .dmg in src-tauri/target/release/bundle (see below for worktrees)
 ```
+
+### Working in worktrees
+
+In a linked git worktree, builds go out of the worktree's way, so worktrees
+stay small and can be deleted without losing anything
+(`scripts/worktree-scratch.mjs` decides). Cargo's intermediate artifacts, the
+gigabytes, go to `~/Library/Caches/github-monitor/cargo-build`, which every
+worktree shares, so a new worktree reuses the dependencies another one already
+compiled. The built app and bundles stay in the worktree under
+`node_modules/.cache/github-monitor/target/`. T3 Code's automatic worktree
+cleanup (**Settings → Storage**) skips any worktree holding ignored files other
+than `node_modules`. For the same reason Tauri's `src-tauri/gen/schemas` is
+committed, and the frontend builds into `node_modules/.cache/github-monitor/dist`
+in every checkout rather than `dist/`.
+
+Cargo reads this from `node_modules/.cache/github-monitor/cargo.toml`, which the
+committed `.cargo/config.toml` includes when it exists, so `cargo` and
+`npm run tauri` follow it as well as `make`. `npm install` and every `make`
+write that file in a linked worktree and remove it anywhere else.
+
+The main checkout and the release worktree keep `src-tauri/target`. Worktrees
+building at once wait on each other for the shared cache's lock.
+`make clean-shared` empties the cache when it has grown, and the next build
+starts cold.
 
 On first launch the app asks for a GitHub token. If you have the `gh` CLI
 authenticated, **Import from gh CLI** lifts the token straight out of it; otherwise
