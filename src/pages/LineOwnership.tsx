@@ -5,6 +5,7 @@ import { PageShell } from "../components/PageShell";
 import { LineOwnershipCharts, OwnershipHistoryChart } from "../components/LineOwnershipCharts";
 import { OwnershipInspector } from "../components/OwnershipInspector";
 import { UserFilter } from "../components/UserFilter";
+import { OrgFilter } from "../components/OrgFilter";
 import { RepoFilter } from "../components/RepoFilter";
 import { PeriodFilter } from "../components/FilterBar";
 import { Button, Callout, Card, CardHeader, DataTable, EmptyState, Spinner, StatTile, full } from "../components/ui";
@@ -189,6 +190,7 @@ export function LineOwnership() {
     <PageShell title="Line ownership" subtitle="Who owns the surviving code across your organisation" filters={false} requiresData={false}
       filterContent={<div className="flex flex-wrap items-center gap-3 border-b border-hairline bg-plane px-5 py-2.5">
         <PeriodFilter />
+        <OrgFilter />
         <RepoFilter />
         <UserFilter support="full" snapshot={{ contributors, isLoading: loadingReports }} />
         {reports.length > 0 && <><Button onClick={() => downloadOwnership(exportReport, "csv")}>Export CSV</Button><Button onClick={() => downloadOwnership(exportReport, "json")}>Export JSON</Button></>}
