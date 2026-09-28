@@ -24,11 +24,15 @@ PUSH  ?= 1
 # WATCH=0 skips following the CI run.
 WATCH ?= 1
 
+# Nested makes name this file, so a run from a copy of it (release-local REF=)
+# stays on that copy even after the checkout's own Makefile changes under it.
+SUBMAKE := $(MAKE) --no-print-directory -f $(abspath $(firstword $(MAKEFILE_LIST)))
+
 .DEFAULT_GOAL := help
 
 .PHONY: help install deps dev check build app clean version keygen secrets \
         check-version ensure-version set-version prepare-release tag-version \
-        release release-local verify-release watch runs doctor tap-update
+        release release-local publish-local verify-release watch runs doctor tap-update
 
 ##@ Getting started
 
@@ -42,12 +46,15 @@ help: ## Show the available targets
 	@printf "  \033[36mYES=1\033[0m                  accept prompts (non-interactive)\n"
 	@printf "  \033[36mPUSH=0\033[0m                 stop after tagging, push nothing\n"
 	@printf "  \033[36mWATCH=0\033[0m                do not follow the CI run\n"
+	@printf "  \033[36mREF=<commit>\033[0m           release-local: release this merged commit instead of the checkout's\n"
 	@printf "\n\033[1mExamples\033[0m\n"
 	@printf "  make release                 check, gate, bump if needed, commit, tag, push, watch\n"
 	@printf "  make release-0.3.0           release exactly 0.3.0\n"
 	@printf "  make release YES=1           same, no prompts\n"
 	@printf "  make release PUSH=0          rehearse locally, push nothing\n"
-	@printf "  make release-local           bump if needed, commit, build and publish from here\n"
+	@printf "  make release-local           release this checkout's commit, built and published here (no CI)\n"
+	@printf "  make local-release-0.3.0     release exactly 0.3.0 without CI\n"
+	@printf "  make release-local REF=abc1234  release an older merged commit, leaving later ones out\n"
 	@printf "  make app                     build and install into /Applications\n\n"
 
 install: ## Install npm dependencies
@@ -73,7 +80,7 @@ check: deps ## Typecheck, run query tests and lint the workflows
 
 doctor: ## Check the release prerequisites are in place
 	@printf "\033[1mVersions\033[0m\n"
-	@$(MAKE) --no-print-directory version
+	@$(SUBMAKE) version
 	@printf "\n\033[1mTooling\033[0m\n"
 	@for t in node npm gh cargo rustup; do \
 		if command -v $$t >/dev/null 2>&1; then printf "  ok    %s\n" "$$t"; \
@@ -111,15 +118,22 @@ doctor: ## Check the release prerequisites are in place
 
 ##@ Building
 
-build: ## Build the signed universal macOS bundle
-	@if [ ! -f "$(KEY_FILE)" ]; then \
-		echo "No signing key at $(KEY_FILE). Run 'make keygen' first, or the build will"; \
-		echo "produce a bundle the app cannot verify as an update."; \
+# Updater artifacts must be signed, so every build needs the private key: from
+# TAURI_SIGNING_PRIVATE_KEY if set (as in CI, or a release-local worktree, which
+# has no $(KEY_FILE) of its own), otherwise from $(KEY_FILE).
+SIGNED := TAURI_SIGNING_PRIVATE_KEY="$${TAURI_SIGNING_PRIVATE_KEY:-$$(cat $(KEY_FILE) 2>/dev/null)}" \
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD="$${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}"
+
+.PHONY: signing-key
+signing-key:
+	@if [ -z "$$TAURI_SIGNING_PRIVATE_KEY" ] && [ ! -f "$(KEY_FILE)" ]; then \
+		echo "No signing key at $(KEY_FILE). Run 'make keygen' first (or restore your backup):"; \
+		echo "without it the build cannot sign the update the app would install."; \
 		exit 1; \
 	fi
-	@TAURI_SIGNING_PRIVATE_KEY="$$(cat $(KEY_FILE))" \
-	 TAURI_SIGNING_PRIVATE_KEY_PASSWORD="" \
-	 npm run tauri -- build --target universal-apple-darwin
+
+build: signing-key ## Build the signed universal macOS bundle
+	@$(SIGNED) npm run tauri -- build --target universal-apple-darwin
 	@echo ""
 	@echo "Artifacts:"
 	@ls -1 "$(BUNDLE_DIR)"/macos/*.app.tar.gz "$(BUNDLE_DIR)"/macos/*.sig "$(BUNDLE_DIR)"/dmg/*.dmg 2>/dev/null | sed 's/^/  /'
@@ -239,7 +253,7 @@ tag-version: ## Tag HEAD with the current version
 ##@ Releasing
 
 prepare-release: ## Commit any changes and tag, without pushing
-	@$(MAKE) --no-print-directory prepare-release-$(VERSION) FORCE=$(FORCE) YES=$(YES)
+	@$(SUBMAKE) prepare-release-$(VERSION) FORCE=$(FORCE) YES=$(YES)
 
 prepare-release-%: check-version-%
 	@git rev-parse --git-dir >/dev/null 2>&1
@@ -276,17 +290,17 @@ prepare-release-%: check-version-%
 CHECKED ?= 0
 
 release: ## Full release: check, gate, bump, commit, tag, push, watch CI
-	@$(MAKE) --no-print-directory deps
+	@$(SUBMAKE) deps
 	@echo "--> Running checks"
 	@npm run check
-	@$(MAKE) --no-print-directory ensure-version FORCE=$(FORCE) YES=$(YES)
+	@$(SUBMAKE) ensure-version FORCE=$(FORCE) YES=$(YES)
 	@VER="$$(node -p 'require("./package.json").version')"; \
-	$(MAKE) --no-print-directory release-$$VER CHECKED=1 FORCE=$(FORCE) YES=$(YES) PUSH=$(PUSH) WATCH=$(WATCH)
+	$(SUBMAKE) release-$$VER CHECKED=1 FORCE=$(FORCE) YES=$(YES) PUSH=$(PUSH) WATCH=$(WATCH)
 
 release-%: ## Release an exact version end to end
 	@echo "==> Releasing v$* to $(REPO)"
 	@if [ "$(CHECKED)" != "1" ]; then \
-		$(MAKE) --no-print-directory deps; \
+		$(SUBMAKE) deps; \
 		echo "--> Running checks"; \
 		npm run check; \
 	fi
@@ -296,12 +310,12 @@ release-%: ## Release an exact version end to end
 		node scripts/set-version.mjs "$*"; \
 	fi
 	@echo "--> Committing and tagging"
-	@$(MAKE) --no-print-directory prepare-release-$* FORCE=$(FORCE) YES=$(YES)
+	@$(SUBMAKE) prepare-release-$* FORCE=$(FORCE) YES=$(YES)
 	@# Each recipe line gets its own shell, so `exit 0` here would only end this
 	@# line and make would carry on to the push. The guard therefore has to
 	@# *dispatch* rather than bail — this bug pushed a tag once already.
 	@if [ "$(PUSH)" = "1" ]; then \
-		$(MAKE) --no-print-directory push-release-$* WATCH=$(WATCH); \
+		$(SUBMAKE) push-release-$* WATCH=$(WATCH); \
 	else \
 		echo ""; \
 		echo "PUSH=0: stopped before pushing. Tag v$* exists locally only."; \
@@ -310,10 +324,35 @@ release-%: ## Release an exact version end to end
 		echo "  undo the commit:  git reset --mixed HEAD~1"; \
 	fi
 
+# PRs keep merging while the checks run, so the branch can move between the
+# pull and the push. The release commit only bumps version files, so it is
+# replayed onto the new tip and the tag follows it; what it lands on has been
+# through CI. A conflict means someone else bumped the version, so stop.
+.PHONY: push-release-commit
+push-release-commit-%:
+	@if ! git symbolic-ref -q HEAD >/dev/null; then \
+		echo "Off-branch release: the release commit goes up with its tag"; \
+		exit 0; \
+	fi; \
+	BRANCH="$$(git rev-parse --abbrev-ref HEAD)"; \
+	for TRY in 1 2 3; do \
+		if git push origin HEAD; then exit 0; fi; \
+		echo "--> origin/$$BRANCH moved on; replaying the release commit onto it"; \
+		git fetch origin "$$BRANCH" || exit 1; \
+		if ! git rebase "origin/$$BRANCH"; then \
+			git rebase --abort; \
+			echo "The release commit does not apply onto origin/$$BRANCH (another version bump?)."; \
+			exit 1; \
+		fi; \
+		git tag -f "v$*" HEAD; \
+	done; \
+	echo "origin/$$BRANCH kept moving; giving up after 3 tries."; \
+	exit 1
+
 .PHONY: push-release
 push-release-%:
 	@echo "--> Pushing branch and tag"
-	@git push origin HEAD
+	@$(SUBMAKE) push-release-commit-$*
 	@git push origin "v$*" --force
 	@echo "--> CI will build, publish the release and update the manifest"
 	@if [ "$(WATCH)" = "1" ] && command -v gh >/dev/null 2>&1; then \
@@ -326,7 +365,7 @@ push-release-%:
 				echo "  gh run view $$RUN_ID --repo $(REPO) --log-failed"; \
 				exit 1; \
 			}; \
-			$(MAKE) --no-print-directory verify-release-$*; \
+			$(SUBMAKE) verify-release-$*; \
 		else \
 			echo "Could not find the run; check: gh run list --repo $(REPO)"; \
 		fi; \
@@ -335,7 +374,7 @@ push-release-%:
 	fi
 
 verify-release: ## Check the published manifest matches the local version
-	@$(MAKE) --no-print-directory verify-release-$(VERSION)
+	@$(SUBMAKE) verify-release-$(VERSION)
 
 verify-release-%:
 	@echo "--> Verifying the published update manifest"
@@ -360,61 +399,156 @@ verify-release-%:
 	echo "  raw.githubusercontent serves: $$RAW (the app polls this; it lags a few minutes)"; \
 	echo "  release v$* is live and installable"
 
-release-local: ## Build, publish and update the manifest from this machine (bypasses CI)
-	@$(MAKE) --no-print-directory deps
-	@$(MAKE) --no-print-directory version
-	@# Checks run before the bump, as in `release`, so a failure never leaves a
-	@# half-done bump behind.
+# The same chain as `release`, with this machine doing CI's part: build the
+# signed universal bundle, publish the GitHub release, write the manifest and
+# update the Homebrew tap.
+# The per-version target is local-release-X.Y.Z, not release-local-X.Y.Z:
+# macOS's make 3.81 takes the first matching pattern, and release-% would match.
+#
+# It releases the commit this checkout is on, or REF=<commit> for another,
+# exactly as it is: nothing newer from origin is pulled or replayed in. The
+# version bump is committed on top of that commit, off the branch, and only
+# the tag points at it, so nothing is pushed to main and PRs merging mid-run
+# cannot reject the push. The updater and GitHub releases follow tags, and the
+# next release still bumps past it because the gate reads the latest tag.
+# It builds in a worktree of its own, never this checkout, so a release can't
+# have its version changed underneath it by other work here. The worktree is
+# kept between runs so its node_modules and cargo target stay warm. The run
+# uses a copy of this Makefile, not the commit's, which may predate all this.
+# The commit must already be on origin's default branch, so only merged code
+# ships; a failed run retries with REF=vX.Y.Z, the release commit it left.
+RELEASE_WORKTREE ?= $(HOME)/Library/Caches/github-monitor/release-worktree
+REF ?=
+
+release-local: signing-key ## Full release without CI of this checkout's commit (or REF=): check, bump, tag, build, publish, verify
+	@REL="$(or $(REF),HEAD)"; \
+	git fetch -q --tags origin || exit 1; \
+	COMMIT="$$(git rev-parse --verify -q "$$REL^{commit}")" || { echo "No commit $$REL."; exit 1; }; \
+	BASE="$$(git symbolic-ref -q --short refs/remotes/origin/HEAD || echo origin/main)"; \
+	if git merge-base --is-ancestor "$$COMMIT" "$$BASE"; then :; \
+	elif git tag --points-at "$$COMMIT" | grep -q '^v' && git merge-base --is-ancestor "$$COMMIT^" "$$BASE"; then :; \
+	else \
+		echo "$$REL ($$(git rev-parse --short "$$COMMIT")) is not on $$BASE. Only merged commits are released."; \
+		exit 1; \
+	fi; \
+	if [ -z "$(REF)" ] && [ -n "$$(git status --porcelain --untracked-files=no)" ]; then \
+		echo "Note: uncommitted changes here are not part of the release."; \
+	fi; \
+	WT="$(RELEASE_WORKTREE)"; \
+	if git -C "$$WT" rev-parse --git-dir >/dev/null 2>&1; then \
+		git -C "$$WT" checkout -q --force --detach "$$COMMIT" && git -C "$$WT" clean -fdq || exit 1; \
+	else \
+		git worktree prune; \
+		mkdir -p "$$(dirname "$$WT")"; \
+		git worktree add -q --detach "$$WT" "$$COMMIT" || exit 1; \
+	fi; \
+	MK="$$(mktemp "$${TMPDIR:-/tmp}/github-monitor-release-mk.XXXXXX")" || exit 1; \
+	cp "$(abspath $(firstword $(MAKEFILE_LIST)))" "$$MK" || exit 1; \
+	KEY="$${TAURI_SIGNING_PRIVATE_KEY:-$$(cat "$(KEY_FILE)")}"; \
+	echo "==> Releasing $$(git log -1 --format='%h %s' "$$COMMIT") in $$WT"; \
+	( cd "$$WT" && TAURI_SIGNING_PRIVATE_KEY="$$KEY" \
+		$(MAKE) --no-print-directory -f "$$MK" release-local-here REF= OFFBRANCH=1 FORCE=$(FORCE) YES=$(YES) PUSH=$(PUSH) ); \
+	RC=$$?; \
+	rm -f "$$MK"; \
+	TAGGED="$$(git -C "$$WT" tag --points-at HEAD | grep '^v' | head -n 1)"; \
+	if [ "$$RC" != "0" ] && [ -n "$$TAGGED" ]; then \
+		echo "The release stopped. Retry it with: make release-local REF=$$TAGGED YES=$(YES)"; \
+	fi; \
+	exit $$RC
+
+# The chain itself, run inside the release worktree.
+release-local-here:
+	@$(SUBMAKE) deps
 	@echo "--> Running checks"
 	@npm run check
-	@# The gate compares against local tags, so pick up any cut elsewhere (CI, another
-	@# machine) first — otherwise it could bump to a version that already exists.
-	@git fetch --tags --quiet origin 2>/dev/null || echo "  (could not fetch tags; gating on local tags)"
-	@$(MAKE) --no-print-directory ensure-version FORCE=$(FORCE) YES=$(YES)
-	@# ensure-version may have bumped the files; commit just those so the tag
-	@# lands on a commit carrying the version it names. Pushed with the tag below.
+	@$(SUBMAKE) ensure-version FORCE=$(FORCE) YES=$(YES)
 	@VER="$$(node -p 'require("./package.json").version')"; \
-	if [ -n "$$(git status --porcelain -- package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock)" ]; then \
-		git commit --quiet -m "chore(release): $$VER" -- package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock; \
-		echo "Committed version bump: chore(release): $$VER"; \
-	fi
-	@# VERSION is read when make parses the file, so a fresh make is needed to see
-	@# the bumped value.
-	@$(MAKE) --no-print-directory release-local-publish FORCE=$(FORCE)
+	$(SUBMAKE) local-release-$$VER CHECKED=1 FORCE=$(FORCE) YES=$(YES) PUSH=$(PUSH) OFFBRANCH=$(OFFBRANCH)
 
-.PHONY: release-local-publish
-release-local-publish:
-	@echo "==> Local release of v$(VERSION) — normally CI does this"
-	@$(MAKE) --no-print-directory version
-	@$(MAKE) --no-print-directory check-version-$(VERSION) FORCE=$(FORCE)
-	@$(MAKE) --no-print-directory build
+local-release-%: ## Release an exact version from this machine (local-release-X.Y.Z)
+	@echo "==> Local release of v$* to $(REPO)"
+	@if [ "$(CHECKED)" != "1" ]; then \
+		$(SUBMAKE) deps; \
+		echo "--> Running checks"; \
+		npm run check; \
+	fi
+	@CONF="$$(node -p 'require("./src-tauri/tauri.conf.json").version')"; \
+	if [ "$$CONF" != "$*" ]; then \
+		echo "--> Setting version to $* everywhere"; \
+		node scripts/set-version.mjs "$*"; \
+	fi
+	@echo "--> Committing and tagging"
+	@$(SUBMAKE) prepare-release-$* FORCE=$(FORCE) YES=$(YES)
+	@# The version bump goes up straight away, so the branch never sits behind a
+	@# build that takes minutes (or fails). The tag waits for publish-local: it is
+	@# what marks a release, and a failed build must leave it local so rerunning
+	@# retries the same version, since the gate lets an already-tagged HEAD through.
+	@if [ "$(PUSH)" = "1" ]; then \
+		echo "--> Pushing the release commit"; \
+		$(SUBMAKE) push-release-commit-$*; \
+	fi
+	@# Built after tagging, so the bundle is exactly the tagged commit.
+	@echo "--> Building the signed universal bundle"
+	@$(SUBMAKE) build
+	@# As in release-%, the guard dispatches rather than exits: `exit 0` would
+	@# only end this recipe line.
+	@if [ "$(PUSH)" = "1" ]; then \
+		$(SUBMAKE) publish-local-$*; \
+	elif [ "$(OFFBRANCH)" = "1" ]; then \
+		echo ""; \
+		echo "PUSH=0: built and tagged v$* locally, off the branch; nothing was pushed or published."; \
+		echo "  publish when ready:  make release-local REF=v$* YES=1   (rebuilds it)"; \
+		echo "  undo:                git tag -d v$*"; \
+	else \
+		echo ""; \
+		echo "PUSH=0: built and tagged v$* locally; nothing was pushed or published."; \
+		echo "  publish when ready:  make publish-local-$*"; \
+		echo "  undo the tag:        git tag -d v$*"; \
+		echo "  undo the commit:     git reset --mixed HEAD~1"; \
+	fi
+
+.PHONY: publish-local
+publish-local-%: ## Publish the built bundle for X.Y.Z: push, release, manifest, tap, verify
 	@set -e; \
-	V="$(VERSION)"; \
+	V="$*"; \
+	CONF="$$(node -p 'require("./src-tauri/tauri.conf.json").version')"; \
+	if [ "$$CONF" != "$$V" ]; then echo "tauri.conf.json is $$CONF, not $$V. Build v$$V first."; exit 1; fi; \
 	TMP="$$(mktemp -d)"; \
 	cp "$(TARBALL)" "$$TMP/github-monitor_$${V}_universal.app.tar.gz"; \
 	cp "$(TARBALL).sig" "$$TMP/github-monitor_$${V}_universal.app.tar.gz.sig"; \
 	DMG="$$(ls "$(BUNDLE_DIR)"/dmg/*.dmg 2>/dev/null | head -n 1)"; \
 	[ -n "$$DMG" ] && cp "$$DMG" "$$TMP/github-monitor_$${V}_universal.dmg" || true; \
-	git push origin HEAD; \
-	git tag -f "v$$V" HEAD; \
+	echo "--> Pushing branch and tag"; \
+	BRANCH="$$(git rev-parse --abbrev-ref HEAD)"; \
+	git fetch origin "$$BRANCH" >/dev/null 2>&1 || true; \
+	if [ "$$BRANCH" = "HEAD" ]; then \
+		echo "Off-branch release: pushing only the tag"; \
+	elif git merge-base --is-ancestor HEAD "origin/$$BRANCH" 2>/dev/null; then \
+		echo "origin/$$BRANCH already has the release commit"; \
+	else \
+		git push origin HEAD; \
+	fi; \
 	git push origin "refs/tags/v$$V" --force; \
+	echo "--> Publishing the GitHub release"; \
 	if gh release view "v$$V" --repo $(REPO) >/dev/null 2>&1; then \
 		gh release upload "v$$V" "$$TMP"/* --repo $(REPO) --clobber; \
 	else \
-		gh release create "v$$V" "$$TMP"/* --repo $(REPO) --title "v$$V" --generate-notes; \
+		gh release create "v$$V" "$$TMP"/* --repo $(REPO) --title "v$$V" --generate-notes --verify-tag; \
 	fi; \
-	GH_TOKEN="$$(gh auth token)" node scripts/build-update-manifest.mjs --tag "v$$V" --out latest.json; \
-	$(MAKE) --no-print-directory publish-manifest VERSION_ARG="$$V"; \
 	rm -rf "$$TMP"; \
-	$(MAKE) --no-print-directory tap-update; \
-	$(MAKE) --no-print-directory verify-release-$$V
+	echo "--> Writing the update manifest"; \
+	GH_TOKEN="$$(gh auth token)" node scripts/build-update-manifest.mjs --tag "v$$V" --out latest.json; \
+	$(SUBMAKE) publish-manifest VERSION_ARG="$$V"; \
+	echo "--> Updating the Homebrew tap"; \
+	$(SUBMAKE) tap-update; \
+	$(SUBMAKE) verify-release-$$V
 
 .PHONY: publish-manifest
 publish-manifest: ## Publish ./latest.json to the releases branch
 	@set -e; \
 	if [ ! -f latest.json ]; then echo "No latest.json — generate it first (see manifest-%)."; exit 1; fi; \
 	cp latest.json /tmp/gm-latest.json; \
-	BRANCH="$$(git rev-parse --abbrev-ref HEAD)"; \
+	BRANCH="$$(git symbolic-ref -q --short HEAD || git rev-parse HEAD)"; \
 	VER="$${VERSION_ARG:-$$(node -p 'require("/tmp/gm-latest.json").version')}"; \
 	rm -f latest.json; \
 	STASH=""; \
@@ -440,8 +574,8 @@ publish-manifest: ## Publish ./latest.json to the releases branch
 
 manifest-%: ## Generate and publish the manifest for an existing release
 	@GH_TOKEN="$$(gh auth token)" node scripts/build-update-manifest.mjs --tag "v$*" --out latest.json
-	@$(MAKE) --no-print-directory publish-manifest VERSION_ARG="$*"
-	@$(MAKE) --no-print-directory verify-release-$*
+	@$(SUBMAKE) publish-manifest VERSION_ARG="$*"
+	@$(SUBMAKE) verify-release-$*
 
 tap-update: ## Update the Homebrew tap cask for the current version (CI does this too)
 	@set -e; \

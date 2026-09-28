@@ -184,10 +184,24 @@ manifest still fails.
 
 Other useful targets: `make version` (reports drift across the three files),
 `make set-version-0.3.0`, `make app` (build and install into `/Applications`,
-verifying the installed version), `make runs`, `make watch`,
-`make verify-release`, and `make release-local` if CI is broken and you need to
-publish from your laptop. Like `make release`, it bumps the patch version if it
-isn't ahead of the latest tag, commits the bump and pushes it along with the tag.
+verifying the installed version), `make runs`, `make watch`
+and `make verify-release`.
+
+If CI is unavailable, `make release-local` does the whole release from your
+machine, of the commit this checkout is on. Nothing newer is pulled from
+origin, so pull first if you want the latest `main`. The commit must already be
+on `main`, and it is built in a worktree of its own under
+`~/Library/Caches/github-monitor/`, so this checkout is never touched and other
+work in it carries on. There it runs the checks, bumps the patch version past
+the latest tag, commits the bump on top of the commit and tags it, builds the
+signed universal bundle, pushes the tag, publishes the GitHub release, writes
+the manifest, updates the Homebrew tap and verifies the manifest. The bump
+stays off `main`: only the tag points at it, so nothing is pushed to `main` and
+PRs merging mid-release cannot get in the way. `REF=abc1234` releases another
+merged commit instead, leaving out anything after it. `PUSH=0` stops after the
+build. If a run stops partway, it prints a `REF=vX.Y.Z` to retry with.
+`make local-release-0.3.0` releases an exact version in place, and
+`make manifest-X.Y.Z` regenerates the manifest for an existing release.
 
 The equivalent long-hand, if you prefer:
 
