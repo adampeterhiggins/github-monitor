@@ -14,12 +14,72 @@ import {
   CardHeader,
   Checkbox,
   DataTable,
+  Dropdown,
+  DropdownRow,
   Spinner,
   compact,
   full,
 } from "./ui";
 
 const repoCount = (n: number) => `${full(n)} ${n === 1 ? "repository" : "repositories"}`;
+
+/** "all" leaves a dimension unfiltered. */
+interface RepoListFilters {
+  /** Lower-cased owner. */
+  org: string;
+  selection: "all" | "selected" | "unselected";
+  visibility: "all" | "public" | "private";
+  sync: "all" | RepoSyncSummary["state"];
+  activity: "all" | "pushed" | "commits" | "mine";
+  language: string;
+}
+
+const NO_FILTERS: RepoListFilters = {
+  org: "all",
+  selection: "all",
+  visibility: "all",
+  sync: "all",
+  activity: "all",
+  language: "all",
+};
+
+/** Stands in for a null language, so "None detected" is a choosable value. */
+const NO_LANGUAGE = "\u0000none";
+
+/** A single-choice filter whose label names the current choice. */
+function FilterSelect<T extends string>({
+  name,
+  value,
+  onChange,
+  options,
+}: {
+  name: string;
+  value: T | "all";
+  onChange: (value: T | "all") => void;
+  options: Array<{ id: T; label: string }>;
+}) {
+  const current = options.find((o) => o.id === value);
+  return (
+    <Dropdown label={<span className="max-w-[200px] truncate">{`${name}: ${current?.label ?? "All"}`}</span>} width={220} align="left">
+      {(close) => (
+        <div className="max-h-[320px] overflow-y-auto py-1">
+          {[{ id: "all" as const, label: "All" }, ...options].map((o) => (
+            <DropdownRow
+              key={o.id}
+              selected={o.id === value}
+              onClick={() => {
+                onChange(o.id);
+                close();
+              }}
+            >
+              {o.label}
+            </DropdownRow>
+          ))}
+        </div>
+      )}
+    </Dropdown>
+  );
+}
 
 /**
  * Repository selection, as a checkbox list rather than the compact dropdown in the
@@ -54,8 +114,13 @@ export function RepoSelectionPanel() {
   const db = useApp((s) => s.db);
   const bumpProbeStamp = useApp((s) => s.bumpProbeStamp);
 
+  const orgs = useApp((s) => s.orgs);
   const [query, setQuery] = useState("");
   const [showArchived, setShowArchived] = useState(false);
+  const [filters, setFilters] = useState<RepoListFilters>(NO_FILTERS);
+  const setFilter = <K extends keyof RepoListFilters>(key: K, value: RepoListFilters[K]) =>
+    setFilters((f) => ({ ...f, [key]: value }));
+  const filtersActive = query.trim() !== "" || Object.values(filters).some((v) => v !== "all");
   const [notice, setNotice] = useState<string | null>(null);
   const [detecting, setDetecting] = useState(false);
   const [discovery, setDiscovery] = useState<DiscoverProgress | null>(null);
@@ -70,12 +135,38 @@ export function RepoSelectionPanel() {
 
   const selectedSet = useMemo(() => new Set(selected), [selected]);
 
+  const languages = useMemo(
+    () => [...new Set(repos.map((r) => r.language).filter((l): l is string => l != null))].sort((a, b) => a.localeCompare(b)),
+    [repos],
+  );
+
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return repos
-      .filter((r) => (showArchived ? true : r.archived === 0))
-      .filter((r) => (q ? r.full_name.toLowerCase().includes(q) : true));
-  }, [repos, query, showArchived]);
+    const activeSince = new Date(Date.now() - 365 * 86_400_000).toISOString();
+    return repos.filter((r) => {
+      if (!showArchived && r.archived !== 0) return false;
+      if (
+        q &&
+        !r.full_name.toLowerCase().includes(q) &&
+        !(r.description ?? "").toLowerCase().includes(q) &&
+        !(r.language ?? "").toLowerCase().includes(q)
+      ) return false;
+      if (filters.org !== "all" && r.owner.toLowerCase() !== filters.org) return false;
+      if (filters.selection === "selected" && !selectedSet.has(r.id)) return false;
+      if (filters.selection === "unselected" && selectedSet.has(r.id)) return false;
+      if (filters.visibility === "private" && !r.private) return false;
+      if (filters.visibility === "public" && r.private) return false;
+      if (filters.language !== "all" && (r.language ?? NO_LANGUAGE) !== filters.language) return false;
+      if (filters.sync !== "all") {
+        const state = repoSync.summaries.get(r.id)?.state ?? "never";
+        if (filters.sync !== state) return false;
+      }
+      if (filters.activity === "pushed" && (r.pushed_at ?? "") < activeSince) return false;
+      if (filters.activity === "commits" && (allCommits.get(r.id) ?? 0) === 0) return false;
+      if (filters.activity === "mine" && (myCommits.get(r.id) ?? 0) === 0) return false;
+      return true;
+    });
+  }, [repos, query, showArchived, filters, selectedSet, repoSync.summaries, allCommits, myCommits]);
 
   const apply = (ids: number[], message?: string) => {
     void setSelectedRepos(ids);
@@ -324,9 +415,10 @@ export function RepoSelectionPanel() {
 
       <div className="mb-2 flex flex-wrap items-center gap-3">
         <input
+          type="search"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Filter repositories…"
+          placeholder="Search name, description or language…"
           className="h-7 min-w-[200px] flex-1 rounded-md border border-hairline-strong bg-surface px-2 text-[12px] text-ink placeholder:text-ink-muted focus:outline-2 focus:outline-offset-0 focus:outline-accent"
         />
         <Checkbox
@@ -351,10 +443,84 @@ export function RepoSelectionPanel() {
         />
       </div>
 
+      <div className="mb-2 flex flex-wrap items-center gap-1.5">
+        {orgs.length > 1 ? (
+          <FilterSelect
+            name="Organisation"
+            value={filters.org}
+            onChange={(v) => setFilter("org", v)}
+            options={orgs.map((o) => ({ id: o.toLowerCase(), label: o }))}
+          />
+        ) : null}
+        <FilterSelect
+          name="Selection"
+          value={filters.selection}
+          onChange={(v) => setFilter("selection", v)}
+          options={[
+            { id: "selected", label: "Selected" },
+            { id: "unselected", label: "Not selected" },
+          ]}
+        />
+        <FilterSelect
+          name="Visibility"
+          value={filters.visibility}
+          onChange={(v) => setFilter("visibility", v)}
+          options={[
+            { id: "public", label: "Public" },
+            { id: "private", label: "Private" },
+          ]}
+        />
+        <FilterSelect
+          name="Sync"
+          value={filters.sync}
+          onChange={(v) => setFilter("sync", v)}
+          options={[
+            { id: "complete", label: "Synced" },
+            { id: "outstanding", label: "Incomplete" },
+            { id: "never", label: "Not synced" },
+          ]}
+        />
+        <FilterSelect
+          name="Activity"
+          value={filters.activity}
+          onChange={(v) => setFilter("activity", v)}
+          options={[
+            { id: "pushed", label: "Pushed in last 12 months" },
+            { id: "commits", label: "Has commits" },
+            { id: "mine", label: "Has my commits" },
+          ]}
+        />
+        {languages.length > 0 ? (
+          <FilterSelect
+            name="Language"
+            value={filters.language}
+            onChange={(v) => setFilter("language", v)}
+            options={[
+              ...languages.map((l) => ({ id: l, label: l })),
+              { id: NO_LANGUAGE, label: "None detected" },
+            ]}
+          />
+        ) : null}
+        {filtersActive ? (
+          <Button
+            variant="ghost"
+            onClick={() => {
+              setQuery("");
+              setFilters(NO_FILTERS);
+            }}
+          >
+            Reset filters
+          </Button>
+        ) : null}
+        <span className="ml-auto text-[11px] tabular text-ink-muted">
+          Showing {full(visible.length)} of {full(repos.length)}
+        </span>
+      </div>
+
       <DataTable
         rows={visible}
         maxHeight={460}
-        empty="No repositories match"
+        empty={filtersActive ? "No repositories match these filters" : "No repositories match"}
         rowKey={(r) => r.id}
         initialSort={{ key: "mine", dir: "desc" }}
         columns={[
