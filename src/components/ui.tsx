@@ -5,10 +5,13 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
   type ReactNode,
+  type RefObject,
 } from "react";
+import { createPortal } from "react-dom";
 
 /* ── Formatting ─────────────────────────────────────────────────────────── */
 
@@ -251,17 +254,30 @@ export function Slider({
 
 /* ── Dropdown (presets as rows, selection marked with a check) ───────────── */
 
-const PANEL =
-  "absolute z-50 mt-1 rounded-lg border border-hairline-strong bg-surface shadow-lg";
+const PANEL_SURFACE = "rounded-lg border border-hairline-strong bg-surface shadow-lg";
 
-/** Closes on a click outside or on Escape. Returns the ref to put on the root. */
-function useDismissable(open: boolean, close: () => void) {
+/**
+ * Nested menus stay in the panel they opened from (absolute), so click-outside
+ * still sees them as inside the parent. Top-level menus portal to the document
+ * so they cannot push the page, steal a scrollbar, or force every chart to resize.
+ */
+const InsideFloating = createContext(false);
+
+/** Closes on a click outside the trigger *or* the (possibly portaled) panel. */
+function useDismissable(
+  open: boolean,
+  close: () => void,
+  panelRef?: RefObject<HTMLElement | null>,
+) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) close();
+      const target = e.target as Node;
+      if (ref.current?.contains(target)) return;
+      if (panelRef?.current?.contains(target)) return;
+      close();
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") close();
@@ -272,9 +288,104 @@ function useDismissable(open: boolean, close: () => void) {
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
     };
-  }, [open, close]);
+  }, [open, close, panelRef]);
 
   return ref;
+}
+
+function FloatingPanel({
+  open,
+  align,
+  width,
+  minWidth,
+  className,
+  children,
+  anchorRef,
+  panelRef,
+}: {
+  open: boolean;
+  align: "left" | "right";
+  width?: number;
+  minWidth?: number;
+  className?: string;
+  children: ReactNode;
+  anchorRef: RefObject<HTMLElement | null>;
+  panelRef: RefObject<HTMLDivElement | null>;
+}) {
+  const nested = useContext(InsideFloating);
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
+
+  useLayoutEffect(() => {
+    if (!open || nested) return;
+    const place = () => {
+      const anchor = anchorRef.current;
+      const panel = panelRef.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
+      const panelWidth = width ?? panel?.offsetWidth ?? minWidth ?? 240;
+      const panelHeight = panel?.offsetHeight ?? 0;
+      let left = align === "right" ? rect.right - panelWidth : rect.left;
+      left = Math.max(8, Math.min(left, window.innerWidth - panelWidth - 8));
+      let top = rect.bottom + 4;
+      if (panelHeight > 0 && top + panelHeight > window.innerHeight - 8 && rect.top > panelHeight + 8) {
+        top = rect.top - panelHeight - 4;
+      }
+      setPos((prev) => (prev && prev.top === top && prev.left === left ? prev : { top, left }));
+    };
+    place();
+    const panel = panelRef.current;
+    const ro = panel ? new ResizeObserver(place) : null;
+    ro?.observe(panel!);
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
+    };
+  }, [open, nested, align, width, minWidth, anchorRef, panelRef]);
+
+  if (!open) return null;
+
+  const panel = (
+    <InsideFloating.Provider value={true}>
+      <div
+        ref={panelRef}
+        style={
+          nested
+            ? { width, minWidth }
+            : {
+                width,
+                minWidth,
+                position: "fixed",
+                top: pos?.top ?? 0,
+                left: pos?.left ?? 0,
+                visibility: pos ? "visible" : "hidden",
+                zIndex: 200,
+              }
+        }
+        className={clsx(
+          PANEL_SURFACE,
+          nested && "absolute z-50 mt-1",
+          nested && (align === "right" ? "right-0" : "left-0"),
+          className,
+        )}
+      >
+        {children}
+      </div>
+    </InsideFloating.Provider>
+  );
+
+  return nested ? panel : createPortal(panel, document.body);
+}
+
+function panelBody(
+  open: boolean,
+  children: ReactNode | ((close: () => void) => ReactNode),
+  close: () => void,
+) {
+  if (!open) return null;
+  return typeof children === "function" ? children(close) : children;
 }
 
 export function Dropdown({
@@ -290,7 +401,8 @@ export function Dropdown({
 }) {
   const [open, setOpen] = useState(false);
   const close = useCallback(() => setOpen(false), []);
-  const ref = useDismissable(open, close);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const ref = useDismissable(open, close, panelRef);
 
   return (
     <div className="relative" ref={ref}>
@@ -309,14 +421,16 @@ export function Dropdown({
           <path d="M3 4.5 6 8l3-3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
         </svg>
       </button>
-      {open ? (
-        <div
-          style={{ width }}
-          className={clsx(PANEL, "overflow-hidden", align === "right" ? "right-0" : "left-0")}
-        >
-          {typeof children === "function" ? children(close) : children}
-        </div>
-      ) : null}
+      <FloatingPanel
+        open={open}
+        align={align}
+        width={width}
+        className="overflow-hidden"
+        anchorRef={ref}
+        panelRef={panelRef}
+      >
+        {panelBody(open, children, close)}
+      </FloatingPanel>
     </div>
   );
 }
@@ -374,7 +488,9 @@ export function ViewSelector<T extends string>({
 }) {
   const [open, setOpen] = useState(false);
   const close = useCallback(() => setOpen(false), []);
-  const ref = useDismissable(open, close);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLDivElement>(null);
+  const ref = useDismissable(open, close, panelRef);
 
   const index = options.findIndex((o) => o.value === value);
   const hasPrev = index > 0;
@@ -414,7 +530,7 @@ export function ViewSelector<T extends string>({
         disabled={!hasPrev}
         onClick={() => onChange(options[index - 1].value)}
       />
-      <div className="relative">
+      <div className="relative" ref={triggerRef}>
         <button
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
@@ -442,28 +558,37 @@ export function ViewSelector<T extends string>({
             ))}
           </span>
         </button>
-        {open ? (
-          <div className={clsx(PANEL, "left-0 w-auto min-w-[160px] overflow-hidden")}>
-            <div className="px-2.5 pt-1.5 text-[11px] font-medium text-ink-muted">
-              {index + 1} of {options.length}
-              {countLabel ? ` ${countLabel}` : ""}
-            </div>
-            <div className="py-1">
-              {options.map((o) => (
-                <DropdownRow
-                  key={o.value}
-                  selected={o.value === value}
-                  onClick={() => {
-                    onChange(o.value);
-                    close();
-                  }}
-                >
-                  {o.label}
-                </DropdownRow>
-              ))}
-            </div>
-          </div>
-        ) : null}
+        <FloatingPanel
+          open={open}
+          align="left"
+          minWidth={160}
+          className="overflow-hidden"
+          anchorRef={triggerRef}
+          panelRef={panelRef}
+        >
+          {open ? (
+            <>
+              <div className="px-2.5 pt-1.5 text-[11px] font-medium text-ink-muted">
+                {index + 1} of {options.length}
+                {countLabel ? ` ${countLabel}` : ""}
+              </div>
+              <div className="py-1">
+                {options.map((o) => (
+                  <DropdownRow
+                    key={o.value}
+                    selected={o.value === value}
+                    onClick={() => {
+                      onChange(o.value);
+                      close();
+                    }}
+                  >
+                    {o.label}
+                  </DropdownRow>
+                ))}
+              </div>
+            </>
+          ) : null}
+        </FloatingPanel>
       </div>
       <Arrow
         dir="right"
@@ -532,7 +657,8 @@ export function FilterPopover({
 }) {
   const [open, setOpen] = useState(false);
   const close = useCallback(() => setOpen(false), []);
-  const ref = useDismissable(open, close);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const ref = useDismissable(open, close, panelRef);
 
   return (
     <div className="relative" ref={ref}>
@@ -559,18 +685,16 @@ export function FilterPopover({
           <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-accent" />
         ) : null}
       </button>
-      {open ? (
-        <div
-          style={{ width }}
-          className={clsx(
-            PANEL,
-            "flex flex-col gap-2 p-2",
-            align === "right" ? "right-0" : "left-0",
-          )}
-        >
-          {typeof children === "function" ? children(close) : children}
-        </div>
-      ) : null}
+      <FloatingPanel
+        open={open}
+        align={align}
+        width={width}
+        className="flex flex-col gap-2 p-2"
+        anchorRef={ref}
+        panelRef={panelRef}
+      >
+        {panelBody(open, children, close)}
+      </FloatingPanel>
     </div>
   );
 }
@@ -836,7 +960,8 @@ export function MenuButton({
 }) {
   const [open, setOpen] = useState(false);
   const close = useCallback(() => setOpen(false), []);
-  const ref = useDismissable(open, close);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const ref = useDismissable(open, close, panelRef);
 
   return (
     <div className="relative" ref={ref}>
@@ -860,14 +985,16 @@ export function MenuButton({
           <circle cx="12" cy="19" r="1.8" />
         </svg>
       </button>
-      {open ? (
-        <div
-          style={{ width }}
-          className={clsx(PANEL, "overflow-hidden", align === "right" ? "right-0" : "left-0")}
-        >
-          {typeof children === "function" ? children(close) : children}
-        </div>
-      ) : null}
+      <FloatingPanel
+        open={open}
+        align={align}
+        width={width}
+        className="overflow-hidden"
+        anchorRef={ref}
+        panelRef={panelRef}
+      >
+        {panelBody(open, children, close)}
+      </FloatingPanel>
     </div>
   );
 }
@@ -1076,6 +1203,18 @@ export function ChartCard({
   );
 
   const body = view === "chart" || !table ? children : table;
+  const loadingMark = loading ? (
+    <span className="text-ink-muted" title="Loading">
+      <Spinner size={12} />
+    </span>
+  ) : null;
+  const headerAfter =
+    loadingMark || titleAfter ? (
+      <>
+        {loadingMark}
+        {titleAfter}
+      </>
+    ) : undefined;
 
   return (
     <>
@@ -1083,7 +1222,7 @@ export function ChartCard({
         <CardHeader
           title={title}
           subtitle={subtitle}
-          titleAfter={titleAfter}
+          titleAfter={headerAfter}
           actions={
             <>
               {controls}
@@ -1101,7 +1240,7 @@ export function ChartCard({
         <Modal
           title={title}
           subtitle={subtitle}
-          titleAfter={titleAfter}
+          titleAfter={headerAfter}
           actions={controls}
           onClose={() => setExpanded(false)}
         >

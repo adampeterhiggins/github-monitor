@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { FilterBar } from "./FilterBar";
+import { PageBusyFrame } from "./PageBusy";
 import { Callout, EmptyState, PageFilters } from "./ui";
 import { useApp } from "../lib/state/app";
 import { useScope, type UserFilterSupport } from "../lib/hooks";
@@ -50,7 +51,7 @@ export function PageShell({
 
       {filterBar}
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-5">
+      <PageBusyFrame className="min-h-0 flex-1 overflow-y-auto p-5" style={{ scrollbarGutter: "stable" }}>
         {blocked ? (
           <EmptyState
             title={
@@ -68,7 +69,7 @@ export function PageShell({
             {children}
           </div>
         )}
-      </div>
+      </PageBusyFrame>
     </PageFilters>
   );
 }

@@ -4,6 +4,7 @@ import { useApp, startThemeSync } from "./lib/state/app";
 import { useUpdates } from "./lib/state/updates";
 import { provideUpdateToken } from "./lib/state/updates";
 import { UpdateBadge } from "./components/UpdatePanel";
+import { PageBusyBar, PageBusyProvider } from "./components/PageBusy";
 import { Button, Card, Spinner } from "./components/ui";
 import { Setup } from "./pages/Setup";
 import { Settings } from "./pages/Settings";
@@ -107,8 +108,11 @@ function Shell() {
   return (
     <div className="flex h-full">
       <Sidebar page={page} onNavigate={setPage} />
-      <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        <Page page={page} />
+      <main className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
+        <PageBusyProvider>
+          <PageBusyBar />
+          <Page page={page} />
+        </PageBusyProvider>
       </main>
     </div>
   );

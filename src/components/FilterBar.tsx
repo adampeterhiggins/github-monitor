@@ -12,6 +12,7 @@ import {
 import { commitWeekBounds } from "../lib/db/queries";
 import { useScope, useScopedQuery, type UserFilterSupport } from "../lib/hooks";
 import { Button, Dropdown, DropdownRow } from "./ui";
+import { PageBusyStatus } from "./PageBusy";
 import { RepoFilter } from "./RepoFilter";
 import { UserFilter } from "./UserFilter";
 
@@ -48,11 +49,14 @@ export function FilterBar({
 
       {extra}
 
-      <span className="ml-auto text-[11px] tabular text-ink-muted">
-        {period === "all"
-          ? "All available history"
-          : `${formatDate(range.fromMs)} – ${formatDate(range.toMs)}`}
-      </span>
+      <div className="ml-auto flex items-center gap-3">
+        <PageBusyStatus />
+        <span className="text-[11px] tabular text-ink-muted">
+          {period === "all"
+            ? "All available history"
+            : `${formatDate(range.fromMs)} – ${formatDate(range.toMs)}`}
+        </span>
+      </div>
     </div>
   );
 }

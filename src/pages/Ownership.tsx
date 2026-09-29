@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 import { useScope, useScopedQuery } from "../lib/hooks";
 import { contributorWeeklyByLogin, ownershipCells } from "../lib/db/queries";
 import { allocateUnits, concentration } from "../lib/agg/concentration";
@@ -7,6 +7,7 @@ import { useApp } from "../lib/state/app";
 import { useVizPalette } from "../lib/viz/useVizPalette";
 import { seriesColorCycled } from "../lib/viz/palette";
 import { PageShell } from "../components/PageShell";
+import { useViewPending } from "../components/PageBusy";
 import { DailyLines, HeatMatrix, Waffle, otherColor, type HeatTooltipContent } from "../components/charts";
 import {
   Callout,
@@ -67,6 +68,22 @@ export function Ownership() {
   const [cellSize, setCellSize] = useState(DEFAULT_CELL);
   const [gap, setGap] = useState(DEFAULT_GAP);
   const [borders, setBorders] = useState(DEFAULT_BORDERS);
+
+  const drawnPeopleLimit = useDeferredValue(peopleLimit);
+  const drawnRepoLimit = useDeferredValue(repoLimit);
+  const drawnRowsAre = useDeferredValue(rowsAre);
+  const drawnCellSize = useDeferredValue(cellSize);
+  const drawnGap = useDeferredValue(gap);
+  const drawnBorders = useDeferredValue(borders);
+  useViewPending(
+    "ownership-charts",
+    peopleLimit !== drawnPeopleLimit ||
+      repoLimit !== drawnRepoLimit ||
+      rowsAre !== drawnRowsAre ||
+      cellSize !== drawnCellSize ||
+      gap !== drawnGap ||
+      borders !== drawnBorders,
+  );
 
   const cells = useScopedQuery("ownership-cells", scope, (db) =>
     ownershipCells(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek, scope.logins),
@@ -165,8 +182,8 @@ export function Ownership() {
   }, [byPerson, palette]);
 
   const matrix = useMemo(() => {
-    const people = take(byPerson, peopleLimit);
-    const repos = take(byRepo, repoLimit);
+    const people = take(byPerson, drawnPeopleLimit);
+    const repos = take(byRepo, drawnRepoLimit);
     const lookup = new Map<
       string,
       { commits: number; additions: number; deletions: number }
@@ -179,7 +196,7 @@ export function Ownership() {
       });
     }
 
-    const peopleAsRows = rowsAre === "people";
+    const peopleAsRows = drawnRowsAre === "people";
     const rowItems = peopleAsRows ? people : repos;
     const colItems = peopleAsRows ? repos : people;
 
@@ -259,7 +276,7 @@ export function Ownership() {
       hiddenPeople: Math.max(0, byPerson.length - people.length),
       hiddenRepos: Math.max(0, byRepo.length - repos.length),
     };
-  }, [byPerson, byRepo, rows, peopleLimit, repoLimit, rowsAre, org.total]);
+  }, [byPerson, byRepo, rows, drawnPeopleLimit, drawnRepoLimit, drawnRowsAre, org.total]);
 
   const repoTable = useMemo(
     () =>
@@ -587,12 +604,12 @@ export function Ownership() {
           rowLabels={matrix.rowLabels}
           columnLabels={matrix.columnLabels}
           values={matrix.values}
-          format={(v) => full(v)}
+          format={full}
           headerTooltip={matrix.headerTooltip}
           cellTooltip={matrix.cellTooltip}
-          cellSize={cellSize}
-          gap={gap}
-          borders={borders}
+          cellSize={drawnCellSize}
+          gap={drawnGap}
+          borders={drawnBorders}
         />
       </ChartCard>
 

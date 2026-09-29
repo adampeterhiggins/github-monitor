@@ -8,7 +8,6 @@ import {
   Line,
   LineChart,
   ReferenceLine,
-  ResponsiveContainer,
   Scatter,
   ScatterChart,
   Tooltip,
@@ -16,7 +15,21 @@ import {
   YAxis,
   ZAxis,
 } from "recharts";
-import { useMemo, useState, type FocusEvent, type MouseEvent } from "react";
+import {
+  cloneElement,
+  createContext,
+  memo,
+  useContext,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ComponentProps,
+  type FocusEvent,
+  type MouseEvent,
+  type ReactElement,
+} from "react";
 import { useVizPalette } from "../lib/viz/useVizPalette";
 import { sequentialStep, seriesColorCycled, OTHER_COLOR, type VizPalette } from "../lib/viz/palette";
 import { formatShort, formatDate, weekTickFormatter } from "../lib/agg/weeks";
@@ -29,6 +42,116 @@ import { compact, full, useChartHeight } from "./ui";
  */
 function useHeight(authored: number): number {
   return useChartHeight() ?? authored;
+}
+
+/**
+ * Size a recharts tree without ResponsiveContainer.
+ *
+ * ResponsiveContainer measures on every parent layout — opening a menu that
+ * briefly changes overflow was enough to redraw every sparkline on the page.
+ * This only updates when the CSS width actually changes.
+ *
+ * Series grow in when the plot first appears, and again when `motionKey`
+ * changes — a new bucket, shape, or stack is a new picture. Later value
+ * updates (a repository tick with the same weeks) paint in place so twenty
+ * cards do not each replay a 400ms tween.
+ */
+const STATIC = { isAnimationActive: false };
+const ENTER = { isAnimationActive: true, animationDuration: 400 };
+const ChartMotion = createContext<{ isAnimationActive: boolean; animationDuration?: number }>(STATIC);
+
+const ENTER_MS = 450;
+
+function domainKey(data: Array<{ week?: number }>): string {
+  if (data.length === 0) return "0";
+  return `${data.length}:${data[0]?.week ?? ""}:${data[data.length - 1]?.week ?? ""}`;
+}
+
+function ChartBox({
+  height,
+  children,
+  motionKey = "",
+}: {
+  height: number;
+  children: ReactElement<{ width?: number; height?: number }>;
+  /** Changing this remounts the recharts tree so it grows in from zero. */
+  motionKey?: string | number;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(0);
+  const [enter, setEnter] = useState(true);
+  const [prevKey, setPrevKey] = useState(motionKey);
+  const [generation, setGeneration] = useState(0);
+
+  if (motionKey !== prevKey) {
+    setPrevKey(motionKey);
+    setGeneration((g) => g + 1);
+    setEnter(true);
+  }
+
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    setWidth(Math.max(0, Math.round(el.clientWidth)));
+  }, []);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let frame = 0;
+    const apply = (next: number) => {
+      const rounded = Math.max(0, Math.round(next));
+      setWidth((prev) => (prev === rounded ? prev : rounded));
+    };
+    const ro = new ResizeObserver((entries) => {
+      const next = entries[0]?.contentRect.width ?? el.clientWidth;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => apply(next));
+    });
+    ro.observe(el);
+    return () => {
+      cancelAnimationFrame(frame);
+      ro.disconnect();
+    };
+  }, []);
+
+  const visible = width > 0;
+
+  useEffect(() => {
+    if (!visible || !enter) return;
+    const t = window.setTimeout(() => setEnter(false), ENTER_MS);
+    return () => window.clearTimeout(t);
+  }, [visible, enter, generation]);
+
+  const motion = enter ? ENTER : STATIC;
+
+  return (
+    <div ref={ref} style={{ width: "100%", height }}>
+      {visible ? (
+        <ChartMotion.Provider value={motion}>
+          <div key={generation} style={{ width, height }}>
+            {cloneElement(children, { width, height })}
+          </div>
+        </ChartMotion.Provider>
+      ) : null}
+    </div>
+  );
+}
+
+function BarSeries(props: ComponentProps<typeof Bar>) {
+  return <Bar {...useContext(ChartMotion)} {...props} />;
+}
+
+function LineSeries(props: ComponentProps<typeof Line>) {
+  return <Line {...useContext(ChartMotion)} {...props} />;
+}
+
+function AreaSeries(props: ComponentProps<typeof Area>) {
+  return <Area {...useContext(ChartMotion)} {...props} />;
+}
+
+function ScatterSeries(props: ComponentProps<typeof Scatter>) {
+  return <Scatter {...useContext(ChartMotion)} {...props} />;
 }
 
 /* ── Shared chart chrome ────────────────────────────────────────────────────
@@ -188,7 +311,7 @@ export function WeeklyColumns({
   if (data.length === 0) return <NoData height={h} />;
 
   return (
-    <ResponsiveContainer width="100%" height={h}>
+    <ChartBox height={h} motionKey={domainKey(data)}>
       <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} barCategoryGap={geom.gap}>
         <CartesianGrid {...gridProps(palette)} />
         <XAxis
@@ -217,9 +340,9 @@ export function WeeklyColumns({
             );
           }}
         />
-        <Bar dataKey="value" fill={color} maxBarSize={BAR_MAX} radius={geom.radius} minPointSize={1} />
+        <BarSeries  dataKey="value" fill={color} maxBarSize={BAR_MAX} radius={geom.radius} minPointSize={1} />
         {withBrush ? (
-          <Brush
+          <Brush {...STATIC} 
             dataKey="week"
             height={28}
             travellerWidth={8}
@@ -235,7 +358,7 @@ export function WeeklyColumns({
           />
         ) : null}
       </BarChart>
-    </ResponsiveContainer>
+    </ChartBox>
   );
 }
 
@@ -257,7 +380,7 @@ export type TimelineShape = "area" | "line" | "bar";
  * means everything is shown, which keeps "no filter" and "all selected"
  * indistinguishable rather than requiring them to be kept in step.
  */
-export function TimelineArea({
+export const TimelineArea = memo(function TimelineArea({
   data,
   series,
   height = 260,
@@ -272,6 +395,7 @@ export function TimelineArea({
   onBrushChange,
   yMax,
   yMin = 0,
+  layoutKey = "",
 }: {
   data: Array<Record<string, number>>;
   series: StackSeriesSpec[];
@@ -304,6 +428,8 @@ export function TimelineArea({
   yMax?: number;
   /** Shared lower bound, for a metric that goes below zero. Ignored without yMax. */
   yMin?: number;
+  /** Replay the grow-in when this changes (bucket, cumulative, card split). */
+  layoutKey?: string;
 }) {
   const palette = useVizPalette();
   const h = useHeight(height);
@@ -419,7 +545,7 @@ export function TimelineArea({
   );
 
   const brush = withBrush ? (
-    <Brush
+    <Brush {...STATIC} 
       dataKey="week"
       height={28}
       travellerWidth={8}
@@ -437,7 +563,10 @@ export function TimelineArea({
 
   return (
     <div>
-      <ResponsiveContainer width="100%" height={h}>
+      <ChartBox
+        height={h}
+        motionKey={`${layoutKey}:${shape}:${stackMode}:${values}:${colored.map((s) => s.key).join(",")}:${domainKey(plotted)}`}
+      >
         {shape === "bar" ? (
           <BarChart
             data={plotted}
@@ -447,7 +576,7 @@ export function TimelineArea({
           >
             {axes}
             {colored.map((s, i) => (
-              <Bar
+              <BarSeries 
                 key={s.key}
                 dataKey={s.key}
                 stackId={stacked ? "stack" : undefined}
@@ -467,7 +596,7 @@ export function TimelineArea({
           >
             {axes}
             {colored.map((s) => (
-              <Line
+              <LineSeries 
                 key={s.key}
                 type="monotone"
                 dataKey={s.key}
@@ -490,7 +619,7 @@ export function TimelineArea({
           >
             {axes}
             {colored.map((s) => (
-              <Area
+              <AreaSeries 
                 key={s.key}
                 type="monotone"
                 dataKey={s.key}
@@ -507,7 +636,7 @@ export function TimelineArea({
             {brush}
           </AreaChart>
         )}
-      </ResponsiveContainer>
+      </ChartBox>
 
       {colored.length >= 2 ? (
         <div className="mt-2">
@@ -522,7 +651,7 @@ export function TimelineArea({
       ) : null}
     </div>
   );
-}
+});
 
 /**
  * Legend whose entries toggle their series.
@@ -597,13 +726,14 @@ export interface StackSeriesSpec {
 
 /* ── Sparkline (contributor cards) ────────────────────────────────────────── */
 
-export function Sparkline({
+export const Sparkline = memo(function Sparkline({
   data,
   height = 56,
   colorIndex = 0,
   metricLabel,
   yMax,
   yMin = 0,
+  layoutKey = "",
 }: {
   data: WeekDatum[];
   height?: number;
@@ -616,6 +746,7 @@ export function Sparkline({
   yMax?: number;
   /** Shared lower bound, for a metric that goes below zero. Ignored without yMax. */
   yMin?: number;
+  layoutKey?: string;
 }) {
   const palette = useVizPalette();
   const h = useHeight(height);
@@ -628,7 +759,7 @@ export function Sparkline({
   if (data.length === 0) return <NoData height={h} compactMessage />;
 
   return (
-    <ResponsiveContainer width="100%" height={h}>
+    <ChartBox height={h} motionKey={`${layoutKey}:${domainKey(data)}`}>
       <BarChart
         data={data}
         margin={{ top: 4, right: 4, bottom: 0, left: 0 }}
@@ -668,7 +799,7 @@ export function Sparkline({
             );
           }}
         />
-        <Bar
+        <BarSeries 
           dataKey="value"
           fill={color}
           maxBarSize={14}
@@ -678,9 +809,9 @@ export function Sparkline({
           minPointSize={1}
         />
       </BarChart>
-    </ResponsiveContainer>
+    </ChartBox>
   );
-}
+});
 
 /* ── Code frequency: additions above the baseline, deletions below ─────────── */
 
@@ -709,7 +840,7 @@ export function DivergingWeekly({
 
   return (
     <div>
-      <ResponsiveContainer width="100%" height={h}>
+      <ChartBox height={h} motionKey={domainKey(data)}>
         <BarChart data={shaped} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} barCategoryGap={geom.gap} stackOffset="sign">
           <CartesianGrid {...gridProps(palette)} />
           <XAxis
@@ -741,8 +872,8 @@ export function DivergingWeekly({
               );
             }}
           />
-          <Bar dataKey="additions" fill={pos} stackId="cf" maxBarSize={BAR_MAX} radius={geom.radius} />
-          <Bar
+          <BarSeries  dataKey="additions" fill={pos} stackId="cf" maxBarSize={BAR_MAX} radius={geom.radius} />
+          <BarSeries 
             dataKey="deletions"
             fill={neg}
             stackId="cf"
@@ -750,7 +881,7 @@ export function DivergingWeekly({
             radius={geom.radius[0] ? [0, 0, geom.radius[0], geom.radius[1]] : [0, 0, 0, 0]}
           />
         </BarChart>
-      </ResponsiveContainer>
+      </ChartBox>
       <div className="mt-2">
         <Legend shape="rect" items={[{ label: "Additions", color: pos }, { label: "Deletions", color: neg }]} />
       </div>
@@ -786,7 +917,7 @@ export function DailyLines({
 
   return (
     <div>
-      <ResponsiveContainer width="100%" height={h}>
+      <ChartBox height={h} motionKey={`${colored.map((s) => s.key).join(",")}:${domainKey(data as Array<{ week?: number }>)}`}>
         <LineChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
           <CartesianGrid {...gridProps(palette)} />
           <XAxis
@@ -817,7 +948,7 @@ export function DailyLines({
             }}
           />
           {colored.map((s) => (
-            <Line
+            <LineSeries 
               key={s.key}
               type="monotone"
               dataKey={s.key}
@@ -830,7 +961,7 @@ export function DailyLines({
             />
           ))}
         </LineChart>
-      </ResponsiveContainer>
+      </ChartBox>
       {colored.length >= 2 ? (
         <div className="mt-2">
           <Legend items={colored.map((s) => ({ label: s.label, color: s.color }))} />
@@ -859,7 +990,7 @@ export function DailyArea({
 
   return (
     <div>
-      <ResponsiveContainer width="100%" height={h}>
+      <ChartBox height={h} motionKey={`${colored.map((s) => s.key).join(",")}:${domainKey(data as Array<{ week?: number }>)}`}>
         <AreaChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
           <CartesianGrid {...gridProps(palette)} />
           <XAxis
@@ -887,7 +1018,7 @@ export function DailyArea({
             }}
           />
           {colored.map((s) => (
-            <Area
+            <AreaSeries 
               key={s.key}
               type="monotone"
               dataKey={s.key}
@@ -901,7 +1032,7 @@ export function DailyArea({
             />
           ))}
         </AreaChart>
-      </ResponsiveContainer>
+      </ChartBox>
       {colored.length >= 2 ? (
         <div className="mt-2">
           <Legend items={colored.map((s) => ({ label: s.label, color: s.color }))} />
@@ -931,7 +1062,7 @@ export function RankedBars({
   if (data.length === 0) return <NoData height={h} />;
 
   return (
-    <ResponsiveContainer width="100%" height={h}>
+    <ChartBox height={h} motionKey={data.map((d) => d.name).join(",")}>
       <BarChart
         data={data}
         layout="vertical"
@@ -962,7 +1093,7 @@ export function RankedBars({
             );
           }}
         />
-        <Bar
+        <BarSeries 
           dataKey="value"
           fill={color}
           maxBarSize={BAR_MAX}
@@ -976,7 +1107,7 @@ export function RankedBars({
           }}
         />
       </BarChart>
-    </ResponsiveContainer>
+    </ChartBox>
   );
 }
 
@@ -1128,7 +1259,7 @@ export function GroupedColumns({
 
   return (
     <div>
-      <ResponsiveContainer width="100%" height={h}>
+      <ChartBox height={h} motionKey={`${colored.map((s) => s.key).join(",")}:${data.length}`}>
         {/* barGap 2 is the surface gap that separates touching bars. */}
         <BarChart data={data} margin={{ top: 8, right: 8, bottom: 0, left: 0 }} barGap={2}>
           <CartesianGrid {...gridProps(palette)} />
@@ -1152,10 +1283,10 @@ export function GroupedColumns({
             }}
           />
           {colored.map((s) => (
-            <Bar key={s.key} dataKey={s.key} fill={s.color} maxBarSize={BAR_MAX} radius={BAR_RADIUS} />
+            <BarSeries  key={s.key} dataKey={s.key} fill={s.color} maxBarSize={BAR_MAX} radius={BAR_RADIUS} />
           ))}
         </BarChart>
-      </ResponsiveContainer>
+      </ChartBox>
       {colored.length >= 2 ? (
         <div className="mt-2">
           <Legend shape="rect" items={colored.map((s) => ({ label: s.label, color: s.color }))} />
@@ -1225,7 +1356,7 @@ export interface HeatTooltipContent {
  * Native `title` is not enough here — repository names truncate, and a cell is
  * more than one number — so hover opens the same tooltip shell the charts use.
  */
-export function HeatMatrix({
+export const HeatMatrix = memo(function HeatMatrix({
   rowLabels,
   columnLabels,
   values,
@@ -1417,7 +1548,7 @@ export function HeatMatrix({
       ) : null}
     </div>
   );
-}
+});
 
 /* ── Waffle (concentration as 100 squares) ────────────────────────────────── */
 
@@ -1517,7 +1648,7 @@ export function StackedDailyArea({
 
   return (
     <div>
-      <ResponsiveContainer width="100%" height={h}>
+      <ChartBox height={h} motionKey={`${keys.join(",")}:${plotted.length}`}>
         <AreaChart data={plotted} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
           <CartesianGrid {...gridProps(palette)} />
           <XAxis
@@ -1564,7 +1695,7 @@ export function StackedDailyArea({
             }}
           />
           {colored.map((s) => (
-            <Area
+            <AreaSeries 
               key={s.key}
               type="monotone"
               dataKey={s.key}
@@ -1578,7 +1709,7 @@ export function StackedDailyArea({
             />
           ))}
         </AreaChart>
-      </ResponsiveContainer>
+      </ChartBox>
       <div className="mt-2">
         <Legend items={colored.map((s) => ({ label: s.label, color: s.color }))} />
       </div>
@@ -1611,7 +1742,7 @@ export function MergeScatter({
   if (points.length === 0) return <NoData height={h} />;
 
   return (
-    <ResponsiveContainer width="100%" height={h}>
+    <ChartBox height={h} motionKey={points.length}>
       <ScatterChart margin={{ top: 8, right: 12, bottom: 8, left: 0 }}>
         <CartesianGrid {...gridProps(palette)} />
         <XAxis
@@ -1662,9 +1793,9 @@ export function MergeScatter({
             );
           }}
         />
-        <Scatter data={points} fill={color} fillOpacity={0.7} />
+        <ScatterSeries  data={points} fill={color} fillOpacity={0.7} />
       </ScatterChart>
-    </ResponsiveContainer>
+    </ChartBox>
   );
 }
 

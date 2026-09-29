@@ -137,6 +137,37 @@ function systemDark(): boolean {
   return window.matchMedia("(prefers-color-scheme: dark)").matches;
 }
 
+/** Persist the current selection; coalesced so ticking many repos is one write. */
+let persistSelectionTimer: ReturnType<typeof setTimeout> | null = null;
+
+function persistSelectedReposSoon(): void {
+  if (persistSelectionTimer != null) clearTimeout(persistSelectionTimer);
+  persistSelectionTimer = setTimeout(() => {
+    persistSelectionTimer = null;
+    void flushSelectedRepos();
+  }, 280);
+}
+
+async function flushSelectedRepos(): Promise<void> {
+  if (persistSelectionTimer != null) {
+    clearTimeout(persistSelectionTimer);
+    persistSelectionTimer = null;
+  }
+  const { db, repos, selectedRepoIds } = useApp.getState();
+  if (!db) return;
+  const wanted = new Set(selectedRepoIds);
+  await setRepoSelection(
+    db,
+    repos.map((r) => ({ repoId: r.id, included: wanted.has(r.id) })),
+  );
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", () => {
+    void flushSelectedRepos();
+  });
+}
+
 export function applyCurrentTheme(): void {
   const { theme, themeId } = useApp.getState();
   applyDocumentTheme(themeId, theme, systemDark());
@@ -238,14 +269,8 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   setSelectedRepos: async (ids) => {
-    const { db, repos } = get();
     set({ selectedRepoIds: ids });
-    if (!db) return;
-    const wanted = new Set(ids);
-    await setRepoSelection(
-      db,
-      repos.map((r) => ({ repoId: r.id, included: wanted.has(r.id) })),
-    );
+    persistSelectedReposSoon();
   },
 
   toggleRepo: async (id) => {

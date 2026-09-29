@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, memo, useCallback, useContext, useDeferredValue, useEffect, useMemo, useState, type ReactNode } from "react";
 import { useApp } from "../lib/state/app";
 import {
   METRICS,
@@ -7,7 +7,7 @@ import {
   metricValue,
   type ContributionMetric,
 } from "../lib/agg/metrics";
-import { useScope, useScopedQuery } from "../lib/hooks";
+import { useDeferredScope, useScope, useScopedQuery, type Scope } from "../lib/hooks";
 import {
   contributorRepoBreakdown,
   contributorRepoIds,
@@ -30,6 +30,7 @@ import {
 } from "../lib/agg/series";
 import { WEEK_SECONDS, axisWeeksFor, formatDate, weekSpan } from "../lib/agg/weeks";
 import { PageShell } from "../components/PageShell";
+import { useViewPending } from "../components/PageBusy";
 import { Sparkline, TimelineArea, type TimelineShape } from "../components/charts";
 import {
   Button,
@@ -115,6 +116,13 @@ const CARD_SPLITS: Array<{ value: "none" | "repository"; label: string }> = [
   { value: "repository", label: "By repository" },
 ];
 
+/** Expanded-card chrome, so collapsed cards do not re-render when it changes. */
+const CardChromeContext = createContext<ReactNode>(null);
+
+function CardChrome() {
+  return useContext(CardChromeContext);
+}
+
 /**
  * How many entities a breakdown draws separately before the tail becomes "Other".
  *
@@ -185,6 +193,55 @@ export function Contributors() {
   const scope = useScope();
   const metric = useApp((s) => s.metric);
   const setMetric = useApp((s) => s.setMetric);
+  const selectedRepoCount = scope.repoIds.length;
+
+  return (
+    <PageShell
+      title="Contributors"
+      userFilter="full"
+      subtitle={
+        <>
+          Contributions per week across{" "}
+          <strong className="font-medium text-ink">{full(selectedRepoCount)}</strong>{" "}
+          {selectedRepoCount === 1 ? "repository" : "repositories"}, excluding merge commits
+          {scope.filteredByUser ? (
+            <> — filtered to {full(scope.logins?.length ?? 0)} selected contributors</>
+          ) : null}
+        </>
+      }
+      filterExtra={
+        <Dropdown label={`Contributions: ${metricLabel(metric)}`} width={180} align="left">
+          {(close) => (
+            <div className="py-1">
+              {METRICS.map((m) => (
+                <DropdownRow
+                  key={m.id}
+                  selected={m.id === metric}
+                  onClick={() => {
+                    setMetric(m.id);
+                    close();
+                  }}
+                >
+                  {m.label}
+                </DropdownRow>
+              ))}
+            </div>
+          )}
+        </Dropdown>
+      }
+    >
+      <ContributorsBody />
+    </PageShell>
+  );
+}
+
+/**
+ * Charts and cards. Kept below the filter row so a repository tick can paint
+ * the checkbox before this tree rebuilds against the new slice.
+ */
+function ContributorsBody() {
+  const scope = useDeferredScope();
+  const metric = useApp((s) => s.metric);
   const setPeriod = useApp((s) => s.setPeriod);
   const setSelectedRepos = useApp((s) => s.setSelectedRepos);
   const repos = useApp((s) => s.repos);
@@ -234,15 +291,9 @@ export function Contributors() {
   const [seriesLimit, setSeriesLimit] = useState<string>(
     () => localStorage.getItem("github-monitor.seriesLimit") || "8",
   );
-  const maxSeries = seriesLimit === "all" ? Number.POSITIVE_INFINITY : Number(seriesLimit);
 
   /** Net lines can be negative, which several defaults here assume away. */
   const signedMetric = metricCanBeNegative(metric);
-
-  const cumulative = view === "cumulative";
-  // A running total is the same curve at any bucket size, so it reads the raw
-  // weekly series — which also keeps the brush, since that needs weeks.
-  const granularity: Granularity = cumulative ? "week" : view;
 
   /** Stable, so the view selector's key handler is bound once. */
   const chooseView = useCallback((v: TimelineView) => {
@@ -280,6 +331,21 @@ export function Contributors() {
    * query, so this is not a state to restore two dozen of on every visit.
    */
   const [showNumbers, setShowNumbers] = useState(false);
+
+  /**
+   * Chart-drawing prefs, deferred so the popover can paint the new selection
+   * before twenty-odd recharts trees rebuild. Queries still key off the live
+   * values, so a repository split starts fetching while the old picture holds.
+   */
+  const chartPrefs = useMemo(
+    () => ({ shape, stackMode, valueMode, view, breakdown, seriesLimit, cardSplit, sharedScale }),
+    [shape, stackMode, valueMode, view, breakdown, seriesLimit, cardSplit, sharedScale],
+  );
+  const drawn = useDeferredValue(chartPrefs);
+  useViewPending("contributors-charts", chartPrefs !== drawn);
+  const drawnCumulative = drawn.view === "cumulative";
+  const drawnGranularity: Granularity = drawn.view === "cumulative" ? "week" : drawn.view;
+  const drawnMaxSeries = drawn.seriesLimit === "all" ? Number.POSITIVE_INFINITY : Number(drawn.seriesLimit);
 
   const totals = useScopedQuery("contrib-totals", scope, (db) =>
     contributorWeeklyTotals(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek, scope.logins),
@@ -365,8 +431,6 @@ export function Contributors() {
       weeklyByRepo(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek, scope.logins),
     { enabled: scope.ready && breakdown === "repository" },
   );
-
-  const selectedRepoCount = scope.repoIds.length;
 
   /** Every week in range, clamped to where data starts so "All time" stays sane. */
   const axisWeeks = useMemo(
@@ -484,7 +548,7 @@ export function Contributors() {
    * contributor split reuses `perLogin` rather than issuing a second query.
    */
   const orgStack = useMemo(() => {
-    if (breakdown === "contributor") {
+    if (drawn.breakdown === "contributor") {
       return buildStacks({
         rows: perLogin.data ?? [],
         weeks: visibleWeeks,
@@ -493,10 +557,10 @@ export function Contributors() {
         labelOf: (r) => r.login,
         valueOf: (r) => metricValue(r, metric),
         rankBy: signedMetric ? Math.abs : undefined,
-        maxSeries,
+        maxSeries: drawnMaxSeries,
       });
     }
-    if (breakdown === "repository") {
+    if (drawn.breakdown === "repository") {
       return buildStacks({
         rows: byRepoWeekly.data ?? [],
         weeks: visibleWeeks,
@@ -505,11 +569,11 @@ export function Contributors() {
         labelOf: (r) => r.full_name.split("/").pop() ?? r.full_name,
         valueOf: (r) => metricValue(r, metric),
         rankBy: signedMetric ? Math.abs : undefined,
-        maxSeries,
+        maxSeries: drawnMaxSeries,
       });
     }
     return null;
-  }, [breakdown, perLogin.data, byRepoWeekly.data, visibleWeeks, metric, signedMetric, maxSeries]);
+  }, [drawn.breakdown, perLogin.data, byRepoWeekly.data, visibleWeeks, metric, signedMetric, drawnMaxSeries]);
 
   /**
    * One dataset for the org chart whichever view is selected: the breakdown when
@@ -527,9 +591,9 @@ export function Contributors() {
       : masterSeries.map((d) => ({ week: d.week, total: d.value }));
 
     const keys = series.map((sr) => sr.key);
-    const rolled = rollUp(base, keys, granularity);
-    return { series, data: cumulative ? toCumulative(rolled, keys) : rolled };
-  }, [orgStack, masterSeries, metric, granularity, cumulative]);
+    const rolled = rollUp(base, keys, drawnGranularity);
+    return { series, data: drawnCumulative ? toCumulative(rolled, keys) : rolled };
+  }, [orgStack, masterSeries, metric, drawnGranularity, drawnCumulative]);
 
   /**
    * The brush reports positions in the buckets the chart drew, which are weeks
@@ -542,6 +606,11 @@ export function Contributors() {
       if (window) setPendingBrush(window);
     },
     [orgChart.data, axisWeeks],
+  );
+
+  const onOrgBrush = useCallback(
+    (r: { startIndex: number; endIndex: number }) => handleBrush(r.startIndex, r.endIndex),
+    [handleBrush],
   );
 
   /**
@@ -578,7 +647,7 @@ export function Contributors() {
    * After that a click adds an unselected series or removes a selected one, and
    * emptying the set returns to everything, the state it started in.
    */
-  const toggleKey = (key: string) =>
+  const toggleKey = useCallback((key: string) => {
     setActiveKeys((prev) => {
       if (prev.size === 0) return new Set([key]);
       const next = new Set(prev);
@@ -586,13 +655,14 @@ export function Contributors() {
       else next.add(key);
       return next;
     });
+  }, []);
 
   /**
    * login -> stacked-by-repository series, built once for every card rather than
    * per card. Keyed lowercase to match the merged identities.
    */
   const cardStacks = useMemo(() => {
-    if (cardSplit !== "repository") return null;
+    if (drawn.cardSplit !== "repository") return null;
     const rowsByLogin = new Map<string, typeof cardRepoWeekly.data>();
     for (const row of cardRepoWeekly.data ?? []) {
       const key = row.login.toLowerCase();
@@ -612,12 +682,12 @@ export function Contributors() {
           labelOf: (r) => r.full_name.split("/").pop() ?? r.full_name,
           valueOf: (r) => metricValue(r, metric),
           rankBy: signedMetric ? Math.abs : undefined,
-          maxSeries,
+          maxSeries: drawnMaxSeries,
         }),
       );
     }
     return out;
-  }, [cardSplit, cardRepoWeekly.data, visibleWeeks, metric, signedMetric, maxSeries]);
+  }, [drawn.cardSplit, cardRepoWeekly.data, visibleWeeks, metric, signedMetric, drawnMaxSeries]);
 
   /**
    * Every visible card's chart, plus the bounds that fit all of them.
@@ -637,16 +707,16 @@ export function Contributors() {
         c,
         cardStacks?.get(c.login.toLowerCase()) ?? null,
         metric,
-        granularity,
-        cumulative,
+        drawnGranularity,
+        drawnCumulative,
       ),
     );
 
     return {
       byLogin: new Map(visible.map((c, i) => [c.login, charts[i]])),
-      ...chartBounds(charts, stackMode !== "overlaid"),
+      ...chartBounds(charts, drawn.stackMode !== "overlaid"),
     };
-  }, [cards, limit, cardStacks, metric, granularity, cumulative, stackMode]);
+  }, [cards, limit, cardStacks, metric, drawnGranularity, drawnCumulative, drawn.stackMode]);
 
   /**
    * Whether anything behind the filter button is off its default. Marks the
@@ -655,6 +725,22 @@ export function Contributors() {
    * which is flagged anyway.
    */
   const viewChanged = breakdown !== "none" || shape !== "bar";
+
+  const orgLabelOf = useCallback(
+    (week: number) => bucketLabel(week, drawnGranularity),
+    [drawnGranularity],
+  );
+
+  const cardView = useMemo(
+    () => ({
+      shape: drawn.shape,
+      stackMode: drawn.stackMode,
+      valueMode: drawn.valueMode,
+      granularity: drawnGranularity,
+      bucket: drawn.view,
+    }),
+    [drawn.shape, drawn.stackMode, drawn.valueMode, drawnGranularity, drawn.view],
+  );
 
   /**
    * The controls a contributor card carries when it is opened full screen.
@@ -746,41 +832,7 @@ export function Contributors() {
   const loading = totals.isFetching || perLogin.isFetching;
 
   return (
-    <PageShell
-      title="Contributors"
-      userFilter="full"
-      subtitle={
-        <>
-          Contributions per week across{" "}
-          <strong className="font-medium text-ink">{full(selectedRepoCount)}</strong>{" "}
-          {selectedRepoCount === 1 ? "repository" : "repositories"}, excluding merge commits
-          {scope.filteredByUser ? (
-            <> — filtered to {full(scope.logins?.length ?? 0)} selected contributors</>
-          ) : null}
-        </>
-      }
-      filterExtra={
-        <Dropdown label={`Contributions: ${metricLabel(metric)}`} width={180} align="left">
-          {(close) => (
-            <div className="py-1">
-              {METRICS.map((m) => (
-                <DropdownRow
-                  key={m.id}
-                  selected={m.id === metric}
-                  onClick={() => {
-                    setMetric(m.id);
-                    close();
-                  }}
-                >
-                  {m.label}
-                </DropdownRow>
-              ))}
-            </div>
-          )}
-        </Dropdown>
-      }
-    >
-      <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-4">
         <ChartCard
           title={`${metricLabel(metric)} over time`}
           subtitle={
@@ -907,16 +959,17 @@ export function Contributors() {
           <TimelineArea
             data={orgChart.data}
             series={orgChart.series}
-            shape={shape}
-            stackMode={stackMode}
-            values={valueMode}
+            shape={drawn.shape}
+            stackMode={drawn.stackMode}
+            values={drawn.valueMode}
+            layoutKey={drawn.view}
             height={260}
             valueLabel={valueLabel}
-            labelOf={(week) => bucketLabel(week, granularity)}
+            labelOf={orgLabelOf}
             activeKeys={activeKeys}
             onToggleKey={toggleKey}
             withBrush
-            onBrushChange={(r) => handleBrush(r.startIndex, r.endIndex)}
+            onBrushChange={onOrgBrush}
           />
 
         </ChartCard>
@@ -965,6 +1018,7 @@ export function Contributors() {
             </div>
 
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+              <CardChromeContext.Provider value={cardControls}>
               {cards.slice(0, limit).map((c, i) => (
                 <ContributorCardView
                   key={c.login}
@@ -972,18 +1026,19 @@ export function Contributors() {
                   rank={i + 1}
                   metric={metric}
                   chart={cardCharts.byLogin.get(c.login)!}
-                  yMax={sharedScale ? cardCharts.ceiling : undefined}
-                  yMin={sharedScale ? cardCharts.floor : undefined}
+                  yMax={drawn.sharedScale ? cardCharts.ceiling : undefined}
+                  yMin={drawn.sharedScale ? cardCharts.floor : undefined}
                   repoCount={repos.length}
-                  view={{ shape, stackMode, valueMode, granularity }}
-                  controls={cardControls}
+                  view={cardView}
                   showNumbers={showNumbers}
                   span={spanByLogin.get(c.login.toLowerCase()) ?? null}
                   theirRepoIds={reposByLogin.get(c.login.toLowerCase()) ?? []}
+                  scope={scope}
                   onSetPeriod={setPeriod}
                   onSelectRepos={setSelectedRepos}
                 />
               ))}
+              </CardChromeContext.Provider>
             </div>
 
             {cards.length > limit ? (
@@ -1057,11 +1112,10 @@ export function Contributors() {
           </>
         )}
       </div>
-    </PageShell>
   );
 }
 
-function ContributorCardView({
+const ContributorCardView = memo(function ContributorCardView({
   card,
   rank,
   metric,
@@ -1070,10 +1124,10 @@ function ContributorCardView({
   yMin,
   repoCount,
   view,
-  controls,
   showNumbers,
   span,
   theirRepoIds,
+  scope,
   onSetPeriod,
   onSelectRepos,
 }: {
@@ -1093,20 +1147,24 @@ function ContributorCardView({
     stackMode: StackMode;
     valueMode: ValueMode;
     granularity: Granularity;
+    bucket: TimelineView;
   };
-  /** Shown when the card is opened full screen, where the page's own are hidden. */
-  controls: ReactNode;
   /** Set for every card at once, from the control above the grid. */
   showNumbers: boolean;
   /** The period covering this person's whole history, or null if they have none. */
   span: { from: number; to: number } | null;
   /** Every repository they have commits in, across the cache rather than the selection. */
   theirRepoIds: number[];
+  /** The deferred page slice, so a live filter tick does not rebuild every card. */
+  scope: Scope;
   onSetPeriod: (period: "custom", custom: { from: number; to: number }) => void;
   onSelectRepos: (ids: number[]) => Promise<void> | void;
 }) {
-  const scope = useScope();
   const [expanded, setExpanded] = useState(false);
+  const cardLabelOf = useCallback(
+    (week: number) => bucketLabel(week, view.granularity),
+    [view.granularity],
+  );
 
   const breakdown = useScopedQuery(
     `contrib-repos-${card.login}`,
@@ -1168,6 +1226,7 @@ function ContributorCardView({
         yMax={yMax}
         yMin={yMin}
         height={72}
+        layoutKey={view.bucket}
       />
     ) : (
       <TimelineArea
@@ -1176,9 +1235,10 @@ function ContributorCardView({
         shape={view.shape}
         stackMode={view.stackMode}
         values={view.valueMode}
+        layoutKey={view.bucket}
         height={96}
         valueLabel={metric}
-        labelOf={(week) => bucketLabel(week, view.granularity)}
+        labelOf={cardLabelOf}
         yMax={yMax}
         yMin={yMin}
       />
@@ -1237,7 +1297,7 @@ function ContributorCardView({
           )} deleted`}
           titleAfter={
             <>
-              {controls}
+              <CardChrome />
               {menu}
             </>
           }
@@ -1288,4 +1348,4 @@ function ContributorCardView({
       ) : null}
     </Card>
   );
-}
+});

@@ -146,6 +146,7 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
       width={400}
       align="left"
     >
+      {() => (
       <div className="flex flex-col" style={{ maxHeight: 520 }}>
         <div className="border-b border-hairline p-2">
           <input
@@ -326,6 +327,7 @@ export function UserFilter({ support }: { support: UserFilterSupport }) {
           ) : null}
         </div>
       </div>
+      )}
     </Dropdown>
   );
 }

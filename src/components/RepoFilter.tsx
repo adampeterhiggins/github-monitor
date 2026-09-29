@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import { useApp } from "../lib/state/app";
 import { useScope, useScopedQuery } from "../lib/hooks";
 import { activeRepoIds, myRepoIds, useRepoSelectionData } from "../lib/repoSelection";
@@ -62,7 +62,12 @@ export function RepoFilter() {
     "repo-filter-totals",
     scope,
     (db) => commitsByRepo(db, allRepoIds, scope.range.fromWeek, scope.range.toWeek, scope.logins),
-    { enabled: scope.db != null && allRepoIds.length > 0 },
+    {
+      enabled: scope.db != null && allRepoIds.length > 0,
+      allowEmptySelection: true,
+      // Selection is not an input: this list is how you choose it.
+      cacheKey: `${scope.range.fromWeek}:${scope.range.toWeek}:${scope.logins?.join(",") ?? ""}`,
+    },
   );
 
   const commitsById = useMemo(
@@ -118,6 +123,14 @@ export function RepoFilter() {
 
   const apply = (ids: number[]) => void setSelectedRepos(ids);
 
+  const toggleId = useCallback(
+    (id: number, checked: boolean) => {
+      const current = useApp.getState().selectedRepoIds;
+      void setSelectedRepos(checked ? [...current, id] : current.filter((x) => x !== id));
+    },
+    [setSelectedRepos],
+  );
+
   const toggleVisible = (checked: boolean) => {
     const visibleIds = new Set(visible.map((r) => r.id));
     apply(
@@ -132,6 +145,7 @@ export function RepoFilter() {
 
   return (
     <Dropdown label={<span className="max-w-[220px] truncate">{label}</span>} width={400} align="left">
+      {() => (
       <div className="flex flex-col" style={{ maxHeight: 520 }}>
         <div className="border-b border-hairline p-2">
           <input
@@ -253,26 +267,14 @@ export function RepoFilter() {
               </div>
               <div className="my-1 border-t border-hairline" />
               {visible.map((r) => (
-                <div key={r.id} className="flex items-center gap-2 px-1.5 py-[3px]">
-                  <div className="min-w-0 flex-1">
-                    <Checkbox
-                      checked={selectedSet.has(r.id)}
-                      onChange={() =>
-                        apply(
-                          selectedSet.has(r.id)
-                            ? selected.filter((x) => x !== r.id)
-                            : [...selected, r.id],
-                        )
-                      }
-                      label={<RepoLabel repo={r} />}
-                    />
-                  </div>
-                  <RepoMeta
-                    commits={commitsById.get(r.id) ?? 0}
-                    pushedAt={r.pushed_at}
-                    sort={sort}
-                  />
-                </div>
+                <RepoFilterRow
+                  key={r.id}
+                  repo={r}
+                  checked={selectedSet.has(r.id)}
+                  commits={commitsById.get(r.id) ?? 0}
+                  sort={sort}
+                  onToggle={toggleId}
+                />
               ))}
             </>
           )}
@@ -287,6 +289,7 @@ export function RepoFilter() {
           <span className="text-[11px] tabular text-ink-muted">{full(selected.length)} selected</span>
         </div>
       </div>
+      )}
     </Dropdown>
   );
 }
@@ -317,6 +320,33 @@ function RepoMeta({
     </span>
   );
 }
+
+const RepoFilterRow = memo(function RepoFilterRow({
+  repo,
+  checked,
+  commits,
+  sort,
+  onToggle,
+}: {
+  repo: RepoRow;
+  checked: boolean;
+  commits: number;
+  sort: RepoSort;
+  onToggle: (id: number, checked: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center gap-2 px-1.5 py-[3px]">
+      <div className="min-w-0 flex-1">
+        <Checkbox
+          checked={checked}
+          onChange={(next) => onToggle(repo.id, next)}
+          label={<RepoLabel repo={repo} />}
+        />
+      </div>
+      <RepoMeta commits={commits} pushedAt={repo.pushed_at} sort={sort} />
+    </div>
+  );
+});
 
 function RepoLabel({ repo }: { repo: RepoRow }) {
   return (
