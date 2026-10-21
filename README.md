@@ -80,7 +80,7 @@ and the app says so rather than rendering blank charts.
 | Page | Source | Notes |
 |---|---|---|
 | Pulse | GraphQL PRs + issues | Derived — GitHub has no Pulse API. Adds size vs time-to-merge and open-PR age. |
-| Contributors | `stats/contributors` | Exact parity, plus stacked breakdowns |
+| Contributors | `stats/contributors`, `commits` (per day) | Exact parity, plus stacked breakdowns; per day counts commits only |
 | Community | `community/profile` | Health score + checklist coverage matrix |
 | Traffic | `traffic/*` | 14-day GitHub limit; accumulates locally, including referrer share |
 | Commits | `stats/commit_activity`, `stats/contributors` | Day-level detail covers 52 weeks |

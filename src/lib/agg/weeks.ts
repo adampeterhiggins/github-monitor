@@ -7,6 +7,7 @@
  */
 
 export const WEEK_SECONDS = 7 * 24 * 60 * 60;
+export const DAY_SECONDS = 24 * 60 * 60;
 
 /** Unix seconds for the Sunday 00:00 UTC that starts the week containing `date`. */
 export function weekStart(date: Date | number): number {
@@ -61,6 +62,32 @@ export function axisWeeksFor(
   let earliest = dataWeeks[0];
   for (const w of dataWeeks) if (w < earliest) earliest = w;
   return weekRange(Math.max(fromWeek, earliest), toWeek);
+}
+
+/**
+ * Day buckets (Unix seconds, 00:00 UTC) to plot on an axis — the daily
+ * counterpart of {@link axisWeeksFor}, pulled forward to the first day with data
+ * for the same reason. Never runs past today, which a week-aligned upper bound
+ * otherwise would by up to six empty days.
+ */
+export function axisDaysFor(
+  fromDay: number,
+  toDay: number,
+  dataDays: readonly number[],
+  now: number = Date.now(),
+): number[] {
+  const today = Math.floor(now / 1000 / DAY_SECONDS) * DAY_SECONDS;
+  const last = Math.min(toDay, today);
+  // Nothing to anchor to; keep at most a year of empty axis.
+  let first = Math.max(fromDay, last - 365 * DAY_SECONDS);
+  if (dataDays.length > 0) {
+    let earliest = dataDays[0];
+    for (const d of dataDays) if (d < earliest) earliest = d;
+    first = Math.max(fromDay, earliest);
+  }
+  const out: number[] = [];
+  for (let d = first; d <= last; d += DAY_SECONDS) out.push(d);
+  return out;
 }
 
 export function dayKey(date: Date | number): string {

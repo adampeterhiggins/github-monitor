@@ -424,6 +424,11 @@ function AboutCard() {
           collects the results on a second pass.
         </li>
         <li>
+          Those statistics are weekly. The per-day Contributors view reads the default
+          branch's commit list instead, from the sync history window onwards, also without
+          merge commits. It counts commits only: the list carries no line counts.
+        </li>
+        <li>
           Pulse has no dedicated endpoint. It is derived from pull requests and issues
           fetched over GraphQL, so its definitions are ours rather than GitHub's.
         </li>

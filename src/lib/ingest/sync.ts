@@ -22,6 +22,7 @@ import type {
 
 export type EndpointId =
   | "contributors"
+  | "commits"
   | "commit_activity"
   | "participation"
   | "code_frequency"
@@ -37,6 +38,7 @@ export type EndpointId =
 
 export const ALL_ENDPOINTS: EndpointId[] = [
   "contributors",
+  "commits",
   "commit_activity",
   "participation",
   "code_frequency",
@@ -69,6 +71,7 @@ const EMPTY_STATS_ARE_PENDING: ReadonlySet<(typeof STATS_ENDPOINTS)[number]> = n
 
 export const ENDPOINT_LABELS: Record<EndpointId, string> = {
   contributors: "Contributor stats",
+  commits: "Daily commits",
   commit_activity: "Commit activity",
   participation: "Participation",
   code_frequency: "Code frequency",
@@ -151,6 +154,7 @@ export interface IncrementalState {
 /** Endpoints whose result is driven by commits or repository metadata. */
 const PUSH_DRIVEN_ENDPOINTS: ReadonlySet<EndpointId> = new Set([
   ...STATS_ENDPOINTS,
+  "commits",
   "community",
   "forks",
   "branches",
@@ -608,7 +612,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
 
   const pendingKeys = warmKeys.filter(({ repo, endpoint }) => !settled.has(keyOf(repo, endpoint)));
   const extras = endpoints.filter((e) =>
-    (["traffic", "community", "forks", "branches", "dependencies", "actions"] as EndpointId[]).includes(e),
+    (["commits", "traffic", "community", "forks", "branches", "dependencies", "actions"] as EndpointId[]).includes(e),
   );
   const extraKeys: Array<{ repo: RepoTarget; endpoint: EndpointId }> = [];
   for (const repo of targets) {
@@ -704,7 +708,11 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     if (cancelled()) return;
     attempted++;
     try {
-      await syncExtra(client, db, repo, endpoint, sinceFor(repo.id, endpoint, true), signal);
+      await syncExtra(client, db, repo, endpoint, {
+        sinceIso: sinceFor(repo.id, endpoint, endpoint !== "commits"),
+        // Only a fetch from a checkpoint is partial; anything else restates the window.
+        incremental: mode === "incremental" && stateFor(repo.id, endpoint)?.lastOkAt != null,
+      }, signal);
       await recordSync(db, repo.id, endpoint, "ok");
     } catch (err) {
       if (!cancelled()) {
@@ -895,11 +903,17 @@ async function syncExtra(
   db: Database,
   repo: RepoTarget,
   endpoint: EndpointId,
-  sinceIso: string,
+  window: { sinceIso: string; incremental: boolean },
   signal?: AbortSignal,
 ): Promise<void> {
   const ref = { owner: repo.owner, name: repo.name };
+  const { sinceIso } = window;
   switch (endpoint) {
+    case "commits": {
+      const commits = await api.listCommits(client, ref, sinceIso, signal);
+      await write.writeCommits(db, repo.id, commits, !window.incremental);
+      return;
+    }
     case "traffic": {
       // Traffic needs push access; without it GitHub answers 403 and we skip quietly.
       if (!repo.canPush) return;

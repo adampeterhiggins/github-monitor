@@ -10,13 +10,18 @@ import { WEEK_SECONDS } from "./weeks";
  * final partial month — so they live here rather than inline in a component.
  */
 
-export type Granularity = "week" | "month" | "quarter";
+/**
+ * `day` is the odd one out: a day cannot be rolled up from weeks, so a daily
+ * series is read from its own source and arrives already bucketed. Its rows still
+ * key the bucket start under `week`, so everything downstream reads them the same.
+ */
+export type Granularity = "day" | "week" | "month" | "quarter";
 
 export type WideRow = Record<string, number>;
 
 /** Bucket start (Unix seconds, UTC) that a week belongs to. */
 export function bucketStart(week: number, granularity: Granularity): number {
-  if (granularity === "week") return week;
+  if (granularity === "week" || granularity === "day") return week;
   const d = new Date(week * 1000);
   const month = d.getUTCMonth();
   const startMonth = granularity === "quarter" ? Math.floor(month / 3) * 3 : month;
@@ -32,7 +37,7 @@ export function bucketStart(week: number, granularity: Granularity): number {
  * than a slight edge effect.
  */
 export function rollUp(rows: WideRow[], seriesKeys: string[], granularity: Granularity): WideRow[] {
-  if (granularity === "week" || rows.length === 0) return rows;
+  if (granularity === "week" || granularity === "day" || rows.length === 0) return rows;
 
   const buckets = new Map<number, WideRow>();
   for (const row of rows) {
@@ -176,6 +181,15 @@ export function bucketLabel(week: number, granularity: Granularity): string {
       timeZone: "UTC",
     }).format(d);
   }
+  if (granularity === "day") {
+    return new Intl.DateTimeFormat("en-GB", {
+      weekday: "short",
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      timeZone: "UTC",
+    }).format(d);
+  }
   return `Week of ${new Intl.DateTimeFormat("en-GB", {
     day: "numeric",
     month: "short",
@@ -188,6 +202,7 @@ export function bucketLabel(week: number, granularity: Granularity): string {
 export function bucketWeeks(granularity: Granularity): number {
   if (granularity === "quarter") return 13;
   if (granularity === "month") return 4;
+  if (granularity === "day") return 1 / 7;
   return 1;
 }
 

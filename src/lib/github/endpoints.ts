@@ -2,6 +2,7 @@ import { GitHubError, type GitHubClient } from "./client";
 import type {
   GhBranch,
   GhCodeFrequency,
+  GhCommit,
   GhCommitActivity,
   GhCommunityProfile,
   GhContributorStats,
@@ -117,6 +118,35 @@ export async function commitCount(
   if (res.lastPage != null) return res.lastPage;
   // No rel="last" means a single page: 0 or 1 commits.
   return Array.isArray(res.data) ? res.data.length : 0;
+}
+
+/**
+ * Default-branch commits made since `since`, newest first, 100 to a page.
+ *
+ * This is the only per-day, per-author source GitHub has: the `stats/*` endpoints
+ * bucket by week. It costs a request per hundred commits, which is why callers
+ * pass a checkpoint rather than re-reading the window each sync.
+ *
+ * An empty repository answers 409 and an unreadable one 403 or 404; all three
+ * mean "no commits to record" rather than a failure.
+ */
+export async function listCommits(
+  client: GitHubClient,
+  repo: RepoRef,
+  since: string,
+  signal?: AbortSignal,
+): Promise<GhCommit[]> {
+  const params = new URLSearchParams({ per_page: "100", since });
+  try {
+    return await client.paginate<GhCommit>(`${base(repo)}/commits?${params.toString()}`, {
+      signal,
+      allowNotFound: true,
+      allowForbidden: true,
+    });
+  } catch (err) {
+    if (err instanceof GitHubError && err.status === 409) return [];
+    throw err;
+  }
 }
 
 /* ── stats/* — all subject to the 202 cold-cache dance ─────────────────────── */
