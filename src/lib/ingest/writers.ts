@@ -4,6 +4,7 @@ import { currentWeekStart, dayKey, weeksEndingAt } from "../agg/weeks";
 import type {
   GhBranch,
   GhCodeFrequency,
+  GhCommit,
   GhCommitActivity,
   GhCommunityProfile,
   GhContributorStats,
@@ -132,6 +133,43 @@ export async function writeContributorStats(
       table: "contributor_weeks",
       columns: ["repo_id", "login", "week", "commits", "additions", "deletions"],
       conflictColumns: ["repo_id", "login", "week"],
+      rows,
+    });
+  });
+}
+
+/**
+ * Commits for the daily views, one row per non-merge commit with an account.
+ *
+ * `replace` clears the repository first, for a fetch that covers the whole window:
+ * a rebase or force push leaves commits behind that no later page will restate.
+ * An incremental fetch only sees what is new, so it upserts by SHA instead.
+ */
+export async function writeCommits(
+  db: Database,
+  repoId: number,
+  commits: GhCommit[],
+  replace: boolean,
+): Promise<void> {
+  const rows: unknown[][] = [];
+  for (const c of commits) {
+    // Merges are left out for the same reason GitHub's stats leave them out: the
+    // work they carry is already counted on the commits they bring in.
+    if (c.parents.length > 1) continue;
+    const login = c.author?.login;
+    const date = c.commit.author?.date;
+    if (!login || !date) continue;
+    const ms = Date.parse(date);
+    if (!Number.isFinite(ms)) continue;
+    rows.push([repoId, c.sha, login, Math.floor(ms / 86_400_000) * 86_400]);
+  }
+
+  await withWriteLock(async () => {
+    if (replace) await db.execute("DELETE FROM commit_log WHERE repo_id = $1", [repoId]);
+    await bulkInsert(db, {
+      table: "commit_log",
+      columns: ["repo_id", "sha", "login", "day"],
+      conflictColumns: ["repo_id", "sha"],
       rows,
     });
   });

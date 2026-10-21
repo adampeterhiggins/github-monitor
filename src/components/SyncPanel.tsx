@@ -14,14 +14,24 @@ import { describeOrgs } from "../lib/auth";
 import { Button, Callout, Card, CardHeader, Checkbox, DataTable, OnlyButton, Spinner, full } from "./ui";
 
 const ENDPOINT_KEY = "github-monitor.syncEndpoints";
+/** Every dimension that existed when the selection was saved. */
+const KNOWN_ENDPOINTS_KEY = "github-monitor.syncEndpointsKnown";
 const ARCHIVED_KEY = "github-monitor.syncIncludeArchived";
+/** What a selection saved before the known list was recorded could have chosen from. */
+const ENDPOINTS_BEFORE_KNOWN: EndpointId[] = ALL_ENDPOINTS.filter((id) => id !== "commits");
 
-/** Survives leaving the Sync page. A missing key means every dimension. */
+/**
+ * Survives leaving the Sync page. A missing key means every dimension, and so
+ * does a dimension added since the selection was saved: nobody chose to leave
+ * out something they were never offered.
+ */
 function storedEndpoints(): EndpointId[] {
   try {
     const parsed = JSON.parse(localStorage.getItem(ENDPOINT_KEY) ?? "");
     if (!Array.isArray(parsed)) return [...ALL_ENDPOINTS];
-    return ALL_ENDPOINTS.filter((id) => parsed.includes(id));
+    const knownRaw = localStorage.getItem(KNOWN_ENDPOINTS_KEY);
+    const known: unknown[] = knownRaw ? JSON.parse(knownRaw) : ENDPOINTS_BEFORE_KNOWN;
+    return ALL_ENDPOINTS.filter((id) => parsed.includes(id) || !known.includes(id));
   } catch {
     return [...ALL_ENDPOINTS];
   }
@@ -98,6 +108,7 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
 
   const applyEndpoints = (ids: EndpointId[]) => {
     localStorage.setItem(ENDPOINT_KEY, JSON.stringify(ids));
+    localStorage.setItem(KNOWN_ENDPOINTS_KEY, JSON.stringify(ALL_ENDPOINTS));
     setSelectedEndpoints(ids);
   };
   const applyArchived = (value: boolean) => {

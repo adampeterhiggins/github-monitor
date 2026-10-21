@@ -668,6 +668,107 @@ export async function contributorWeeklyByRepo(
   );
 }
 
+/* ── Daily commits ─────────────────────────────────────────────────────────
+   The same shapes as the weekly Contributors queries, read from `commit_log`, so
+   the page can swap one source for the other without a second code path. Each
+   row's bucket is still called `week` for that reason; here it is a UTC day.
+
+   Commits only: the list endpoint carries no line counts, and fetching them would
+   cost a request per commit. Additions and deletions come back as zero. */
+
+function dailyCommits<T>(
+  db: Database,
+  groupBy: { select: string; group: string },
+  repoIds: readonly number[],
+  fromDay: number,
+  toDay: number,
+  logins: Logins,
+): Promise<T[]> {
+  const p = new Params();
+  const from = p.add(fromDay);
+  const to = p.add(toDay);
+  const ids = p.in(repoIds);
+  const loginClause = p.loginFilter("cl.login", logins);
+  return db.select<T[]>(
+    `SELECT ${groupBy.select}cl.day AS week,
+            COUNT(*) AS commits, 0 AS additions, 0 AS deletions
+     FROM commit_log cl
+     JOIN repos r ON r.id = cl.repo_id
+     WHERE cl.day >= ${from} AND cl.day <= ${to} AND cl.repo_id IN ${ids}${loginClause}
+     GROUP BY ${groupBy.group}cl.day
+     ORDER BY cl.day`,
+    p.values,
+  );
+}
+
+/** Org-wide commits per day — the daily counterpart of `contributorWeeklyTotals`. */
+export function commitDailyTotals(
+  db: Database,
+  repoIds: readonly number[],
+  fromDay: number,
+  toDay: number,
+  logins: Logins = null,
+): Promise<WeekPoint[]> {
+  return dailyCommits(db, { select: "", group: "" }, repoIds, fromDay, toDay, logins);
+}
+
+/** Commits per contributor per day, casings merged as in `contributorWeeklyByLogin`. */
+export function commitDailyByLogin(
+  db: Database,
+  repoIds: readonly number[],
+  fromDay: number,
+  toDay: number,
+  logins: Logins = null,
+): Promise<ContributorWeekRow[]> {
+  return dailyCommits(
+    db,
+    { select: "MIN(cl.login) AS login, ", group: "LOWER(cl.login), " },
+    repoIds,
+    fromDay,
+    toDay,
+    logins,
+  );
+}
+
+/** Commits per repository per day — the daily counterpart of `weeklyByRepo`. */
+export function commitDailyByRepo(
+  db: Database,
+  repoIds: readonly number[],
+  fromDay: number,
+  toDay: number,
+  logins: Logins = null,
+): Promise<RepoWeekRow[]> {
+  return dailyCommits(
+    db,
+    { select: "cl.repo_id, r.full_name, ", group: "cl.repo_id, r.full_name, " },
+    repoIds,
+    fromDay,
+    toDay,
+    logins,
+  );
+}
+
+/** Commits per contributor and repository per day, for the cards' repository split. */
+export function commitDailyByLoginRepo(
+  db: Database,
+  repoIds: readonly number[],
+  fromDay: number,
+  toDay: number,
+  logins: Logins = null,
+): Promise<LoginRepoWeekRow[]> {
+  return dailyCommits(
+    db,
+    {
+      select: "MIN(cl.login) AS login, cl.repo_id, r.full_name, ",
+      group: "LOWER(cl.login), cl.repo_id, r.full_name, ",
+    },
+    repoIds,
+    fromDay,
+    toDay,
+    logins,
+  );
+}
+
 export interface ContributorMeta {
   login: string;
   avatar_url: string | null;

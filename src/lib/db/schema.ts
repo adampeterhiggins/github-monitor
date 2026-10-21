@@ -279,6 +279,19 @@ CREATE INDEX IF NOT EXISTS idx_cw_week ON contributor_weeks (week);
 CREATE INDEX IF NOT EXISTS idx_cw_login ON contributor_weeks (login);
 CREATE INDEX IF NOT EXISTS idx_cw_repo_week ON contributor_weeks (repo_id, week);
 
+-- One row per default-branch commit GitHub matched to an account, for the daily
+-- views the weekly stats cannot give. Merge commits are dropped on write, as the
+-- stats endpoints drop them. Keyed by SHA so an overlapping incremental fetch
+-- writes the same rows again rather than counting them twice.
+CREATE TABLE IF NOT EXISTS commit_log (
+  repo_id INTEGER NOT NULL,
+  sha     TEXT    NOT NULL,
+  login   TEXT    NOT NULL,
+  day     INTEGER NOT NULL,                   -- Unix seconds, 00:00 UTC of the author date
+  PRIMARY KEY (repo_id, sha)
+);
+CREATE INDEX IF NOT EXISTS idx_cl_repo_day ON commit_log (repo_id, day);
+
 CREATE TABLE IF NOT EXISTS commit_activity (
   repo_id INTEGER NOT NULL,
   week    INTEGER NOT NULL,

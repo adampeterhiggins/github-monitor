@@ -365,6 +365,7 @@ export async function clearAnalytics(db: Database): Promise<void> {
     "github_users",
     "github_user_logins",
     "contributor_weeks",
+    "commit_log",
     "commit_activity",
     "participation",
     "code_frequency",

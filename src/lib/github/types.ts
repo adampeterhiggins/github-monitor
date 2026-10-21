@@ -49,6 +49,15 @@ export interface GhContributorStats {
   weeks: GhStatsWeek[];
 }
 
+/** One entry of `repos/{owner}/{repo}/commits`, trimmed to what the daily views read. */
+export interface GhCommit {
+  sha: string;
+  /** The GitHub account the author email maps to; null when it maps to none. */
+  author: Pick<GhAuthor, "login"> | null;
+  commit: { author: { date: string } | null };
+  parents: Array<{ sha: string }>;
+}
+
 /** `stats/commit_activity`: 52 weeks, `days` indexed Sunday..Saturday. */
 export interface GhCommitActivity {
   days: number[];
