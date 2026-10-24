@@ -73,6 +73,12 @@ const MIGRATIONS: ReadonlyArray<{ version: number; run: (db: Executor) => Promis
     version: 9,
     run: upgradeLegacyCommitLog,
   },
+  {
+    version: 10,
+    run: async (db) => {
+      await addColumn(db, "commit_log", "is_pr", "INTEGER");
+    },
+  },
 ];
 
 /**

@@ -11,8 +11,8 @@
 
 /** Rows written by the commits list before co-authors and full history. */
 export const COMMIT_LOG_LEGACY_FORMAT = 1;
-/** One row per account GitHub credits, across the whole default branch. */
-export const COMMIT_LOG_FORMAT = 2;
+/** Full history and co-authors, plus PR association for every commit. */
+export const COMMIT_LOG_FORMAT = 3;
 
 /** The fields the history query asks for. Anything else on the payload is ignored. */
 export interface HistoryCommitNode {
@@ -21,6 +21,7 @@ export interface HistoryCommitNode {
   /** Null when GitHub declined to count the files, which means the commit is large, not empty. */
   changedFilesIfAvailable?: number | null;
   parents?: { totalCount?: number | null } | null;
+  associatedPullRequests?: { totalCount?: number | null } | null;
   authors?: {
     nodes?: Array<{ user?: { login?: string | null } | null } | null> | null;
   } | null;
@@ -28,6 +29,8 @@ export interface HistoryCommitNode {
 
 export interface CreditedCommit {
   sha: string;
+  /** Null for old or unavailable association data; never assume that means direct. */
+  isPr: boolean | null;
   /**
    * Distinct accounts, in GitHub's casing. Empty when the commit is empty, its
    * date is unusable, or no author resolved to an account — the sha is still
@@ -61,11 +64,13 @@ export function creditCommit(node: HistoryCommitNode | null | undefined): Credit
   if (!sha) return null;
   if ((node?.parents?.totalCount ?? 0) > 1) return null;
 
+  const count = node?.associatedPullRequests?.totalCount;
+  const isPr = count == null ? null : count > 0;
   const day = authorDay(node?.authoredDate);
   // A zero file count is GitHub's empty commit. Null means the count was too
   // expensive to compute, and those commits are not empty.
   const empty = node?.changedFilesIfAvailable === 0;
-  if (empty || day == null) return { sha, logins: [], day };
+  if (empty || day == null) return { sha, logins: [], day, isPr };
 
   const seen = new Map<string, string>();
   for (const author of node?.authors?.nodes ?? []) {
@@ -74,5 +79,5 @@ export function creditCommit(node: HistoryCommitNode | null | undefined): Credit
     const key = login.toLowerCase();
     if (!seen.has(key)) seen.set(key, login);
   }
-  return { sha, logins: [...seen.values()], day };
+  return { sha, logins: [...seen.values()], day, isPr };
 }

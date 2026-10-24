@@ -5,11 +5,7 @@ import { legacyCommitLogRepoIds } from "../lib/db/queries";
 import { beginSync, cancelSync, finishSync, runSync } from "../lib/ingest/sync";
 import { Button, Callout, full } from "./ui";
 
-/**
- * The daily log used to stop at a year and at the git author. Weekly stats do
- * neither. This is the one action that re-reads just those commits — a full
- * re-sync would repeat every other endpoint to get there.
- */
+/** Refresh older daily log formats without repeating unrelated endpoints. */
 export function CommitBackfillNotice({ repoIds }: { repoIds: readonly number[] }) {
   const db = useApp((s) => s.db);
   const token = useApp((s) => s.token);
@@ -75,14 +71,14 @@ export function CommitBackfillNotice({ repoIds }: { repoIds: readonly number[] }
     <div className="mb-3">
       <Callout tone="warning">
         <p>
-          {subject} only go back a year and only count the git author. Weekly stats include the
-          whole history and every co-author.
+          {subject} need refreshing to include PR associations. Backfill reads the whole
+          default-branch history, including co-authors, so PR commits can be filtered.
         </p>
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <Button
             variant="primary"
             disabled={syncing || !token || orgs.length === 0}
-            title="Re-read the full default-branch history for just these repositories, including co-authors. Nothing else is synced."
+            title="Re-read the full default-branch history for just these repositories, including co-authors and PR associations. Nothing else is synced."
             onClick={() => void run()}
           >
             Backfill daily commits

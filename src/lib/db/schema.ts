@@ -13,7 +13,7 @@
  * series with empty weeks and keeping them would multiply row counts for nothing.
  */
 
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 export const SCHEMA_SQL = `
 -- One row keeps the HEAD report, its revision and the native file cache it came
@@ -289,13 +289,15 @@ CREATE TABLE IF NOT EXISTS commit_log (
   sha     TEXT    NOT NULL,
   login   TEXT    NOT NULL,
   day     INTEGER NOT NULL,                   -- Unix seconds, 00:00 UTC of the author date
+  is_pr   INTEGER,                           -- NULL until association data has been synced
   PRIMARY KEY (repo_id, sha, login)
 );
 CREATE INDEX IF NOT EXISTS idx_cl_repo_day ON commit_log (repo_id, day);
 
 -- Whether a repository's commit_log matches the weekly stats.
 -- 1: the old fetch (last year, git author only). 2: full history, with co-authors.
--- Absent until the first successful full read, which is itself format 2.
+-- 3: full history, co-authors and PR associations.
+-- Absent until the first successful full read.
 CREATE TABLE IF NOT EXISTS commit_log_state (
   repo_id INTEGER PRIMARY KEY,
   format  INTEGER NOT NULL

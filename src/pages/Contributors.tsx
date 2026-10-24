@@ -41,10 +41,12 @@ import {
   weekSpan,
   weekStart,
 } from "../lib/agg/weeks";
+import { CommitBackfillNotice } from "../components/CommitBackfillNotice";
 import { PageShell } from "../components/PageShell";
 import { Sparkline, TimelineArea, type TimelineShape } from "../components/charts";
 import {
   Button,
+  type Column,
   ChartCard,
   ChartHeight,
   Card,
@@ -213,6 +215,7 @@ interface ContributorCard {
 
 export function Contributors() {
   const scope = useScope();
+  const [onlyPrCommits, setOnlyPrCommits] = useState(() => localStorage.getItem("github-monitor.onlyPrCommits") === "true");
   const metric = useApp((s) => s.metric);
   const setMetric = useApp((s) => s.setMetric);
   const setPeriod = useApp((s) => s.setPeriod);
@@ -284,9 +287,11 @@ export function Contributors() {
    * Per day reads the commit log rather than the weekly stats, and that log has
    * no line counts — so for a line metric the day falls back to weeks, and the
    * option says so by being unavailable. The reading is untouched: a cumulative
-   * day and a day on its own both need that log.
+   * day and a day on its own both need that log. PR-only counts also read this
+   * source, then roll up to the chosen bucket size.
    */
-  const daily = bucket === "day" && metric === "commits";
+  const prOnly = onlyPrCommits && metric === "commits";
+  const daily = (bucket === "day" || prOnly) && metric === "commits";
   const granularity: Granularity = bucket === "day" && !daily ? "week" : bucket;
   const granularityOptions = useMemo(
     () => GRANULARITIES.map((o) => (o.value === "day" ? { ...o, disabled: metric !== "commits" } : o)),
@@ -420,7 +425,7 @@ export function Contributors() {
   );
 
   /**
-   * The daily sources, fetched only in the per-day view. Same row shapes as the
+   * The daily sources, used per day and for PR-only counts. Same row shapes as the
    * weekly ones above, so everything below swaps one for the other. The window is
    * the weeks on screen, so a card's weekly totals and its daily chart cover the
    * same days.
@@ -430,26 +435,26 @@ export function Contributors() {
   const dailyTotals = useScopedQuery(
     "contrib-daily-totals",
     scope,
-    (db) => commitDailyTotals(db, scope.repoIds, fromDay, toDay, scope.logins),
-    { enabled: scope.ready && daily },
+    (db) => commitDailyTotals(db, scope.repoIds, fromDay, toDay, scope.logins, prOnly),
+    { enabled: scope.ready && daily, key: String(prOnly) },
   );
   const dailyByLogin = useScopedQuery(
     "contrib-daily-by-login",
     scope,
-    (db) => commitDailyByLogin(db, scope.repoIds, fromDay, toDay, scope.logins),
-    { enabled: scope.ready && daily },
+    (db) => commitDailyByLogin(db, scope.repoIds, fromDay, toDay, scope.logins, prOnly),
+    { enabled: scope.ready && daily, key: String(prOnly) },
   );
   const dailyByRepo = useScopedQuery(
     "contrib-daily-by-repo",
     scope,
-    (db) => commitDailyByRepo(db, scope.repoIds, fromDay, toDay, scope.logins),
-    { enabled: scope.ready && daily && breakdown === "repository" },
+    (db) => commitDailyByRepo(db, scope.repoIds, fromDay, toDay, scope.logins, prOnly),
+    { enabled: scope.ready && daily && breakdown === "repository", key: String(prOnly) },
   );
   const dailyCardRepo = useScopedQuery(
     "contrib-daily-card-repo",
     scope,
-    (db) => commitDailyByLoginRepo(db, scope.repoIds, fromDay, toDay, scope.logins),
-    { enabled: scope.ready && daily && cardSplit === "repository" },
+    (db) => commitDailyByLoginRepo(db, scope.repoIds, fromDay, toDay, scope.logins, prOnly),
+    { enabled: scope.ready && daily && cardSplit === "repository", key: String(prOnly) },
   );
 
   const selectedRepoCount = scope.repoIds.length;
@@ -503,7 +508,7 @@ export function Contributors() {
   useEffect(() => {
     setBrush(null);
     setPendingBrush(null);
-  }, [scope.key, daily]);
+  }, [scope.key, daily, prOnly]);
 
   /** Buckets the charts should cover: the brushed window, or the whole range. */
   const visibleAxis = useMemo(() => {
@@ -561,10 +566,10 @@ export function Contributors() {
   }, [dailyByLogin.data]);
 
   const cards = useMemo(() => {
-    const metaByLogin = new Map(meta.data?.map((m) => [m.login, m]) ?? []);
+    const metaByLogin = new Map(meta.data?.map((m) => [m.login.toLowerCase(), m]) ?? []);
     const out: ContributorCard[] = [];
 
-    for (const [login, weeksByNumber] of byLogin) {
+    for (const [login, weeksByNumber] of (prOnly ? dailyByLoginMap : byLogin)) {
       let commits = 0;
       let additions = 0;
       let deletions = 0;
@@ -573,7 +578,7 @@ export function Contributors() {
       // Totals are summed over the visible window too, so the figures on a card
       // always describe the chart beside them — which is what makes brushing
       // useful rather than confusing.
-      for (const week of visibleWeeks) {
+      for (const week of (prOnly ? visibleAxis : visibleWeeks)) {
         const row = weeksByNumber.get(week);
         commits += Number(row?.commits ?? 0);
         additions += Number(row?.additions ?? 0);
@@ -587,8 +592,8 @@ export function Contributors() {
 
       out.push({
         login,
-        avatar: metaByLogin.get(login)?.avatar_url ?? null,
-        url: metaByLogin.get(login)?.html_url ?? null,
+        avatar: metaByLogin.get(login.toLowerCase())?.avatar_url ?? null,
+        url: metaByLogin.get(login.toLowerCase())?.html_url ?? null,
         commits,
         additions,
         deletions,
@@ -602,7 +607,7 @@ export function Contributors() {
        when the metric is actually nothing: net is signed, and a contributor who
        removed more than they added is not an absence. */
     return out.filter((c) => c[metric] !== 0).sort((a, b) => b[metric] - a[metric]);
-  }, [byLogin, meta.data, visibleWeeks, metric, daily, dailyByLoginMap, visibleAxis]);
+  }, [byLogin, meta.data, visibleWeeks, metric, daily, dailyByLoginMap, visibleAxis, prOnly]);
 
   /**
    * The org-wide chart, split by contributor or repository.
@@ -937,7 +942,7 @@ export function Contributors() {
   const bucketEnd = (start: number) => (start + (daily ? DAY_SECONDS : WEEK_SECONDS)) * 1000 - 1;
   /** The commit log fills in on the next sync; until then per day has nothing to draw. */
   const dailyMissing =
-    daily && dailyTotals.data != null && dailyTotals.data.length === 0 && (totals.data?.length ?? 0) > 0;
+    !prOnly && daily && dailyTotals.data != null && dailyTotals.data.length === 0 && (totals.data?.length ?? 0) > 0;
 
   return (
     <PageShell
@@ -954,27 +959,37 @@ export function Contributors() {
         </>
       }
       filterExtra={
-        <Dropdown label={`Contributions: ${metricLabel(metric)}`} width={180} align="left">
-          {(close) => (
-            <div className="py-1">
-              {METRICS.map((m) => (
-                <DropdownRow
-                  key={m.id}
-                  selected={m.id === metric}
-                  onClick={() => {
-                    setMetric(m.id);
-                    close();
-                  }}
-                >
-                  {m.label}
-                </DropdownRow>
-              ))}
-            </div>
-          )}
-        </Dropdown>
+        <>
+          <Checkbox
+            checked={prOnly}
+            disabled={metric !== "commits"}
+            onChange={(value) => persist("github-monitor.onlyPrCommits", value, setOnlyPrCommits)}
+            label="PR commits only"
+          />
+          <Dropdown label={`Contributions: ${metricLabel(metric)}`} width={180} align="left">
+            {(close) => (
+              <div className="py-1">
+                {METRICS.map((m) => (
+                  <DropdownRow
+                    key={m.id}
+                    selected={m.id === metric}
+                    onClick={() => {
+                      setMetric(m.id);
+                      close();
+                    }}
+                  >
+                    {m.label}
+                  </DropdownRow>
+                ))}
+              </div>
+            )}
+          </Dropdown>
+        </>
       }
     >
       <div className="flex flex-col gap-4">
+        <CommitBackfillNotice repoIds={scope.repoIds} />
+        {prOnly ? <p className="text-[12px] text-ink-secondary">Only commits introduced through a merged PR are counted. Backfill existing history to include older commits. Line statistics are unavailable for this filter.</p> : null}
         <ChartCard
           title={`${metricLabel(metric)} over time`}
           subtitle={
@@ -1139,12 +1154,14 @@ export function Contributors() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <p className="text-[12px] text-ink-secondary">
                 {zoomed
-                  ? daily
+                  ? daily && !prOnly
                     ? `Cards chart the selected ${full(visibleAxis.length)} day${
                         visibleAxis.length === 1 ? "" : "s"
                       }; their totals and ranking cover the ${full(visibleWeeks.length)} week${
                         visibleWeeks.length === 1 ? "" : "s"
                       } those days fall in.`
+                    : prOnly
+                      ? `Cards cover the selected ${full(visibleAxis.length)} days; totals and ranking change with it.`
                     : `Cards cover the selected window (${full(visibleWeeks.length)} week${
                         visibleWeeks.length === 1 ? "" : "s"
                       }), so totals and ranking change with it.`
@@ -1171,11 +1188,12 @@ export function Contributors() {
                   options={CARD_SPLITS}
                 />
                 <Button
-                  variant={showNumbers ? "primary" : "default"}
+                  disabled={prOnly}
+                  variant={showNumbers && !prOnly ? "primary" : "default"}
                   onClick={() => setShowNumbers((v) => !v)}
                   title="Show the repository breakdown under every chart"
                 >
-                  {showNumbers ? "Hide numbers" : "Numbers"}
+                  {showNumbers && !prOnly ? "Hide numbers" : "Numbers"}
                 </Button>
               </div>
             </div>
@@ -1193,7 +1211,8 @@ export function Contributors() {
                   repoCount={repos.length}
                   view={{ shape, stackMode, valueMode, granularity, yFit: yAxis === "fit" && !sharedScale, hideOther }}
                   controls={cardControls}
-                  showNumbers={showNumbers}
+                  showNumbers={showNumbers && !prOnly}
+                  showLines={!prOnly}
                   span={spanByLogin.get(c.login.toLowerCase()) ?? null}
                   theirRepoIds={reposByLogin.get(c.login.toLowerCase()) ?? []}
                   onSetPeriod={setPeriod}
@@ -1221,7 +1240,7 @@ export function Contributors() {
                 maxHeight={420}
                 rowKey={(r) => r.login}
                 initialSort={{ key: metric, dir: "desc" }}
-                columns={[
+                columns={([
                   {
                     key: "login",
                     header: "Contributor",
@@ -1267,7 +1286,7 @@ export function Contributors() {
                     ),
                     sortValue: (r) => r.net,
                   },
-                ]}
+                ] satisfies Column<ContributorCard>[]).filter((column) => !prOnly || column.key === "login" || column.key === "commits")}
               />
             </Card>
           </>
@@ -1288,6 +1307,7 @@ function ContributorCardView({
   view,
   controls,
   showNumbers,
+  showLines,
   span,
   theirRepoIds,
   onSetPeriod,
@@ -1317,6 +1337,7 @@ function ContributorCardView({
   controls: ReactNode;
   /** Set for every card at once, from the control above the grid. */
   showNumbers: boolean;
+  showLines: boolean;
   /** The period covering this person's whole history, or null if they have none. */
   span: { from: number; to: number } | null;
   /** Every repository they have commits in, across the cache rather than the selection. */
@@ -1438,8 +1459,10 @@ function ContributorCardView({
           <div className="mt-0.5 flex flex-wrap items-baseline gap-x-2 text-[12px] tabular">
             <span className="text-ink">{full(card.commits)} commits</span>
             {/* Delta cues wear status ink and are labelled, never color alone. */}
-            <span style={{ color: "var(--delta-up)" }}>{full(card.additions)} ++</span>
-            <span style={{ color: "var(--delta-down)" }}>{full(card.deletions)} --</span>
+            {showLines ? <>
+              <span style={{ color: "var(--delta-up)" }}>{full(card.additions)} ++</span>
+              <span style={{ color: "var(--delta-down)" }}>{full(card.deletions)} --</span>
+            </> : null}
           </div>
         </div>
 
@@ -1453,9 +1476,7 @@ function ContributorCardView({
       {expanded ? (
         <Modal
           title={card.login}
-          subtitle={`#${rank} · ${full(card.commits)} commits, ${full(card.additions)} added and ${full(
-            card.deletions,
-          )} deleted`}
+          subtitle={`#${rank} · ${full(card.commits)} commits${showLines ? `, ${full(card.additions)} added and ${full(card.deletions)} deleted` : ""}`}
           titleAfter={
             <>
               {controls}
