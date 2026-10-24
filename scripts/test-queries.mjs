@@ -517,6 +517,28 @@ T(
   sync.incrementalSince(null, 2, Date.parse("2026-08-11T12:00:00Z")) ===
     "2026-08-09T12:00:00.000Z",
 );
+T(
+  "commit history keeps the ten-minute overlap on an incremental refresh",
+  sync.commitHistorySince({
+    mode: "incremental",
+    checkpoint: "2026-08-11T12:00:00Z",
+    historyDays: 365,
+  }) === "2026-08-11T11:50:00.000Z",
+);
+T(
+  "commit history is not cut off at the PR window on a first sync",
+  sync.commitHistorySince({ mode: "incremental", checkpoint: null, historyDays: 365 }) === null,
+);
+T(
+  "a full re-sync and a backfill walk the whole default branch",
+  sync.commitHistorySince({ mode: "full", checkpoint: "2026-08-11T12:00:00Z", historyDays: 365 }) === null &&
+    sync.commitHistorySince({
+      mode: "incremental",
+      checkpoint: "2026-08-11T12:00:00Z",
+      historyDays: 365,
+      backfill: true,
+    }) === null,
+);
 
 /* Fair polling checks every pending item before any item gets a second poll. */
 {
@@ -1638,54 +1660,117 @@ sqlite.exec(`INSERT INTO dependabot_alerts (repo_id,number,severity,ecosystem,pa
   sqlite.exec("DELETE FROM repos WHERE id IN (901, 902)");
 }
 
+/* ── Upgrading a commit log that stored one login per SHA ─────────────────── */
+
+{
+  const legacy = new DatabaseSync(":memory:");
+  legacy.exec(`
+    CREATE TABLE commit_log (
+      repo_id INTEGER NOT NULL,
+      sha TEXT NOT NULL,
+      login TEXT NOT NULL,
+      day INTEGER NOT NULL,
+      PRIMARY KEY (repo_id, sha)
+    );
+    CREATE TABLE commit_log_state (
+      repo_id INTEGER PRIMARY KEY,
+      format INTEGER NOT NULL
+    );
+  `);
+  legacy.prepare("INSERT INTO commit_log (repo_id, sha, login, day) VALUES (?, ?, ?, ?)").run(1, "abc", "ada", 10);
+  legacy.prepare("INSERT INTO commit_log (repo_id, sha, login, day) VALUES (?, ?, ?, ?)").run(1, "def", "claude", 20);
+  const adapter = {
+    select: async (sql, params = []) => legacy.prepare(sql).all(named(params)),
+    execute: async (sql, params = []) => {
+      legacy.prepare(sql).run(named(params));
+      return { rowsAffected: 0 };
+    },
+  };
+  const dbIndex = await bundle("src/lib/db/index.ts", "commit-log-upgrade.cjs");
+  await dbIndex.upgradeLegacyCommitLog(adapter);
+  const pk = legacy.prepare("PRAGMA table_info(commit_log)").all().filter((column) => column.pk > 0).map((column) => column.name);
+  T("a legacy commit log keeps its rows and can store a second account",
+    pk.includes("login") && legacy.prepare("SELECT count(*) n FROM commit_log").get().n === 2,
+    pk.join(","));
+  T("upgraded daily commits are marked for backfill",
+    legacy.prepare("SELECT format FROM commit_log_state WHERE repo_id = 1").get().format === 1);
+  await dbIndex.upgradeLegacyCommitLog(adapter);
+  T("upgrading the commit log again leaves it in place",
+    legacy.prepare("SELECT count(*) n FROM commit_log").get().n === 2);
+  legacy.close();
+}
+
 /* ── Daily commits ─────────────────────────────────────────────────────────── */
 
 /*
- * The per-day view reads its own table, written from the commits list. What
- * matters is that it counts what the weekly stats count — no merges, only
- * commits with an account — and that an overlapping incremental fetch does not
- * count anything twice.
+ * The per-day view reads its own table. What matters is that a row is an account
+ * GitHub would credit — co-authors included, merges and empty commits left out —
+ * and that an overlapping fetch replaces a commit's accounts instead of counting
+ * them twice.
  */
 {
   const writers = await bundle("src/lib/ingest/writers.ts", "writers.cjs");
+  const credits = await bundle("src/lib/ingest/commitCredits.ts", "credits.cjs");
   const D = 1745107200; // a Sunday 00:00 UTC
   const DAY = 86400;
-  const commit = (sha, login, date, parents = 1) => ({
-    sha,
-    author: login ? { login } : null,
-    commit: { author: { date } },
-    parents: Array.from({ length: parents }, (_, i) => ({ sha: `${sha}-p${i}` })),
-  });
   const iso = (secs) => new Date(secs * 1000).toISOString();
+  const commit = (sha, logins, secs, { merge = false, empty = false } = {}) => credits.creditCommit({
+    oid: sha,
+    authoredDate: iso(secs),
+    changedFilesIfAvailable: empty ? 0 : 1,
+    parents: { totalCount: merge ? 2 : 1 },
+    authors: { nodes: logins.map((login) => ({ user: login ? { login } : null })) },
+  });
 
-  await writers.writeCommits(db, 1, [
-    commit("a1", "Claude", iso(D + 3600)),
-    commit("a2", "claude", iso(D + DAY - 1)),
-    commit("a3", "claude", iso(D + DAY)),
-    commit("a4", "adampeterhiggins", iso(D + 2 * DAY + 60)),
-    commit("m1", "claude", iso(D + 2 * DAY), 2),
-    commit("n1", null, iso(D + 2 * DAY)),
-  ], true);
-  await writers.writeCommits(db, 2, [commit("b1", "claude", iso(D + DAY + 5))], true);
+  T("a merge is not a daily commit", commit("m1", ["claude"], D, { merge: true }) === null);
+  T("an empty commit credits nobody",
+    commit("e1", ["claude"], D, { empty: true }).logins.length === 0);
+  T("the git author and a resolved co-author are both credited, once each",
+    commit("c1", ["Claude", "claude", "cursoragent"], D).logins.join(",") === "Claude,cursoragent");
 
-  const rows = sqlite.prepare("SELECT sha, day FROM commit_log ORDER BY sha").all();
-  T("merge commits and commits with no account are not recorded",
-    rows.length === 5 && !rows.some((r) => r.sha === "m1" || r.sha === "n1"), rows.map((r) => r.sha).join(","));
+  const kept = (sha, logins, secs, opts) => commit(sha, logins, secs, opts);
+  await writers.writeCommitHistory(db, 1, [
+    kept("a1", ["Claude"], D + 3600),
+    kept("a2", ["claude", "Claude"], D + DAY - 1),
+    kept("a3", ["claude", "cursoragent"], D + DAY),
+    kept("a4", ["adampeterhiggins", "claude"], D + 2 * DAY + 60),
+    kept("e1", ["claude"], D + 2 * DAY, { empty: true }),
+    kept("n1", [null], D + 2 * DAY),
+  ].filter(Boolean), true);
+  await writers.writeCommitHistory(db, 2, [kept("b1", ["claude"], D + DAY + 5)].filter(Boolean), true);
+
+  const rows = sqlite.prepare("SELECT sha, login, day FROM commit_log ORDER BY sha, login").all();
+  T("merges, empty commits and unresolved authors are not recorded",
+    rows.length === 7 && !rows.some((r) => r.sha === "e1" || r.sha === "n1" || r.sha === "m1"),
+    rows.map((r) => r.sha).join(","));
   T("a commit is bucketed by its UTC author day",
     rows.find((r) => r.sha === "a2").day === D && rows.find((r) => r.sha === "a3").day === D + DAY);
+  T("one commit credits each account on its own row",
+    rows.filter((r) => r.sha === "a4").map((r) => r.login).sort().join(",") === "adampeterhiggins,claude");
+  T("a full fetch marks the daily log current",
+    (await q.legacyCommitLogRepoIds(db, [1, 2])).length === 0 &&
+      (await q.completeCommitLogRepoIds(db, [1, 2])).length === 2);
 
-  // An incremental fetch overlaps the last one by design.
-  await writers.writeCommits(db, 1, [commit("a4", "adampeterhiggins", iso(D + 2 * DAY + 60))], false);
+  // An incremental fetch overlaps the last one by design, and restates who is credited.
+  await writers.writeCommitHistory(db, 1, [kept("a4", ["adampeterhiggins", "claude"], D + 2 * DAY + 60)], false);
   T("re-fetching a commit does not count it twice",
-    sqlite.prepare("SELECT count(*) n FROM commit_log WHERE repo_id = 1").get().n === 4);
+    sqlite.prepare("SELECT count(*) n FROM commit_log WHERE repo_id = 1 AND sha = 'a4'").get().n === 2);
+  await writers.writeCommitHistory(db, 1, [kept("a4", ["adampeterhiggins"], D + 2 * DAY + 60)], false);
+  T("an incremental fetch drops a co-author the commit no longer has",
+    sqlite.prepare("SELECT login FROM commit_log WHERE sha = 'a4'").all().map((r) => r.login).join(",") === "adampeterhiggins");
+  sqlite.exec("UPDATE commit_log_state SET format = 1 WHERE repo_id = 1");
+  await writers.writeCommitHistory(db, 1, [kept("a4", ["adampeterhiggins"], D + 2 * DAY + 60)], false);
+  T("an incremental fetch leaves a legacy log marked for backfill",
+    (await q.legacyCommitLogRepoIds(db, [1])).join(",") === "1");
 
   const totals = await q.commitDailyTotals(db, IDS, D, D + 6 * DAY);
+  // a4 lost claude in the incremental rewrite above, so day 2 is adam alone.
   T("daily totals count commits per day",
-    totals.map((r) => `${(r.week - D) / DAY}:${r.commits}`).join(",") === "0:2,1:2,2:1",
+    totals.map((r) => `${(r.week - D) / DAY}:${r.commits}`).join(",") === "0:2,1:3,2:1",
     JSON.stringify(totals));
   T("daily rows carry no line counts", totals.every((r) => r.additions === 0 && r.deletions === 0));
   T("the day window is inclusive at both ends",
-    sum(await q.commitDailyTotals(db, IDS, D + DAY, D + DAY)) === 2);
+    sum(await q.commitDailyTotals(db, IDS, D + DAY, D + DAY)) === 3);
   T("daily totals honour the repository selection", sum(await q.commitDailyTotals(db, [2], D, D + 6 * DAY)) === 1);
   T("daily totals honour the contributor filter",
     sum(await q.commitDailyTotals(db, IDS, D, D + 6 * DAY, ["CLAUDE"])) === 4);
@@ -1703,10 +1788,12 @@ sqlite.exec(`INSERT INTO dependabot_alerts (repo_id,number,severity,ecosystem,pa
   T("daily login × repository rows sum to the totals", sum(byLoginRepo) === sum(totals));
 
   // A full fetch restates the window, so a commit rebased away must go.
-  await writers.writeCommits(db, 1, [commit("a1", "claude", iso(D + 3600))], true);
+  await writers.writeCommitHistory(db, 1, [kept("a1", ["claude"], D + 3600)].filter(Boolean), true);
   T("a full fetch drops commits that are no longer on the branch",
     sqlite.prepare("SELECT count(*) n FROM commit_log WHERE repo_id = 1").get().n === 1 &&
       sqlite.prepare("SELECT count(*) n FROM commit_log WHERE repo_id = 2").get().n === 1);
+  T("a full fetch is what a backfill is offering to finish",
+    (await q.legacyCommitLogRepoIds(db, [1, 2])).length === 0);
 
   const { axisDaysFor } = weeksLib;
   const days = axisDaysFor(D, D + 6 * DAY, [D + 2 * DAY], (D + 4 * DAY + 100) * 1000);
@@ -1721,7 +1808,7 @@ sqlite.exec(`INSERT INTO dependabot_alerts (repo_id,number,severity,ecosystem,pa
   sqlite.exec("DELETE FROM commit_log");
 }
 
-/* ── The commits list, against a fake GitHub ──────────────────────────────── */
+/* ── Commit history, against a fake GitHub ────────────────────────────────── */
 
 {
   // One bundle for both, so `instanceof GitHubError` sees the class the client throws.
@@ -1729,32 +1816,81 @@ sqlite.exec(`INSERT INTO dependabot_alerts (repo_id,number,severity,ecosystem,pa
   writeFileSync(
     entry,
     `export * from ${JSON.stringify(join(process.cwd(), "src/lib/github/endpoints.ts"))};\n` +
-      `export { GitHubClient } from ${JSON.stringify(join(process.cwd(), "src/lib/github/client.ts"))};\n`,
+      `export { GitHubClient, GitHubError } from ${JSON.stringify(join(process.cwd(), "src/lib/github/client.ts"))};\n`,
   );
   const endpoints = await bundle(entry, "github.cjs");
-  const { GitHubClient } = endpoints;
-  const requests = [];
-  globalThis.__ghFetch = async (url) => {
-    const path = String(url);
-    requests.push(path);
-    if (path.includes("/repos/o/empty/")) {
-      return new Response('{"message":"Git Repository is empty."}', { status: 409 });
+  const { GitHubClient, GitHubError } = endpoints;
+  const bodies = [];
+  const node = (oid, login, extra = {}) => ({
+    oid,
+    authoredDate: "2026-01-02T00:00:00Z",
+    changedFilesIfAvailable: 1,
+    parents: { totalCount: 1 },
+    authors: { nodes: [{ user: { login } }] },
+    ...extra,
+  });
+  globalThis.__ghFetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    bodies.push(body);
+    const name = body.variables?.name;
+    if (name === "empty") {
+      return new Response(JSON.stringify({ data: { repository: { defaultBranchRef: null } } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
     }
-    const page2 = path.includes("page=2");
-    return new Response(JSON.stringify(page2 ? [{ sha: "c" }] : [{ sha: "a" }, { sha: "b" }]), {
-      status: 200,
-      headers: page2
-        ? { "content-type": "application/json" }
-        : { "content-type": "application/json", link: '<https://api.github.com/repos/o/a/commits?page=2>; rel="next"' },
-    });
+    if (name === "missing") {
+      return new Response(JSON.stringify({
+        data: { repository: null },
+        errors: [{ type: "NOT_FOUND", message: "not found" }],
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    const page2 = body.variables?.cursor === "p2";
+    const nodes = page2
+      ? [node("c", "claude")]
+      : [
+          node("a", "ada", { authors: { nodes: [{ user: { login: "ada" } }, { user: { login: "claude" } }] } }),
+          node("b", "ada", { changedFilesIfAvailable: 0 }),
+          node("m", "ada", { parents: { totalCount: 2 } }),
+        ];
+    return new Response(JSON.stringify({
+      data: {
+        repository: {
+          defaultBranchRef: {
+            target: {
+              history: {
+                pageInfo: { hasNextPage: !page2, endCursor: page2 ? null : "p2" },
+                nodes,
+              },
+            },
+          },
+        },
+      },
+    }), { status: 200, headers: { "content-type": "application/json" } });
   };
   const client = new GitHubClient({ token: "t" });
-  const listed = await endpoints.listCommits(client, { owner: "o", name: "a" }, "2026-01-01T00:00:00.000Z");
-  T("the commits list follows every page", listed.map((c) => c.sha).join("") === "abc");
-  T("the commits list asks for full pages from the checkpoint",
-    requests[0].includes("per_page=100") && requests[0].includes("since=2026-01-01T00"), requests[0]);
+  const listed = await endpoints.listCommitHistory(client, { owner: "o", name: "a" }, "2026-01-01T00:00:00.000Z");
+  T("commit history follows every page and keeps empty commits to retract",
+    listed.map((c) => c.sha).join("") === "abc", listed.map((c) => c.sha).join(","));
+  T("commit history credits co-authors and drops merges and empty commits",
+    listed.find((c) => c.sha === "a").logins.join(",") === "ada,claude" &&
+      listed.find((c) => c.sha === "b").logins.length === 0 &&
+      !listed.some((c) => c.sha === "m"));
+  T("an incremental walk passes the checkpoint, and a full walk passes none",
+    bodies[0].variables.since === "2026-01-01T00:00:00.000Z" &&
+      bodies.every((body) => String(body.query).includes("history(first: 50")));
+  bodies.length = 0;
+  await endpoints.listCommitHistory(client, { owner: "o", name: "a" }, null);
+  T("a backfill asks GitHub for the whole branch", bodies[0].variables.since === null);
   T("an empty repository has no commits rather than failing",
-    (await endpoints.listCommits(client, { owner: "o", name: "empty" }, "2026-01-01T00:00:00.000Z")).length === 0);
+    (await endpoints.listCommitHistory(client, { owner: "o", name: "empty" }, null)).length === 0);
+  let missing = false;
+  try {
+    await endpoints.listCommitHistory(client, { owner: "o", name: "missing" }, null);
+  } catch (err) {
+    missing = err instanceof GitHubError;
+  }
+  T("an unreadable repository fails instead of wiping the log", missing);
   delete globalThis.__ghFetch;
 }
 

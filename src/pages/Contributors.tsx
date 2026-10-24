@@ -41,6 +41,7 @@ import {
   weekSpan,
   weekStart,
 } from "../lib/agg/weeks";
+import { CommitBackfillNotice } from "../components/CommitBackfillNotice";
 import { PageShell } from "../components/PageShell";
 import { Sparkline, TimelineArea, type TimelineShape } from "../components/charts";
 import {
@@ -975,6 +976,7 @@ export function Contributors() {
       }
     >
       <div className="flex flex-col gap-4">
+        <CommitBackfillNotice repoIds={scope.repoIds} />
         <ChartCard
           title={`${metricLabel(metric)} over time`}
           subtitle={

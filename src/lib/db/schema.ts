@@ -13,7 +13,7 @@
  * series with empty weeks and keeping them would multiply row counts for nothing.
  */
 
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 export const SCHEMA_SQL = `
 -- One row keeps the HEAD report, its revision and the native file cache it came
@@ -279,18 +279,27 @@ CREATE INDEX IF NOT EXISTS idx_cw_week ON contributor_weeks (week);
 CREATE INDEX IF NOT EXISTS idx_cw_login ON contributor_weeks (login);
 CREATE INDEX IF NOT EXISTS idx_cw_repo_week ON contributor_weeks (repo_id, week);
 
--- One row per default-branch commit GitHub matched to an account, for the daily
--- views the weekly stats cannot give. Merge commits are dropped on write, as the
--- stats endpoints drop them. Keyed by SHA so an overlapping incremental fetch
--- writes the same rows again rather than counting them twice.
+-- One row per account GitHub credits on a default-branch commit: the git author
+-- and each resolved co-author. Merge commits and empty commits are dropped on
+-- write, as the stats endpoints drop them. The login is part of the key so two
+-- people on one commit are two rows, and an overlapping fetch can replace that
+-- set rather than counting either of them twice.
 CREATE TABLE IF NOT EXISTS commit_log (
   repo_id INTEGER NOT NULL,
   sha     TEXT    NOT NULL,
   login   TEXT    NOT NULL,
   day     INTEGER NOT NULL,                   -- Unix seconds, 00:00 UTC of the author date
-  PRIMARY KEY (repo_id, sha)
+  PRIMARY KEY (repo_id, sha, login)
 );
 CREATE INDEX IF NOT EXISTS idx_cl_repo_day ON commit_log (repo_id, day);
+
+-- Whether a repository's commit_log matches the weekly stats.
+-- 1: the old fetch (last year, git author only). 2: full history, with co-authors.
+-- Absent until the first successful full read, which is itself format 2.
+CREATE TABLE IF NOT EXISTS commit_log_state (
+  repo_id INTEGER PRIMARY KEY,
+  format  INTEGER NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS commit_activity (
   repo_id INTEGER NOT NULL,

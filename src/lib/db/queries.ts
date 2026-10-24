@@ -1,4 +1,5 @@
 import type Database from "@tauri-apps/plugin-sql";
+import { COMMIT_LOG_FORMAT } from "../ingest/commitCredits";
 import { bulkInsert, withWriteLock } from ".";
 import { Params } from "./params";
 
@@ -672,9 +673,47 @@ export async function contributorWeeklyByRepo(
    The same shapes as the weekly Contributors queries, read from `commit_log`, so
    the page can swap one source for the other without a second code path. Each
    row's bucket is still called `week` for that reason; here it is a UTC day.
+   A commit with several credited accounts is several rows, which is also how
+   the weekly stats count it.
 
-   Commits only: the list endpoint carries no line counts, and fetching them would
-   cost a request per commit. Additions and deletions come back as zero. */
+   Commits only: the history walk carries no line counts worth storing here.
+   Additions and deletions come back as zero. */
+
+/**
+ * Selected repositories whose daily commits are still the old fetch: a year of
+ * git authors, with no co-authors. Repositories that have never been read are
+ * absent — their first sync walks the whole branch.
+ */
+export async function legacyCommitLogRepoIds(
+  db: Database,
+  repoIds: readonly number[],
+): Promise<number[]> {
+  if (repoIds.length === 0) return [];
+  const p = new Params();
+  const format = p.add(COMMIT_LOG_FORMAT);
+  const ids = p.in(repoIds);
+  const rows = await db.select<Array<{ repo_id: number }>>(
+    `SELECT repo_id FROM commit_log_state WHERE format < ${format} AND repo_id IN ${ids}`,
+    p.values,
+  );
+  return rows.map((row) => Number(row.repo_id));
+}
+
+/** Repositories whose daily commits already match the weekly stats. */
+export async function completeCommitLogRepoIds(
+  db: Database,
+  repoIds: readonly number[],
+): Promise<number[]> {
+  if (repoIds.length === 0) return [];
+  const p = new Params();
+  const format = p.add(COMMIT_LOG_FORMAT);
+  const ids = p.in(repoIds);
+  const rows = await db.select<Array<{ repo_id: number }>>(
+    `SELECT repo_id FROM commit_log_state WHERE format >= ${format} AND repo_id IN ${ids}`,
+    p.values,
+  );
+  return rows.map((row) => Number(row.repo_id));
+}
 
 function dailyCommits<T>(
   db: Database,

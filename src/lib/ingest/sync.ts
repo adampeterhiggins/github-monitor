@@ -8,6 +8,7 @@ import {
 } from "../github/client";
 import * as api from "../github/endpoints";
 import { recordSync, setMeta, type SyncStatus } from "../db";
+import { completeCommitLogRepoIds } from "../db/queries";
 import * as write from "./writers";
 import { syncOwnershipRepo } from "./lineOwnership";
 import { syncPulse } from "./pulse";
@@ -196,6 +197,26 @@ export function shouldFetchIncrementally(
   return !Number.isFinite(changed) || !Number.isFinite(checked) || changed > checked - 10 * 60_000;
 }
 
+/**
+ * How far back a commits fetch should reach.
+ *
+ * The weekly stats are the whole default branch. A checkpointed refresh only
+ * needs what landed since last time; the first sync, a full re-sync, and a
+ * backfill walk everything, because cutting them at `historyDays` is what left
+ * the daily chart a year short. `historyDays` still bounds pull requests,
+ * issues and Actions.
+ */
+export function commitHistorySince(options: {
+  mode: SyncMode;
+  checkpoint: string | null | undefined;
+  historyDays: number;
+  backfill?: boolean;
+  now?: number;
+}): string | null {
+  if (options.backfill || options.mode === "full" || !options.checkpoint) return null;
+  return incrementalSince(options.checkpoint, options.historyDays, options.now ?? Date.now());
+}
+
 /** Build an inclusive checkpoint, falling back to the initial history window. */
 export function incrementalSince(
   checkpoint: string | null | undefined,
@@ -220,10 +241,16 @@ export interface SyncOptions {
   includeArchived?: boolean;
   /** Skip repos with no pushes since this ISO date. */
   activeSince?: string | null;
-  /** How far back to pull PR/issue/Actions data. */
+  /** How far back to pull PR/issue/Actions data. Daily commits are not limited by it. */
   historyDays?: number;
   /** Defaults to an incremental refresh; `full` must be requested explicitly. */
   mode?: SyncMode;
+  /**
+   * Re-read the whole default branch into the daily commit log, and nothing else.
+   * Repositories already on the current format are skipped, so running it again
+   * continues with whatever the last attempt did not finish.
+   */
+  backfillCommits?: boolean;
   onProgress?: (p: SyncProgress) => void;
   signal?: AbortSignal;
 }
@@ -348,19 +375,40 @@ export async function inventoryOwner(
   return listed;
 }
 
+/** The sync currently in flight, so Cancel on any page stops whichever run started it. */
+let activeSync: AbortController | null = null;
+
+export function beginSync(): AbortController {
+  activeSync?.abort();
+  const controller = new AbortController();
+  activeSync = controller;
+  return controller;
+}
+
+export function finishSync(controller: AbortController): void {
+  if (activeSync === controller) activeSync = null;
+}
+
+export function cancelSync(): void {
+  activeSync?.abort();
+}
+
 export async function runSync(options: SyncOptions): Promise<SyncResult> {
   const started = Date.now();
   const {
     db,
     token,
     orgs,
-    endpoints = ALL_ENDPOINTS,
     includeArchived = false,
     activeSince = null,
     historyDays = 365,
-    mode = "incremental",
     signal,
   } = options;
+  // A backfill re-reads commit history only. Full mode so the old checkpoint
+  // cannot skip a repository or cut the walk off at the last year.
+  const backfillCommits = options.backfillCommits === true;
+  const endpoints: readonly EndpointId[] = backfillCommits ? ["commits"] : (options.endpoints ?? ALL_ENDPOINTS);
+  const mode: SyncMode = backfillCommits ? "full" : (options.mode ?? "incremental");
 
   const errors: SyncError[] = [];
   let rateLimit: RateLimitState | null = null;
@@ -614,9 +662,17 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   const extras = endpoints.filter((e) =>
     (["commits", "traffic", "community", "forks", "branches", "dependencies", "actions"] as EndpointId[]).includes(e),
   );
+  const completeCommitLogs = backfillCommits
+    ? new Set(await completeCommitLogRepoIds(db, targets.map((repo) => repo.id)))
+    : new Set<number>();
   const extraKeys: Array<{ repo: RepoTarget; endpoint: EndpointId }> = [];
   for (const repo of targets) {
     for (const endpoint of extras) {
+      // A second backfill continues with the repositories the last one did not finish.
+      if (backfillCommits && endpoint === "commits" && completeCommitLogs.has(repo.id)) {
+        skipped++;
+        continue;
+      }
       if (needsFetch(repo, endpoint)) extraKeys.push({ repo, endpoint });
       else skipped++;
     }
@@ -639,7 +695,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     : [];
 
   phase = "syncing";
-  label = "Syncing statistics and repository data";
+  label = backfillCommits ? "Backfilling daily commit history" : "Syncing statistics and repository data";
   total = pendingKeys.length + extraKeys.length + pulseTargets.length + ownershipTargets.length;
   done = 0;
   current = null;
@@ -708,10 +764,26 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     if (cancelled()) return;
     attempted++;
     try {
+      const checkpoint = stateFor(repo.id, endpoint)?.lastOkAt;
+      const sinceIso = endpoint === "commits"
+        ? commitHistorySince({ mode, checkpoint, historyDays, backfill: backfillCommits })
+        : sinceFor(repo.id, endpoint, true);
+      current = repo.fullName;
+      if (endpoint === "commits" && backfillCommits) label = "Backfilling daily commit history";
+      emit();
       await syncExtra(client, db, repo, endpoint, {
-        sinceIso: sinceFor(repo.id, endpoint, endpoint !== "commits"),
-        // Only a fetch from a checkpoint is partial; anything else restates the window.
-        incremental: mode === "incremental" && stateFor(repo.id, endpoint)?.lastOkAt != null,
+        sinceIso,
+        // A commits fetch with no cutoff restates the branch. Anything dated from
+        // a checkpoint only replaces the commits it actually saw.
+        incremental: endpoint === "commits"
+          ? sinceIso != null
+          : mode === "incremental" && checkpoint != null,
+        onPage: endpoint === "commits"
+          ? (page) => {
+              current = `${repo.fullName} · page ${page}`;
+              emit();
+            }
+          : undefined,
       }, signal);
       await recordSync(db, repo.id, endpoint, "ok");
     } catch (err) {
@@ -903,15 +975,15 @@ async function syncExtra(
   db: Database,
   repo: RepoTarget,
   endpoint: EndpointId,
-  window: { sinceIso: string; incremental: boolean },
+  window: { sinceIso: string | null; incremental: boolean; onPage?: (page: number) => void },
   signal?: AbortSignal,
 ): Promise<void> {
   const ref = { owner: repo.owner, name: repo.name };
   const { sinceIso } = window;
   switch (endpoint) {
     case "commits": {
-      const commits = await api.listCommits(client, ref, sinceIso, signal);
-      await write.writeCommits(db, repo.id, commits, !window.incremental);
+      const commits = await api.listCommitHistory(client, ref, sinceIso, signal, window.onPage);
+      await write.writeCommitHistory(db, repo.id, commits, !window.incremental);
       return;
     }
     case "traffic": {
@@ -948,7 +1020,7 @@ async function syncExtra(
       return;
     }
     case "actions": {
-      const runs = await api.listWorkflowRuns(client, ref, sinceIso, { signal, maxPages: 3 });
+      const runs = await api.listWorkflowRuns(client, ref, sinceIso ?? "", { signal, maxPages: 3 });
       await write.writeWorkflowRuns(db, repo.id, runs);
       return;
     }

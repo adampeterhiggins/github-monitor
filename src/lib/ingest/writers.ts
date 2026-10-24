@@ -1,10 +1,10 @@
 import type Database from "@tauri-apps/plugin-sql";
 import { bulkInsert, replaceRepoRows, withWriteLock } from "../db";
+import { COMMIT_LOG_FORMAT, type CreditedCommit } from "./commitCredits";
 import { currentWeekStart, dayKey, weeksEndingAt } from "../agg/weeks";
 import type {
   GhBranch,
   GhCodeFrequency,
-  GhCommit,
   GhCommitActivity,
   GhCommunityProfile,
   GhContributorStats,
@@ -139,40 +139,63 @@ export async function writeContributorStats(
 }
 
 /**
- * Commits for the daily views, one row per non-merge commit with an account.
+ * Commits for the daily views, one row per account GitHub would credit.
  *
- * `replace` clears the repository first, for a fetch that covers the whole window:
- * a rebase or force push leaves commits behind that no later page will restate.
- * An incremental fetch only sees what is new, so it upserts by SHA instead.
+ * `replace` clears the repository first. A full walk has to: a rebase or force
+ * push leaves commits behind that no later page will restate, and it is the
+ * walk that covers the same history as the weekly stats, so the repository is
+ * marked current. An incremental fetch only restates the commits it saw, sha
+ * by sha, so a co-author added or removed in the overlap replaces that commit's
+ * rows without touching the rest — and without claiming the backfill is done.
  */
-export async function writeCommits(
+export async function writeCommitHistory(
   db: Database,
   repoId: number,
-  commits: GhCommit[],
+  commits: readonly CreditedCommit[],
   replace: boolean,
 ): Promise<void> {
   const rows: unknown[][] = [];
-  for (const c of commits) {
-    // Merges are left out for the same reason GitHub's stats leave them out: the
-    // work they carry is already counted on the commits they bring in.
-    if (c.parents.length > 1) continue;
-    const login = c.author?.login;
-    const date = c.commit.author?.date;
-    if (!login || !date) continue;
-    const ms = Date.parse(date);
-    if (!Number.isFinite(ms)) continue;
-    rows.push([repoId, c.sha, login, Math.floor(ms / 86_400_000) * 86_400]);
+  const shas: string[] = [];
+  for (const commit of commits) {
+    shas.push(commit.sha);
+    if (commit.day == null) continue;
+    for (const login of commit.logins) rows.push([repoId, commit.sha, login, commit.day]);
   }
 
   await withWriteLock(async () => {
-    if (replace) await db.execute("DELETE FROM commit_log WHERE repo_id = $1", [repoId]);
+    if (replace) {
+      await db.execute("DELETE FROM commit_log WHERE repo_id = $1", [repoId]);
+    } else {
+      await deleteCommitShas(db, repoId, shas);
+    }
     await bulkInsert(db, {
       table: "commit_log",
       columns: ["repo_id", "sha", "login", "day"],
-      conflictColumns: ["repo_id", "sha"],
+      conflictColumns: ["repo_id", "sha", "login"],
       rows,
     });
+    if (replace) {
+      await db.execute(
+        `INSERT INTO commit_log_state (repo_id, format) VALUES ($1, $2)
+         ON CONFLICT (repo_id) DO UPDATE SET format = excluded.format`,
+        [repoId, COMMIT_LOG_FORMAT],
+      );
+    }
   });
+}
+
+/** Drop every stored account for these commits. Batched under SQLite's parameter ceiling. */
+async function deleteCommitShas(db: Database, repoId: number, shas: readonly string[]): Promise<void> {
+  const unique = [...new Set(shas)];
+  const batchSize = 400;
+  for (let i = 0; i < unique.length; i += batchSize) {
+    const batch = unique.slice(i, i + batchSize);
+    const placeholders = batch.map((_, index) => `$${index + 2}`).join(", ");
+    await db.execute(
+      `DELETE FROM commit_log WHERE repo_id = $1 AND sha IN (${placeholders})`,
+      [repoId, ...batch],
+    );
+  }
 }
 
 export async function writeCommitActivity(
