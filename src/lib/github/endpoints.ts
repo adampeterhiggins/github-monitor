@@ -1,8 +1,8 @@
+import { creditCommit, type CreditedCommit, type HistoryCommitNode } from "../ingest/commitCredits";
 import { GitHubError, type GitHubClient } from "./client";
 import type {
   GhBranch,
   GhCodeFrequency,
-  GhCommit,
   GhCommitActivity,
   GhCommunityProfile,
   GhContributorStats,
@@ -121,31 +121,81 @@ export async function commitCount(
 }
 
 /**
- * Default-branch commits made since `since`, newest first, 100 to a page.
+ * Default-branch commits, oldest pages last, with every account GitHub credits.
  *
- * This is the only per-day, per-author source GitHub has: the `stats/*` endpoints
- * bucket by week. It costs a request per hundred commits, which is why callers
- * pass a checkpoint rather than re-reading the window each sync.
- *
- * An empty repository answers 409 and an unreadable one 403 or 404; all three
- * mean "no commits to record" rather than a failure.
+ * `since` limits the walk to commits after that instant (the incremental
+ * checkpoint). Null walks the whole branch: the weekly stats have no such
+ * window, and the daily view has to be able to match them. An empty repository
+ * has no branch and contributes nothing. A repository GitHub will not show us
+ * throws, so the caller leaves whatever it already stored.
  */
-export async function listCommits(
+const COMMIT_HISTORY_QUERY = `query($owner: String!, $name: String!, $cursor: String, $since: GitTimestamp) {
+  repository(owner: $owner, name: $name) {
+    defaultBranchRef {
+      target {
+        ... on Commit {
+          history(first: 50, after: $cursor, since: $since) {
+            pageInfo { hasNextPage endCursor }
+            nodes {
+              oid
+              authoredDate
+              changedFilesIfAvailable
+              parents { totalCount }
+              authors(first: 50) { nodes { user { login } } }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+interface CommitHistoryPage {
+  repository: {
+    defaultBranchRef: {
+      target: {
+        history: {
+          pageInfo: { hasNextPage: boolean; endCursor: string | null };
+          nodes: Array<HistoryCommitNode | null> | null;
+        };
+      } | null;
+    } | null;
+  } | null;
+}
+
+type CommitHistoryConnection = NonNullable<
+  NonNullable<NonNullable<CommitHistoryPage["repository"]>["defaultBranchRef"]>["target"]
+>["history"];
+
+export async function listCommitHistory(
   client: GitHubClient,
   repo: RepoRef,
-  since: string,
+  since: string | null,
   signal?: AbortSignal,
-): Promise<GhCommit[]> {
-  const params = new URLSearchParams({ per_page: "100", since });
-  try {
-    return await client.paginate<GhCommit>(`${base(repo)}/commits?${params.toString()}`, {
-      signal,
-      allowNotFound: true,
-      allowForbidden: true,
-    });
-  } catch (err) {
-    if (err instanceof GitHubError && err.status === 409) return [];
-    throw err;
+  onPage?: (page: number) => void,
+): Promise<CreditedCommit[]> {
+  const credits: CreditedCommit[] = [];
+  let cursor: string | null = null;
+  for (let pageNumber = 1; ; pageNumber++) {
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    onPage?.(pageNumber);
+    const data = (await client.graphql(
+      COMMIT_HISTORY_QUERY,
+      { owner: repo.owner, name: repo.name, cursor, since },
+      { signal },
+    )) as CommitHistoryPage | null;
+    const found: CommitHistoryPage["repository"] = data?.repository ?? null;
+    if (!found) {
+      throw new GitHubError(`Cannot read ${repo.owner}/${repo.name}`, 404, "graphql");
+    }
+    const history: CommitHistoryConnection | null = found.defaultBranchRef?.target?.history ?? null;
+    if (!history) return credits;
+    for (const node of history.nodes ?? []) {
+      const credited = creditCommit(node);
+      if (credited) credits.push(credited);
+    }
+    if (!history.pageInfo.hasNextPage || !history.pageInfo.endCursor) return credits;
+    cursor = history.pageInfo.endCursor;
   }
 }
 

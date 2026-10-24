@@ -1,4 +1,5 @@
 import Database from "@tauri-apps/plugin-sql";
+import { COMMIT_LOG_LEGACY_FORMAT } from "../ingest/commitCredits";
 import { REVISION_KEYS, SCHEMA_SQL, SCHEMA_VERSION, TRIGGER_SQL } from "./schema";
 
 let dbPromise: Promise<Database> | null = null;
@@ -64,7 +65,49 @@ const MIGRATIONS: ReadonlyArray<{ version: number; run: (db: Executor) => Promis
          WHERE github_id IS NOT NULL AND login IS NOT NULL`, [now]);
     },
   },
+  {
+    // Daily commits used to store one login per SHA, and only a year of them.
+    // The new key holds every account GitHub credits. Existing rows stay readable
+    // and are marked so the app can offer a backfill instead of pretending they
+    // already match the weekly stats.
+    version: 9,
+    run: upgradeLegacyCommitLog,
+  },
 ];
+
+/**
+ * Widen `commit_log` from one login per commit to one row per credited account.
+ *
+ * Databases created at this version already have the new key, and running it
+ * again must leave them alone: the copy is how an existing year of commits
+ * survives the upgrade.
+ */
+export async function upgradeLegacyCommitLog(db: Executor): Promise<void> {
+  const info = await db.select<Array<{ name: string; pk: number }>>("PRAGMA table_info(commit_log)");
+  const legacy = info.length > 0 && !info.some((column) => column.name === "login" && Number(column.pk) > 0);
+  if (!legacy) return;
+  await db.execute(
+    `CREATE TABLE commit_log_v9 (
+       repo_id INTEGER NOT NULL,
+       sha     TEXT    NOT NULL,
+       login   TEXT    NOT NULL,
+       day     INTEGER NOT NULL,
+       PRIMARY KEY (repo_id, sha, login)
+     )`,
+  );
+  await db.execute(
+    "INSERT INTO commit_log_v9 (repo_id, sha, login, day) SELECT repo_id, sha, login, day FROM commit_log",
+  );
+  await db.execute("DROP TABLE commit_log");
+  await db.execute("ALTER TABLE commit_log_v9 RENAME TO commit_log");
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_cl_repo_day ON commit_log (repo_id, day)");
+  // INSERT OR IGNORE, not ON CONFLICT: `FROM commit_log ON CONFLICT` is parsed as a join.
+  await db.execute(
+    `INSERT OR IGNORE INTO commit_log_state (repo_id, format)
+     SELECT DISTINCT repo_id, $1 FROM commit_log`,
+    [COMMIT_LOG_LEGACY_FORMAT],
+  );
+}
 
 /** Create, upgrade, and record the schema version. Reads the old version before changing anything. */
 export async function migrate(db: Executor): Promise<void> {
@@ -366,6 +409,7 @@ export async function clearAnalytics(db: Database): Promise<void> {
     "github_user_logins",
     "contributor_weeks",
     "commit_log",
+    "commit_log_state",
     "commit_activity",
     "participation",
     "code_frequency",

@@ -1,14 +1,18 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useApp } from "../lib/state/app";
 import {
   ALL_ENDPOINTS,
+  beginSync,
+  cancelSync,
   ENDPOINT_LABELS,
+  finishSync,
   runSync,
   type EndpointId,
   type SyncError,
   type SyncMode,
 } from "../lib/ingest/sync";
+import { CommitBackfillNotice } from "./CommitBackfillNotice";
 import { outstandingWork } from "../lib/db/queries";
 import { describeOrgs } from "../lib/auth";
 import { Button, Callout, Card, CardHeader, Checkbox, DataTable, OnlyButton, Spinner, full } from "./ui";
@@ -45,7 +49,6 @@ function storedEndpoints(): EndpointId[] {
  */
 export function SyncPanel({ compact: compactView = false }: { compact?: boolean }) {
   const { db, token, orgs, sync, syncing, setSync, setSyncing, reloadSyncTime, refreshRepos } = useApp();
-  const abortRef = useRef<AbortController | null>(null);
   const queryClient = useQueryClient();
   const [selectedEndpoints, setSelectedEndpoints] = useState<EndpointId[]>(storedEndpoints);
   const [includeArchived, setIncludeArchived] = useState(() => localStorage.getItem(ARCHIVED_KEY) === "true");
@@ -75,8 +78,7 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
 
   const start = useCallback(async (mode: SyncMode) => {
     if (!db || !token || !orgs.length) return;
-    const controller = new AbortController();
-    abortRef.current = controller;
+    const controller = beginSync();
     setFatal(null);
     setSyncing(true);
     try {
@@ -99,12 +101,12 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
     } catch (err) {
       setFatal((err as Error)?.message ?? String(err));
     } finally {
+      finishSync(controller);
       setSyncing(false);
-      abortRef.current = null;
     }
   }, [db, token, orgs, selectedEndpoints, selectedRepoIds, includeArchived, setSync, setSyncing, refreshRepos, reloadSyncTime, queryClient, work]);
 
-  const cancel = () => abortRef.current?.abort();
+  const cancel = () => cancelSync();
 
   const applyEndpoints = (ids: EndpointId[]) => {
     localStorage.setItem(ENDPOINT_KEY, JSON.stringify(ids));
@@ -226,6 +228,8 @@ export function SyncPanel({ compact: compactView = false }: { compact?: boolean 
           </Callout>
         </div>
       ) : null}
+
+      <CommitBackfillNotice repoIds={workRepoIds} />
 
       {!syncing && work.data && !work.data.resumable && work.data.complete > 0 ? (
         <p className="mb-3 text-[12px] text-ink-secondary">
