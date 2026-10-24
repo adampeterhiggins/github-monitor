@@ -42,7 +42,7 @@ const HISTORY_VALUES = [
 ];
 const HISTORY_READINGS: Array<{ value: OwnershipReading; label: string }> = [
   { value: "cumulative", label: "Cumulative" },
-  { value: "period", label: "Per period" },
+  { value: "period", label: "Each period" },
 ];
 const HISTORY_PERIODS: Array<{ value: OwnershipPeriod; label: string }> = [
   { value: "day", label: "Day" },

@@ -66,20 +66,32 @@ import {
 type Breakdown = "none" | "contributor" | "repository";
 
 /**
- * How the timeline reads time: a running total, or per bucket of a given size.
- * One axis rather than two controls, because "cumulative monthly" and
- * "cumulative weekly" draw the same curve — only the point density differs.
+ * Whether a point carries the total forward, or stands for its own bucket.
+ * Separate from the bucket size: a cumulative month and a cumulative week are
+ * the same curve drawn at different densities, and that density is the choice.
  */
-type TimelineView = "cumulative" | Granularity;
+type Aggregation = "cumulative" | "period";
 
-/* Module-level so the timeline row is not rebuilt on every render. */
+/* Module-level so the timeline rows are not rebuilt on every render. */
 
-const TIMELINE_VIEWS: Array<{ value: TimelineView; label: string }> = [
-  { value: "cumulative", label: "Cumulative" },
-  { value: "day", label: "Per day" },
-  { value: "week", label: "Per week" },
-  { value: "month", label: "Per month" },
-  { value: "quarter", label: "Per quarter" },
+const AGGREGATIONS: Array<{ value: Aggregation; label: string; title: string }> = [
+  {
+    value: "cumulative",
+    label: "Cumulative",
+    title: "Running total. The period sets how often a point is drawn",
+  },
+  {
+    value: "period",
+    label: "Each period",
+    title: "Each point is only what happened in that day, week, month or quarter",
+  },
+];
+
+const GRANULARITIES: Array<{ value: Granularity; label: string }> = [
+  { value: "day", label: "Day" },
+  { value: "week", label: "Week" },
+  { value: "month", label: "Month" },
+  { value: "quarter", label: "Quarter" },
 ];
 
 const SHAPES: Array<{ value: TimelineShape; label: string }> = [
@@ -240,11 +252,15 @@ export function Contributors() {
     localStorage.setItem("github-monitor.valueMode", migrated ? "share" : "total");
     return migrated ? "share" : "total";
   });
-  const [view, setView] = useState<TimelineView>(() =>
-    localStorage.getItem("github-monitor.cumulative") === "true"
-      ? "cumulative"
-      : (localStorage.getItem("github-monitor.granularity") as Granularity) || "week",
+  const [aggregation, setAggregation] = useState<Aggregation>(() =>
+    localStorage.getItem("github-monitor.cumulative") === "true" ? "cumulative" : "period",
   );
+  const [bucket, setBucket] = useState<Granularity>(() => {
+    const stored = localStorage.getItem("github-monitor.granularity");
+    return stored === "day" || stored === "week" || stored === "month" || stored === "quarter"
+      ? stored
+      : "week";
+  });
   /** Stretch the y axis to the data rather than starting at zero or 0–100%. */
   const [yAxis, setYAxis] = useState<"full" | "fit">(
     () => (localStorage.getItem("github-monitor.yAxis") === "fit" ? "fit" : "full"),
@@ -263,26 +279,29 @@ export function Contributors() {
   /** Net lines can be negative, which several defaults here assume away. */
   const signedMetric = metricCanBeNegative(metric);
 
-  const cumulative = view === "cumulative";
+  const cumulative = aggregation === "cumulative";
   /**
    * Per day reads the commit log rather than the weekly stats, and that log has
-   * no line counts — so for a line metric the view falls back to weeks, and the
-   * option says so by being unavailable.
+   * no line counts — so for a line metric the day falls back to weeks, and the
+   * option says so by being unavailable. The reading is untouched: a cumulative
+   * day and a day on its own both need that log.
    */
-  const daily = view === "day" && metric === "commits";
-  // A running total is the same curve at any bucket size, so it reads the raw
-  // weekly series.
-  const granularity: Granularity = cumulative ? "week" : view === "day" && !daily ? "week" : view;
-  const timelineViews = useMemo(
-    () => TIMELINE_VIEWS.map((o) => (o.value === "day" ? { ...o, disabled: metric !== "commits" } : o)),
+  const daily = bucket === "day" && metric === "commits";
+  const granularity: Granularity = bucket === "day" && !daily ? "week" : bucket;
+  const granularityOptions = useMemo(
+    () => GRANULARITIES.map((o) => (o.value === "day" ? { ...o, disabled: metric !== "commits" } : o)),
     [metric],
   );
 
-  /** Stable across renders of the options panel. */
-  const chooseView = useCallback((v: TimelineView) => {
-    localStorage.setItem("github-monitor.cumulative", String(v === "cumulative"));
-    if (v !== "cumulative") localStorage.setItem("github-monitor.granularity", v);
-    setView(v);
+  /** Stable across renders of the options panel. The two choices persist apart,
+   * so picking a running total no longer forgets the bucket size under it. */
+  const chooseAggregation = useCallback((value: Aggregation) => {
+    localStorage.setItem("github-monitor.cumulative", String(value === "cumulative"));
+    setAggregation(value);
+  }, []);
+  const chooseGranularity = useCallback((value: Granularity) => {
+    localStorage.setItem("github-monitor.granularity", value);
+    setBucket(value);
   }, []);
 
   /** How every contributor card is split. One control for all of them. */
@@ -773,14 +792,42 @@ export function Contributors() {
    * Stacking is not counted on its own: it only takes effect with a breakdown,
    * which is flagged anyway.
    */
-  const viewChanged = breakdown !== "none" || shape !== "bar" || view !== "week" || yAxis !== "full" || hideOther;
+  const readingChanged = aggregation !== "period" || bucket !== "week";
+  const viewChanged = breakdown !== "none" || shape !== "bar" || readingChanged || yAxis !== "full" || hideOther;
 
   const dayFallbackNote =
-    view === "day" && !daily ? (
+    bucket === "day" && !daily ? (
       <p className="px-0.5 text-[11px] text-ink-muted">
-        Per day counts commits only, so {metricLabel(metric).toLowerCase()} are shown per week.
+        Day counts commits only, so {metricLabel(metric).toLowerCase()} are shown per week.
       </p>
     ) : null;
+
+  /** Reading and bucket size, shared by the headline chart and an expanded card. */
+  const timelineReading = (
+    <>
+      <LabeledControl label="Reading">
+        <Segmented<Aggregation>
+          ariaLabel="Reading"
+          variant="bare"
+          stretch
+          value={aggregation}
+          onChange={chooseAggregation}
+          options={AGGREGATIONS}
+        />
+      </LabeledControl>
+      <LabeledControl label="Period">
+        <Segmented<Granularity>
+          ariaLabel="Time period"
+          variant="bare"
+          stretch
+          value={bucket}
+          onChange={chooseGranularity}
+          options={granularityOptions}
+        />
+      </LabeledControl>
+      {dayFallbackNote}
+    </>
+  );
 
   /**
    * The controls a contributor card carries when it is opened full screen.
@@ -791,15 +838,8 @@ export function Contributors() {
    * once here and hand to every card: only the open one ever renders it.
    */
   const cardControls = (
-    <FilterPopover active={shape !== "bar" || cardSplit !== "none" || view !== "week" || yAxis !== "full" || hideOther} width={420}>
-        <Segmented<TimelineView>
-          ariaLabel="Timeline"
-          stretch
-          value={view}
-          onChange={chooseView}
-          options={timelineViews}
-        />
-        {dayFallbackNote}
+    <FilterPopover active={shape !== "bar" || cardSplit !== "none" || readingChanged || yAxis !== "full" || hideOther} width={420}>
+        {timelineReading}
         <Segmented<TimelineShape>
           ariaLabel="Chart shape"
           stretch
@@ -892,8 +932,9 @@ export function Contributors() {
   const valueLabel = metricLabel(metric).toLowerCase();
   const loading =
     totals.isFetching || perLogin.isFetching || (daily && (dailyTotals.isFetching || dailyByLogin.isFetching));
-  const bucketWord = daily ? "Daily" : "Weekly";
-  const bucketEnd = (bucket: number) => (bucket + (daily ? DAY_SECONDS : WEEK_SECONDS)) * 1000 - 1;
+  const grain = { day: "day", week: "week", month: "month", quarter: "quarter" }[granularity];
+  const readingLabel = cumulative ? `Cumulative by ${grain}` : `Each ${grain}`;
+  const bucketEnd = (start: number) => (start + (daily ? DAY_SECONDS : WEEK_SECONDS)) * 1000 - 1;
   /** The commit log fills in on the next sync; until then per day has nothing to draw. */
   const dailyMissing =
     daily && dailyTotals.data != null && dailyTotals.data.length === 0 && (totals.data?.length ?? 0) > 0;
@@ -940,10 +981,10 @@ export function Contributors() {
             dailyMissing
               ? "No daily commits cached yet — sync Daily commits to fill this in"
               : zoomed
-                ? `${bucketWord} from ${formatDate(visibleAxis[0] * 1000)} to ${formatDate(
+                ? `${readingLabel} from ${formatDate(visibleAxis[0] * 1000)} to ${formatDate(
                     bucketEnd(visibleAxis[visibleAxis.length - 1]),
                   )} — drag the handles below to change the window`
-                : `${bucketWord} from ${formatDate(scope.range.fromWeek * 1000)} to ${formatDate(
+                : `${readingLabel} from ${formatDate(scope.range.fromWeek * 1000)} to ${formatDate(
                     daily && axis.length > 0
                       ? bucketEnd(axis[axis.length - 1])
                       : scope.range.toWeek * 1000 + WEEK_SECONDS * 1000 - 1,
@@ -952,14 +993,7 @@ export function Contributors() {
           loading={loading}
           titleAfter={
               <FilterPopover active={viewChanged} width={420}>
-                <Segmented<TimelineView>
-                  ariaLabel="Timeline"
-                  stretch
-                  value={view}
-                  onChange={chooseView}
-                  options={timelineViews}
-                />
-                {dayFallbackNote}
+                {timelineReading}
                 <Segmented<TimelineShape>
                   ariaLabel="Chart shape"
                   stretch
