@@ -307,8 +307,8 @@ contributor card, which follows the same controls — offers:
 | Control | Options |
 |---|---|
 | Shape | Bars · Area · Line |
-| Accumulation | Per period · Cumulative |
-| Period | Weekly · Monthly · Quarterly |
+| Reading | Cumulative · Each period |
+| Period | Day · Week · Month · Quarter |
 | Break down | None · By contributor · By repository |
 | Stacking | Stacked · Overlaid (when broken down) |
 

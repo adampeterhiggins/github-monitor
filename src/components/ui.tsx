@@ -149,7 +149,7 @@ export function Segmented<T extends string>({
 }: {
   value: T;
   /** An option can be disabled on its own, for a choice that does not apply. */
-  options: Array<{ value: T; label: string; disabled?: boolean }>;
+  options: Array<{ value: T; label: string; disabled?: boolean; title?: string }>;
   onChange: (value: T) => void;
   ariaLabel: string;
   disabled?: boolean;
@@ -173,6 +173,7 @@ export function Segmented<T extends string>({
           role="tab"
           aria-selected={value === opt.value}
           disabled={disabled || opt.disabled}
+          title={opt.title}
           onClick={() => onChange(opt.value)}
           className={clsx(
             "rounded px-2 py-1 text-[12px] font-medium transition-colors",
