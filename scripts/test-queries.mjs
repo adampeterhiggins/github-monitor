@@ -1697,6 +1697,11 @@ sqlite.exec(`INSERT INTO dependabot_alerts (repo_id,number,severity,ecosystem,pa
   await dbIndex.upgradeLegacyCommitLog(adapter);
   T("upgrading the commit log again leaves it in place",
     legacy.prepare("SELECT count(*) n FROM commit_log").get().n === 2);
+  await dbIndex.migrate(adapter);
+  T("PR association migration preserves old commits as unknown",
+    legacy.prepare("SELECT count(*) n FROM commit_log WHERE is_pr IS NULL").get().n === 2);
+  await dbIndex.migrate(adapter);
+  T("PR association migration is repeatable", legacy.prepare("SELECT count(*) n FROM commit_log").get().n === 2);
   legacy.close();
 }
 
@@ -1714,8 +1719,9 @@ sqlite.exec(`INSERT INTO dependabot_alerts (repo_id,number,severity,ecosystem,pa
   const D = 1745107200; // a Sunday 00:00 UTC
   const DAY = 86400;
   const iso = (secs) => new Date(secs * 1000).toISOString();
-  const commit = (sha, logins, secs, { merge = false, empty = false } = {}) => credits.creditCommit({
+  const commit = (sha, logins, secs, { merge = false, empty = false, pr = null } = {}) => credits.creditCommit({
     oid: sha,
+    associatedPullRequests: pr == null ? null : { totalCount: pr ? 1 : 0 },
     authoredDate: iso(secs),
     changedFilesIfAvailable: empty ? 0 : 1,
     parents: { totalCount: merge ? 2 : 1 },
@@ -1731,8 +1737,8 @@ sqlite.exec(`INSERT INTO dependabot_alerts (repo_id,number,severity,ecosystem,pa
   const kept = (sha, logins, secs, opts) => commit(sha, logins, secs, opts);
   await writers.writeCommitHistory(db, 1, [
     kept("a1", ["Claude"], D + 3600),
-    kept("a2", ["claude", "Claude"], D + DAY - 1),
-    kept("a3", ["claude", "cursoragent"], D + DAY),
+    kept("a2", ["claude", "Claude"], D + DAY - 1, { pr: false }),
+    kept("a3", ["claude", "cursoragent"], D + DAY, { pr: true }),
     kept("a4", ["adampeterhiggins", "claude"], D + 2 * DAY + 60),
     kept("e1", ["claude"], D + 2 * DAY, { empty: true }),
     kept("n1", [null], D + 2 * DAY),
@@ -1787,6 +1793,26 @@ sqlite.exec(`INSERT INTO dependabot_alerts (repo_id,number,severity,ecosystem,pa
   const byLoginRepo = await q.commitDailyByLoginRepo(db, IDS, D, D + 6 * DAY);
   T("daily login × repository rows sum to the totals", sum(byLoginRepo) === sum(totals));
 
+  const prTotals = await q.commitDailyTotals(db, IDS, D, D + 6 * DAY, null, true);
+  T("PR-only totals exclude direct and unknown commits and credit both co-authors", sum(prTotals) === 2);
+  T("PR-only queries respect user, repository and day filters",
+    sum(await q.commitDailyTotals(db, IDS, D, D + 6 * DAY, ["CLAUDE"], true)) === 1 &&
+    sum(await q.commitDailyTotals(db, [2], D, D + 6 * DAY, null, true)) === 0 &&
+    sum(await q.commitDailyTotals(db, IDS, D, D, null, true)) === 0);
+  for (const query of [q.commitDailyByLogin, q.commitDailyByRepo, q.commitDailyByLoginRepo]) {
+    T(`${query.name} applies the PR filter`, sum(await query(db, IDS, D, D + 6 * DAY, null, true)) === 2);
+  }
+  T("direct and unknown associations remain distinct in storage",
+    sqlite.prepare("SELECT is_pr FROM commit_log WHERE sha = 'a1'").get().is_pr === null &&
+    sqlite.prepare("SELECT is_pr FROM commit_log WHERE sha = 'a2'").get().is_pr === 0);
+  sqlite.exec("UPDATE commit_log_state SET format = 2 WHERE repo_id = 1");
+  T("co-author format without PR associations still needs backfill",
+    (await q.legacyCommitLogRepoIds(db, [1, 2])).join(",") === "1");
+  await writers.writeCommitHistory(db, 1, [kept("a3", ["claude", "cursoragent"], D + DAY, { pr: false })], false);
+  T("incremental sync refreshes the association for every co-author",
+    sum(await q.commitDailyTotals(db, IDS, D, D + 6 * DAY, null, true)) === 0 &&
+    (await q.legacyCommitLogRepoIds(db, [1])).join(",") === "1");
+
   // A full fetch restates the window, so a commit rebased away must go.
   await writers.writeCommitHistory(db, 1, [kept("a1", ["claude"], D + 3600)].filter(Boolean), true);
   T("a full fetch drops commits that are no longer on the branch",
@@ -1823,6 +1849,7 @@ sqlite.exec(`INSERT INTO dependabot_alerts (repo_id,number,severity,ecosystem,pa
   const bodies = [];
   const node = (oid, login, extra = {}) => ({
     oid,
+    associatedPullRequests: { totalCount: oid === "a" ? 1 : 0 },
     authoredDate: "2026-01-02T00:00:00Z",
     changedFilesIfAvailable: 1,
     parents: { totalCount: 1 },
@@ -1876,6 +1903,9 @@ sqlite.exec(`INSERT INTO dependabot_alerts (repo_id,number,severity,ecosystem,pa
     listed.find((c) => c.sha === "a").logins.join(",") === "ada,claude" &&
       listed.find((c) => c.sha === "b").logins.length === 0 &&
       !listed.some((c) => c.sha === "m"));
+  T("history requests PR association and carries it into credited commits",
+    bodies.every((body) => body.query.includes("associatedPullRequests(first: 1)")) &&
+    listed.find((c) => c.sha === "a").isPr === true && listed.find((c) => c.sha === "c").isPr === false);
   T("an incremental walk passes the checkpoint, and a full walk passes none",
     bodies[0].variables.since === "2026-01-01T00:00:00.000Z" &&
       bodies.every((body) => String(body.query).includes("history(first: 50")));

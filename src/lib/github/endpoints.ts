@@ -141,6 +141,7 @@ const COMMIT_HISTORY_QUERY = `query($owner: String!, $name: String!, $cursor: St
               authoredDate
               changedFilesIfAvailable
               parents { totalCount }
+              associatedPullRequests(first: 1) { totalCount }
               authors(first: 50) { nodes { user { login } } }
             }
           }

@@ -159,7 +159,7 @@ export async function writeCommitHistory(
   for (const commit of commits) {
     shas.push(commit.sha);
     if (commit.day == null) continue;
-    for (const login of commit.logins) rows.push([repoId, commit.sha, login, commit.day]);
+    for (const login of commit.logins) rows.push([repoId, commit.sha, login, commit.day, commit.isPr == null ? null : Number(commit.isPr)]);
   }
 
   await withWriteLock(async () => {
@@ -170,7 +170,7 @@ export async function writeCommitHistory(
     }
     await bulkInsert(db, {
       table: "commit_log",
-      columns: ["repo_id", "sha", "login", "day"],
+      columns: ["repo_id", "sha", "login", "day", "is_pr"],
       conflictColumns: ["repo_id", "sha", "login"],
       rows,
     });

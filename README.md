@@ -80,7 +80,7 @@ and the app says so rather than rendering blank charts.
 | Page | Source | Notes |
 |---|---|---|
 | Pulse | GraphQL PRs + issues | Derived — GitHub has no Pulse API. Adds size vs time-to-merge and open-PR age. |
-| Contributors | `stats/contributors`, `commits` (per day) | Exact parity, plus stacked breakdowns; per day counts commits only |
+| Contributors | `stats/contributors`, GraphQL commit history | Stacked breakdowns, daily commits, and an optional PR-only commit filter |
 | Community | `community/profile` | Health score + checklist coverage matrix |
 | Traffic | `traffic/*` | 14-day GitHub limit; accumulates locally, including referrer share |
 | Commits | `stats/commit_activity`, `stats/contributors` | Day-level detail covers 52 weeks |
@@ -311,6 +311,23 @@ contributor card, which follows the same controls — offers:
 | Period | Day · Week · Month · Quarter |
 | Break down | None · By contributor · By repository |
 | Stacking | Stacked · Overlaid (when broken down) |
+
+With **Contributions: Commits**, enable **PR commits only** to exclude direct
+commits from the timeline, contributor totals and rankings, and repository chart
+splits. This works with every period and reading. The filter uses GitHub's
+[`Commit.associatedPullRequests`](https://docs.github.com/en/graphql/reference/commits)
+field on default-branch history, including commits introduced by squash merges.
+It counts credited commits (including co-authors), rather than distinct PRs.
+Line statistics are unavailable with this filter; other contribution metrics use
+the existing weekly statistics.
+
+Existing caches need **Backfill daily commits**, offered on Contributors and in
+Settings & sync. It re-reads the full default branch for repositories with an old
+commit-log format without repeating other endpoints. Cancelled or failed
+repositories remain eligible to retry. Until refreshed, unknown associations
+remain visible in the unfiltered view and are excluded from PR-only counts.
+Normal incremental syncs record associations for new commits but do not mark old
+history as backfilled.
 
 The legend is clickable: the first click isolates a series, further clicks add or
 remove, and clearing the last one returns to showing everything. Hovering gives a

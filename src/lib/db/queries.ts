@@ -680,8 +680,8 @@ export async function contributorWeeklyByRepo(
    Additions and deletions come back as zero. */
 
 /**
- * Selected repositories whose daily commits are still the old fetch: a year of
- * git authors, with no co-authors. Repositories that have never been read are
+ * Selected repositories whose daily commits predate the current format,
+ * including logs without co-authors or PR associations. Repositories that have never been read are
  * absent — their first sync walks the whole branch.
  */
 export async function legacyCommitLogRepoIds(
@@ -722,6 +722,7 @@ function dailyCommits<T>(
   fromDay: number,
   toDay: number,
   logins: Logins,
+  prOnly: boolean,
 ): Promise<T[]> {
   const p = new Params();
   const from = p.add(fromDay);
@@ -733,7 +734,7 @@ function dailyCommits<T>(
             COUNT(*) AS commits, 0 AS additions, 0 AS deletions
      FROM commit_log cl
      JOIN repos r ON r.id = cl.repo_id
-     WHERE cl.day >= ${from} AND cl.day <= ${to} AND cl.repo_id IN ${ids}${loginClause}
+     WHERE cl.day >= ${from} AND cl.day <= ${to} AND cl.repo_id IN ${ids}${loginClause}${prOnly ? " AND cl.is_pr = 1" : ""}
      GROUP BY ${groupBy.group}cl.day
      ORDER BY cl.day`,
     p.values,
@@ -747,8 +748,9 @@ export function commitDailyTotals(
   fromDay: number,
   toDay: number,
   logins: Logins = null,
+  prOnly = false,
 ): Promise<WeekPoint[]> {
-  return dailyCommits(db, { select: "", group: "" }, repoIds, fromDay, toDay, logins);
+  return dailyCommits(db, { select: "", group: "" }, repoIds, fromDay, toDay, logins, prOnly);
 }
 
 /** Commits per contributor per day, casings merged as in `contributorWeeklyByLogin`. */
@@ -758,6 +760,7 @@ export function commitDailyByLogin(
   fromDay: number,
   toDay: number,
   logins: Logins = null,
+  prOnly = false,
 ): Promise<ContributorWeekRow[]> {
   return dailyCommits(
     db,
@@ -766,6 +769,7 @@ export function commitDailyByLogin(
     fromDay,
     toDay,
     logins,
+    prOnly,
   );
 }
 
@@ -776,6 +780,7 @@ export function commitDailyByRepo(
   fromDay: number,
   toDay: number,
   logins: Logins = null,
+  prOnly = false,
 ): Promise<RepoWeekRow[]> {
   return dailyCommits(
     db,
@@ -784,6 +789,7 @@ export function commitDailyByRepo(
     fromDay,
     toDay,
     logins,
+    prOnly,
   );
 }
 
@@ -794,6 +800,7 @@ export function commitDailyByLoginRepo(
   fromDay: number,
   toDay: number,
   logins: Logins = null,
+  prOnly = false,
 ): Promise<LoginRepoWeekRow[]> {
   return dailyCommits(
     db,
@@ -805,6 +812,7 @@ export function commitDailyByLoginRepo(
     fromDay,
     toDay,
     logins,
+    prOnly,
   );
 }
 
