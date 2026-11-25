@@ -89,7 +89,7 @@ export function useScope(): Scope {
   const period = useApp((s) => s.period);
   const customFrom = useApp((s) => s.customFrom);
   const customTo = useApp((s) => s.customTo);
-  const xAxisOnly = useApp((s) => s.periodXAxisOnly);
+  const xAxisOnly = !useApp((s) => s.periodFilterValues);
 
   const range = resolvePeriod(period, {
     customFrom: customFrom ?? undefined,
