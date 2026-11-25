@@ -15,7 +15,9 @@ import { Callout, Card, CardHeader, ChartCard, DataTable, StatTile, full } from 
 
 export function Traffic() {
   const scope = useScope();
+  const period = useApp((s) => s.period);
   const repos = useApp((s) => s.repos);
+  const xAxisFilter = scope.xAxisOnly && period !== "all";
 
   const daily = useScopedQuery("traffic-daily", scope, (db) =>
     trafficDaily(db, scope.repoIds, scope.fromDay, scope.toDay),
@@ -27,8 +29,11 @@ export function Traffic() {
   const referrers = useScopedQuery("traffic-referrers", scope, (db) =>
     topTrafficReferrers(db, scope.repoIds),
   );
-  const referrerHistory = useScopedQuery("traffic-referrer-history", scope, (db) =>
-    trafficReferrersOverTime(db, scope.repoIds, scope.fromDay, scope.toDay),
+  const referrerHistory = useScopedQuery(
+    "traffic-referrer-history",
+    scope,
+    (db) => trafficReferrersOverTime(db, scope.repoIds, scope.dataFromDay, scope.dataToDay),
+    { useDataRange: true },
   );
 
   const series = useMemo(() => {
@@ -54,13 +59,22 @@ export function Traffic() {
       labelOf: (r) => r.referrer,
       valueOf: (r) => Number(r.count),
     });
-    const data = stacked.data.map((row, i) => {
+    const allData = stacked.data.map((row, i) => {
       const out: Record<string, number | string> = { day: days[i] };
       for (const s of stacked.series) out[s.key] = row[s.key] ?? 0;
       return out;
     });
-    return { data, series: stacked.series, days: days.length };
-  }, [referrerHistory.data]);
+    const data = xAxisFilter
+      ? allData.filter((row) => String(row.day) >= scope.fromDay && String(row.day) <= scope.toDay)
+      : allData;
+    return { data, series: stacked.series, days: data.length };
+  }, [referrerHistory.data, xAxisFilter, scope.fromDay, scope.toDay]);
+
+  const visibleReferrerRows = useMemo(() => {
+    const rows = referrerHistory.data ?? [];
+    if (!xAxisFilter) return rows;
+    return rows.filter((r) => r.day >= scope.fromDay && r.day <= scope.toDay);
+  }, [referrerHistory.data, xAxisFilter, scope.fromDay, scope.toDay]);
 
   const totals = (byRepo.data ?? []).reduce(
     (acc, r) => ({
@@ -151,7 +165,7 @@ export function Traffic() {
           loading={referrerHistory.isFetching}
           table={
             <DataTable
-              rows={referrerHistory.data ?? []}
+              rows={visibleReferrerRows}
               maxHeight={320}
               empty="No referrer snapshots in this period"
               rowKey={(r) => `${r.day}:${r.referrer}`}

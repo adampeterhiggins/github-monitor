@@ -11,7 +11,7 @@ import {
 } from "../lib/agg/weeks";
 import { commitWeekBounds } from "../lib/db/queries";
 import { useScope, useScopedQuery, type UserFilterSupport } from "../lib/hooks";
-import { Button, Dropdown, DropdownRow } from "./ui";
+import { Button, Checkbox, Dropdown, DropdownRow } from "./ui";
 import { OrgFilter } from "./OrgFilter";
 import { RepoFilter } from "./RepoFilter";
 import { UserFilter } from "./UserFilter";
@@ -31,6 +31,7 @@ export function FilterBar({
   const period = useApp((s) => s.period);
   const customFrom = useApp((s) => s.customFrom);
   const customTo = useApp((s) => s.customTo);
+  const periodXAxisOnly = useApp((s) => s.periodXAxisOnly);
 
   const range = resolvePeriod(period, {
     customFrom: customFrom ?? undefined,
@@ -50,7 +51,7 @@ export function FilterBar({
       <span className="ml-auto text-[11px] tabular text-ink-muted">
         {period === "all"
           ? "All available history"
-          : `${formatDate(range.fromMs)} – ${formatDate(range.toMs)}`}
+          : `${formatDate(range.fromMs)} – ${formatDate(range.toMs)}${periodXAxisOnly ? " · x-axis only" : ""}`}
       </span>
     </div>
   );
@@ -59,9 +60,11 @@ export function FilterBar({
 /** The shared period selector, for pages that build their own filter row. */
 export function PeriodFilter() {
   const period = useApp((s) => s.period);
+  const periodXAxisOnly = useApp((s) => s.periodXAxisOnly);
   const active = PERIODS.find((p) => p.id === period);
+  const suffix = periodXAxisOnly && period !== "all" ? " (x-axis)" : "";
   return (
-    <Dropdown label={`Period: ${active?.label ?? "Custom"}`} width={252} align="left">
+    <Dropdown label={`Period: ${active?.label ?? "Custom"}${suffix}`} width={252} align="left">
       {(close) => <PeriodMenu close={close} />}
     </Dropdown>
   );
@@ -118,6 +121,8 @@ const DATE_INPUT =
 function PeriodMenu({ close }: { close: () => void }) {
   const period = useApp((s) => s.period);
   const setPeriod = useApp((s) => s.setPeriod);
+  const periodXAxisOnly = useApp((s) => s.periodXAxisOnly);
+  const setPeriodXAxisOnly = useApp((s) => s.setPeriodXAxisOnly);
   const customFrom = useApp((s) => s.customFrom);
   const customTo = useApp((s) => s.customTo);
   const myLogin = useApp((s) => s.login);
@@ -258,6 +263,17 @@ function PeriodMenu({ close }: { close: () => void }) {
             Apply
           </Button>
         </div>
+      </div>
+
+      <div className="mt-1 border-t border-hairline px-2.5 pb-1.5 pt-2">
+        <Checkbox
+          checked={periodXAxisOnly}
+          onChange={setPeriodXAxisOnly}
+          label="Filter x-axis only"
+        />
+        <p className="mt-1 pl-[22px] text-[11px] leading-snug text-ink-muted">
+          Keep cumulative totals and % shares calculated across all history.
+        </p>
       </div>
     </div>
   );

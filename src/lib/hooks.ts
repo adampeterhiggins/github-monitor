@@ -27,15 +27,26 @@ export interface Scope {
   logins: Logins;
   /** True when a contributor filter is active. */
   filteredByUser: boolean;
+  /** True when the period only filters chart x-axes without narrowing calculations. */
+  xAxisOnly: boolean;
   range: ResolvedRange;
+  /**
+   * The date range used for data queries when calculations stay across all
+   * history (`xAxisOnly`), or `range` otherwise.
+   */
+  dataRange: ResolvedRange;
   fromIso: string;
   toIso: string;
   fromDay: string;
   toDay: string;
+  dataFromDay: string;
+  dataToDay: string;
   /** False when there is nothing to query — no db, or no repositories selected. */
   ready: boolean;
   /** Stable cache key for the current slice. */
   key: string;
+  /** Stable cache key for `dataRange` queries — unchanged when only the x-axis window moves. */
+  dataKey: string;
 }
 
 /**
@@ -78,29 +89,38 @@ export function useScope(): Scope {
   const period = useApp((s) => s.period);
   const customFrom = useApp((s) => s.customFrom);
   const customTo = useApp((s) => s.customTo);
+  const xAxisOnly = useApp((s) => s.periodXAxisOnly);
 
   const range = resolvePeriod(period, {
     customFrom: customFrom ?? undefined,
     customTo: customTo ?? undefined,
   });
+  const dataRange = xAxisOnly ? resolvePeriod("all") : range;
 
   // Sorted so selection order never invalidates the cache.
   const sortedRepos = [...repoIds].sort((a, b) => a - b);
   const sortedLogins = [...selectedLogins].sort((a, b) => a.localeCompare(b));
   const logins = sortedLogins.length > 0 ? sortedLogins : null;
+  const entityKey = `${sortedRepos.join(",")}:${sortedLogins.join(",")}`;
+  const periodKey = `${period}:${customFrom ?? ""}:${customTo ?? ""}:${xAxisOnly ? "axis" : "data"}`;
 
   return {
     db,
     repoIds: sortedRepos,
     logins,
     filteredByUser: logins != null,
+    xAxisOnly,
     range,
+    dataRange,
     fromIso: new Date(range.fromMs).toISOString(),
     toIso: new Date(range.toMs).toISOString(),
     fromDay: dayKey(range.fromMs),
     toDay: dayKey(range.toMs),
+    dataFromDay: dayKey(dataRange.fromMs),
+    dataToDay: dayKey(dataRange.toMs),
     ready: db != null && sortedRepos.length > 0,
-    key: `${period}:${customFrom ?? ""}:${customTo ?? ""}:${sortedRepos.join(",")}:${sortedLogins.join(",")}`,
+    key: `${periodKey}:${entityKey}`,
+    dataKey: xAxisOnly ? `all:::${entityKey}` : `${period}:${customFrom ?? ""}:${customTo ?? ""}:${entityKey}`,
   };
 }
 
@@ -109,10 +129,17 @@ export function useScopedQuery<T>(
   name: string,
   scope: Scope,
   fn: (db: Database) => Promise<T>,
-  options: { enabled?: boolean; staleTime?: number; /** Extra cache key when the query is not fully described by the page scope. */ key?: string } = {},
+  options: {
+    enabled?: boolean;
+    staleTime?: number;
+    /** Extra cache key when the query is not fully described by the page scope. */
+    key?: string;
+    /** Key the query by `scope.dataKey` so x-axis-only period changes reuse cached all-time results. */
+    useDataRange?: boolean;
+  } = {},
 ): UseQueryResult<T, Error> {
   return useQuery<T, Error, T, readonly unknown[]>({
-    queryKey: [name, scope.key, options.key ?? ""],
+    queryKey: [name, options.useDataRange ? scope.dataKey : scope.key, options.key ?? ""],
     enabled: (options.enabled ?? true) && scope.ready,
     queryFn: () => fn(scope.db!),
     staleTime: options.staleTime ?? 60_000,
