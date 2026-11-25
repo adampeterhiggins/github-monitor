@@ -1,4 +1,4 @@
-import { WEEK_SECONDS } from "./weeks";
+import { DAY_SECONDS, WEEK_SECONDS } from "./weeks";
 
 /**
  * Reshaping a weekly series for the timeline views: rolling weeks up into larger
@@ -26,6 +26,32 @@ export function bucketStart(week: number, granularity: Granularity): number {
   const month = d.getUTCMonth();
   const startMonth = granularity === "quarter" ? Math.floor(month / 3) * 3 : month;
   return Math.floor(Date.UTC(d.getUTCFullYear(), startMonth, 1) / 1000);
+}
+
+/** Exclusive end (Unix seconds, UTC) of the bucket starting at `start`. */
+export function bucketNextStart(start: number, granularity: Granularity): number {
+  if (granularity === "day") return start + DAY_SECONDS;
+  if (granularity === "week") return start + WEEK_SECONDS;
+  const d = new Date(start * 1000);
+  const months = granularity === "quarter" ? 3 : 1;
+  return Math.floor(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + months, 1) / 1000);
+}
+
+/**
+ * Filter already-computed rows to the buckets overlapping `[fromMs, toMs]`.
+ *
+ * Used when the period narrows the x-axis without recalculating cumulative
+ * totals, shares, or series rankings from scratch.
+ */
+export function sliceAxisRows(
+  rows: readonly WideRow[],
+  fromMs: number,
+  toMs: number,
+  granularity: Granularity,
+): WideRow[] {
+  return rows.filter(
+    (row) => row.week * 1000 <= toMs && bucketNextStart(row.week, granularity) * 1000 > fromMs,
+  );
 }
 
 /**

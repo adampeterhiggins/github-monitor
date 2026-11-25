@@ -65,6 +65,12 @@ interface AppState {
   period: PeriodId;
   customFrom: number | null;
   customTo: number | null;
+  /**
+   * When true, cumulative and share calculations only count records within the
+   * selected period. Default false: the period filters chart x-axes without
+   * changing calculations across history.
+   */
+  periodFilterValues: boolean;
   metric: ContributionMetric;
   /** User-added patterns for logins to treat as bots, on top of the built-ins. */
   botPatterns: string[];
@@ -96,6 +102,7 @@ interface AppState {
   toggleLogin: (login: string) => void;
   clearLogins: () => void;
   setPeriod: (period: PeriodId, custom?: { from: number; to: number }) => void;
+  setPeriodFilterValues: (filterValues: boolean) => void;
   setMetric: (metric: ContributionMetric) => void;
   setBotPatterns: (patterns: string[]) => void;
   /** Resolves to the number of selected forks it removed. */
@@ -111,6 +118,7 @@ const THEME_KEY = "github-monitor.theme";
 const THEME_ID_KEY = "github-monitor.theme-id";
 const PERIOD_KEY = "github-monitor.period";
 const CUSTOM_RANGE_KEY = "github-monitor.customRange";
+const PERIOD_FILTER_VALUES_KEY = "github-monitor.periodFilterValues";
 const LOGINS_KEY = "github-monitor.logins";
 const EXCLUDE_FORKS_KEY = "github-monitor.excludeForks";
 const HIDDEN_ORGS_KEY = "github-monitor.hiddenOrgs";
@@ -171,6 +179,14 @@ function readStoredLogins(): string[] {
     return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === "string") : [];
   } catch {
     return [];
+  }
+}
+
+function readStoredPeriodFilterValues(): boolean {
+  try {
+    return localStorage.getItem(PERIOD_FILTER_VALUES_KEY) === "true";
+  } catch {
+    return false;
   }
 }
 
@@ -244,6 +260,7 @@ export const useApp = create<AppState>((set, get) => ({
   period: readStoredPeriod(),
   customFrom: readStoredCustomRange()?.from ?? null,
   customTo: readStoredCustomRange()?.to ?? null,
+  periodFilterValues: readStoredPeriodFilterValues(),
   metric: "commits",
   botPatterns: readBotPatterns(),
   excludeForks: readStoredExcludeForks(),
@@ -391,6 +408,15 @@ export const useApp = create<AppState>((set, get) => ({
       customFrom: custom?.from ?? get().customFrom,
       customTo: custom?.to ?? get().customTo,
     });
+  },
+
+  setPeriodFilterValues: (filterValues) => {
+    try {
+      localStorage.setItem(PERIOD_FILTER_VALUES_KEY, String(filterValues));
+    } catch {
+      // Blocked storage: the choice lasts for this session.
+    }
+    set({ periodFilterValues: filterValues });
   },
 
   setMetric: (metric) => set({ metric }),

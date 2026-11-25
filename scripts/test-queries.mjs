@@ -951,6 +951,75 @@ T(
 
   T("a stale index yields no window", weekWindow(monthly, weeks, 99, 99) === null);
   T("an empty chart yields no window", weekWindow([], weeks, 0, 0) === null);
+
+  /* X-axis-only slicing: preserves cumulative totals and shares computed over all history. */
+  const { bucketNextStart, sliceAxisRows, toShares } = series;
+  const fullMonthlyCum = toCumulative(rollUp(rows, ["a", "b"], "month"), ["a", "b"]);
+  // Slice to mid-February through end of March: February's bucket overlaps the start
+  // and keeps its full cumulative total from January + February rather than resetting.
+  const slicedMonths = sliceAxisRows(
+    fullMonthlyCum,
+    Date.UTC(2026, 1, 15),
+    Date.UTC(2026, 2, 31, 23, 59, 59, 999),
+    "month",
+  );
+  T(
+    "x-axis slice keeps overlapping start month and drops earlier months",
+    slicedMonths.length === 2 &&
+      new Date(slicedMonths[0].week * 1000).toISOString() === "2026-02-01T00:00:00.000Z" &&
+      new Date(slicedMonths[1].week * 1000).toISOString() === "2026-03-01T00:00:00.000Z",
+    slicedMonths.map((r) => new Date(r.week * 1000).toISOString()).join(", "),
+  );
+  T(
+    "x-axis slice preserves cumulative values from earlier history",
+    slicedMonths[0].a === fullMonthlyCum[1].a &&
+      slicedMonths[0].b === fullMonthlyCum[1].b &&
+      slicedMonths[1].a === 55 &&
+      slicedMonths[1].b === 10,
+    JSON.stringify(slicedMonths),
+  );
+  const fullShares = toShares(fullMonthlyCum, ["a", "b"]);
+  const slicedShares = toShares(slicedMonths, ["a", "b"]);
+  T(
+    "cumulative shares on a sliced x-axis match the unsliced shares exactly",
+    slicedShares[0].a === fullShares[1].a &&
+      slicedShares[0].b === fullShares[1].b &&
+      slicedShares[1].a === fullShares[2].a &&
+      slicedShares[1].b === fullShares[2].b,
+  );
+  // Year rollover for month and quarter buckets.
+  T(
+    "December month bucket ends on 1 January next year",
+    new Date(bucketNextStart(Date.UTC(2026, 11, 1) / 1000, "month") * 1000).toISOString() ===
+      "2027-01-01T00:00:00.000Z",
+  );
+  T(
+    "Q4 quarter bucket ends on 1 January next year",
+    new Date(bucketNextStart(Date.UTC(2026, 9, 1) / 1000, "quarter") * 1000).toISOString() ===
+      "2027-01-01T00:00:00.000Z",
+  );
+  // Window entirely after all data yields empty rather than leaking the last bucket.
+  T(
+    "x-axis slice after all data returns empty",
+    sliceAxisRows(fullMonthlyCum, Date.UTC(2027, 0, 1), Date.UTC(2027, 11, 31), "month").length === 0,
+  );
+  // Daily boundary inclusivity.
+  const dayRows = [
+    { week: Date.UTC(2026, 4, 18) / 1000, a: 10 },
+    { week: Date.UTC(2026, 4, 19) / 1000, a: 25 },
+    { week: Date.UTC(2026, 4, 20) / 1000, a: 40 },
+  ];
+  const singleDay = sliceAxisRows(
+    dayRows,
+    Date.UTC(2026, 4, 19),
+    Date.UTC(2026, 4, 19, 23, 59, 59, 999),
+    "day",
+  );
+  T(
+    "daily x-axis slice includes only the exact matching day",
+    singleDay.length === 1 && singleDay[0].a === 25,
+    JSON.stringify(singleDay),
+  );
 }
 
 /* ── Bot detection ─────────────────────────────────────────────────────────── */

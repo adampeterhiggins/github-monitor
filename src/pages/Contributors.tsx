@@ -28,6 +28,7 @@ import {
   bucketLabel,
   chartBounds,
   rollUp,
+  sliceAxisRows,
   toCumulative,
   weekWindow,
   type Granularity,
@@ -184,6 +185,7 @@ function buildCardChart(
   metric: ContributionMetric,
   granularity: Granularity,
   cumulative: boolean,
+  axisWindow?: { fromMs: number; toMs: number } | null,
 ) {
   const series = repoStack
     ? repoStack.series.map((sr) => ({ key: sr.key, label: sr.label, slot: sr.slot }))
@@ -193,11 +195,12 @@ function buildCardChart(
     ? repoStack.data
     : card.weeks.map((w) => ({ week: w.week, value: w.value }));
   const rolled = rollUp(base, keys, granularity);
+  const computed = cumulative ? toCumulative(rolled, keys) : rolled;
   return {
     series,
     keys,
     split: repoStack !== null,
-    data: cumulative ? toCumulative(rolled, keys) : rolled,
+    data: axisWindow ? sliceAxisRows(computed, axisWindow.fromMs, axisWindow.toMs, granularity) : computed,
   };
 }
 
@@ -215,6 +218,7 @@ interface ContributorCard {
 
 export function Contributors() {
   const scope = useScope();
+  const period = useApp((s) => s.period);
   const [onlyPrCommits, setOnlyPrCommits] = useState(() => localStorage.getItem("github-monitor.onlyPrCommits") === "true");
   const metric = useApp((s) => s.metric);
   const setMetric = useApp((s) => s.setMetric);
@@ -339,18 +343,35 @@ export function Contributors() {
    */
   const [showNumbers, setShowNumbers] = useState(false);
 
-  const totals = useScopedQuery("contrib-totals", scope, (db) =>
-    contributorWeeklyTotals(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek, scope.logins),
+  const queryRange = scope.dataRange;
+  const xAxisWindow = useMemo(
+    () =>
+      scope.xAxisOnly && period !== "all"
+        ? { fromMs: scope.range.fromMs, toMs: scope.range.toMs }
+        : null,
+    [scope.xAxisOnly, period, scope.range.fromMs, scope.range.toMs],
   );
 
-  const perLogin = useScopedQuery("contrib-by-login", scope, (db) =>
-    contributorWeeklyByLogin(
-      db,
-      scope.repoIds,
-      scope.range.fromWeek,
-      scope.range.toWeek,
-      scope.logins,
-    ),
+  const totals = useScopedQuery(
+    "contrib-totals",
+    scope,
+    (db) =>
+      contributorWeeklyTotals(db, scope.repoIds, queryRange.fromWeek, queryRange.toWeek, scope.logins),
+    { useDataRange: true },
+  );
+
+  const perLogin = useScopedQuery(
+    "contrib-by-login",
+    scope,
+    (db) =>
+      contributorWeeklyByLogin(
+        db,
+        scope.repoIds,
+        queryRange.fromWeek,
+        queryRange.toWeek,
+        scope.logins,
+      ),
+    { useDataRange: true },
   );
 
   const meta = useScopedQuery("contrib-meta", scope, (db) => listContributorMeta(db), {
@@ -407,11 +428,11 @@ export function Contributors() {
       contributorRepoWeeklyAll(
         db,
         scope.repoIds,
-        scope.range.fromWeek,
-        scope.range.toWeek,
+        queryRange.fromWeek,
+        queryRange.toWeek,
         scope.logins,
       ),
-    { enabled: scope.ready && cardSplit === "repository" },
+    { enabled: scope.ready && cardSplit === "repository", useDataRange: true },
   );
 
   // Only fetched when the repository breakdown is on — it is a bigger result than
@@ -420,8 +441,8 @@ export function Contributors() {
     "contrib-by-repo-weekly",
     scope,
     (db) =>
-      weeklyByRepo(db, scope.repoIds, scope.range.fromWeek, scope.range.toWeek, scope.logins),
-    { enabled: scope.ready && breakdown === "repository" },
+      weeklyByRepo(db, scope.repoIds, queryRange.fromWeek, queryRange.toWeek, scope.logins),
+    { enabled: scope.ready && breakdown === "repository", useDataRange: true },
   );
 
   /**
@@ -430,62 +451,85 @@ export function Contributors() {
    * the weeks on screen, so a card's weekly totals and its daily chart cover the
    * same days.
    */
-  const fromDay = scope.range.fromWeek;
-  const toDay = scope.range.toWeek + WEEK_SECONDS - DAY_SECONDS;
+  const fromDay = queryRange.fromWeek;
+  const toDay = queryRange.toWeek + WEEK_SECONDS - DAY_SECONDS;
   const dailyTotals = useScopedQuery(
     "contrib-daily-totals",
     scope,
     (db) => commitDailyTotals(db, scope.repoIds, fromDay, toDay, scope.logins, prOnly),
-    { enabled: scope.ready && daily, key: String(prOnly) },
+    { enabled: scope.ready && daily, key: String(prOnly), useDataRange: true },
   );
   const dailyByLogin = useScopedQuery(
     "contrib-daily-by-login",
     scope,
     (db) => commitDailyByLogin(db, scope.repoIds, fromDay, toDay, scope.logins, prOnly),
-    { enabled: scope.ready && daily, key: String(prOnly) },
+    { enabled: scope.ready && daily, key: String(prOnly), useDataRange: true },
   );
   const dailyByRepo = useScopedQuery(
     "contrib-daily-by-repo",
     scope,
     (db) => commitDailyByRepo(db, scope.repoIds, fromDay, toDay, scope.logins, prOnly),
-    { enabled: scope.ready && daily && breakdown === "repository", key: String(prOnly) },
+    { enabled: scope.ready && daily && breakdown === "repository", key: String(prOnly), useDataRange: true },
   );
   const dailyCardRepo = useScopedQuery(
     "contrib-daily-card-repo",
     scope,
     (db) => commitDailyByLoginRepo(db, scope.repoIds, fromDay, toDay, scope.logins, prOnly),
-    { enabled: scope.ready && daily && cardSplit === "repository", key: String(prOnly) },
+    { enabled: scope.ready && daily && cardSplit === "repository", key: String(prOnly), useDataRange: true },
   );
 
   const selectedRepoCount = scope.repoIds.length;
 
   /** Every week in range, clamped to where data starts so "All time" stays sane. */
-  const axisWeeks = useMemo(
+  const fullAxisWeeks = useMemo(
     () =>
       axisWeeksFor(
-        scope.range.fromWeek,
-        scope.range.toWeek,
+        queryRange.fromWeek,
+        queryRange.toWeek,
         (totals.data ?? []).map((r) => r.week),
       ),
-    [scope.range.fromWeek, scope.range.toWeek, totals.data],
+    [queryRange.fromWeek, queryRange.toWeek, totals.data],
   );
 
-  const axisDays = useMemo(
+  const fullAxisDays = useMemo(
     () => (daily ? axisDaysFor(fromDay, toDay, (dailyTotals.data ?? []).map((r) => r.week)) : []),
     [daily, fromDay, toDay, dailyTotals.data],
   );
 
-  /** The buckets the charts draw before any roll-up: days per day, weeks otherwise. */
-  const axis = daily ? axisDays : axisWeeks;
+  /** Full calculation axis: all history in x-axis-only mode, or the selected period otherwise. */
+  const fullAxis = daily ? fullAxisDays : fullAxisWeeks;
+  const bucketStep = daily ? DAY_SECONDS : WEEK_SECONDS;
+
+  /** The buckets visible on screen before any brush zoom. */
+  const axis = useMemo(() => {
+    if (!xAxisWindow) return fullAxis;
+    return fullAxis.filter(
+      (w) => w * 1000 <= xAxisWindow.toMs && (w + bucketStep) * 1000 > xAxisWindow.fromMs,
+    );
+  }, [fullAxis, xAxisWindow, bucketStep]);
+
+  const axisWeeks = useMemo(() => {
+    if (!xAxisWindow) return fullAxisWeeks;
+    return fullAxisWeeks.filter(
+      (w) => w * 1000 <= xAxisWindow.toMs && (w + WEEK_SECONDS) * 1000 > xAxisWindow.fromMs,
+    );
+  }, [fullAxisWeeks, xAxisWindow]);
 
   const masterSeries = useMemo(() => {
     const rows = daily ? dailyTotals.data : totals.data;
     const byBucket = new Map(rows?.map((r) => [r.week, r]) ?? []);
-    return axis.map((week) => ({
+    return fullAxis.map((week) => ({
       week,
       value: metricValue(byBucket.get(week), metric),
     }));
-  }, [daily, dailyTotals.data, totals.data, axis, metric]);
+  }, [daily, dailyTotals.data, totals.data, fullAxis, metric]);
+
+  const visibleMasterSeries = useMemo(() => {
+    if (!xAxisWindow) return masterSeries;
+    return masterSeries.filter(
+      (d) => d.week * 1000 <= xAxisWindow.toMs && (d.week + bucketStep) * 1000 > xAxisWindow.fromMs,
+    );
+  }, [masterSeries, xAxisWindow, bucketStep]);
 
   /**
    * The brushed window, as indices into `axis`.
@@ -568,6 +612,8 @@ export function Contributors() {
   const cards = useMemo(() => {
     const metaByLogin = new Map(meta.data?.map((m) => [m.login.toLowerCase(), m]) ?? []);
     const out: ContributorCard[] = [];
+    const totalWeeks = xAxisWindow ? (prOnly ? fullAxis : fullAxisWeeks) : (prOnly ? visibleAxis : visibleWeeks);
+    const chartBuckets = xAxisWindow ? fullAxis : visibleAxis;
 
     for (const [login, weeksByNumber] of (prOnly ? dailyByLoginMap : byLogin)) {
       let commits = 0;
@@ -577,8 +623,8 @@ export function Contributors() {
 
       // Totals are summed over the visible window too, so the figures on a card
       // always describe the chart beside them — which is what makes brushing
-      // useful rather than confusing.
-      for (const week of (prOnly ? visibleAxis : visibleWeeks)) {
+      // useful rather than confusing. In x-axis-only mode, totals stay all-time.
+      for (const week of totalWeeks) {
         const row = weeksByNumber.get(week);
         commits += Number(row?.commits ?? 0);
         additions += Number(row?.additions ?? 0);
@@ -587,7 +633,7 @@ export function Contributors() {
       }
       if (daily) {
         const days = dailyByLoginMap.get(login.toLowerCase());
-        for (const day of visibleAxis) weeks.push({ week: day, value: metricValue(days?.get(day), metric) });
+        for (const day of chartBuckets) weeks.push({ week: day, value: metricValue(days?.get(day), metric) });
       }
 
       out.push({
@@ -607,7 +653,7 @@ export function Contributors() {
        when the metric is actually nothing: net is signed, and a contributor who
        removed more than they added is not an absence. */
     return out.filter((c) => c[metric] !== 0).sort((a, b) => b[metric] - a[metric]);
-  }, [byLogin, meta.data, visibleWeeks, metric, daily, dailyByLoginMap, visibleAxis, prOnly]);
+  }, [byLogin, meta.data, visibleWeeks, fullAxisWeeks, fullAxis, xAxisWindow, metric, daily, dailyByLoginMap, visibleAxis, prOnly]);
 
   /**
    * The org-wide chart, split by contributor or repository.
@@ -616,10 +662,11 @@ export function Contributors() {
    * contributor split reuses `perLogin` rather than issuing a second query.
    */
   const orgStack = useMemo(() => {
+    const stackWeeks = xAxisWindow ? fullAxis : visibleAxis;
     if (breakdown === "contributor") {
       return buildStacks({
         rows: (daily ? dailyByLogin.data : perLogin.data) ?? [],
-        weeks: visibleAxis,
+        weeks: stackWeeks,
         weekOf: (r) => r.week,
         keyOf: (r) => r.login.toLowerCase(),
         labelOf: (r) => r.login,
@@ -631,7 +678,7 @@ export function Contributors() {
     if (breakdown === "repository") {
       return buildStacks({
         rows: (daily ? dailyByRepo.data : byRepoWeekly.data) ?? [],
-        weeks: visibleAxis,
+        weeks: stackWeeks,
         weekOf: (r) => r.week,
         keyOf: (r) => String(r.repo_id),
         labelOf: (r) => r.full_name.split("/").pop() ?? r.full_name,
@@ -649,6 +696,8 @@ export function Contributors() {
     byRepoWeekly.data,
     dailyByRepo.data,
     visibleAxis,
+    fullAxis,
+    xAxisWindow,
     metric,
     signedMetric,
     maxSeries,
@@ -671,8 +720,12 @@ export function Contributors() {
 
     const keys = series.map((sr) => sr.key);
     const rolled = rollUp(base, keys, granularity);
-    return { series, data: cumulative ? toCumulative(rolled, keys) : rolled };
-  }, [orgStack, masterSeries, metric, granularity, cumulative]);
+    const computed = cumulative ? toCumulative(rolled, keys) : rolled;
+    const data = xAxisWindow
+      ? sliceAxisRows(computed, xAxisWindow.fromMs, xAxisWindow.toMs, granularity)
+      : computed;
+    return { series, data };
+  }, [orgStack, masterSeries, metric, granularity, cumulative, xAxisWindow]);
 
   /**
    * The brush reports positions in the buckets the chart drew, which match the
@@ -736,6 +789,7 @@ export function Contributors() {
    */
   const cardStacks = useMemo(() => {
     if (cardSplit !== "repository") return null;
+    const stackWeeks = xAxisWindow ? fullAxis : visibleAxis;
     const rowsByLogin = new Map<string, typeof cardRepoWeekly.data>();
     for (const row of (daily ? dailyCardRepo.data : cardRepoWeekly.data) ?? []) {
       const key = row.login.toLowerCase();
@@ -749,7 +803,7 @@ export function Contributors() {
         login,
         buildStacks({
           rows: rows ?? [],
-          weeks: visibleAxis,
+          weeks: stackWeeks,
           weekOf: (r) => r.week,
           keyOf: (r) => String(r.repo_id),
           labelOf: (r) => r.full_name.split("/").pop() ?? r.full_name,
@@ -760,7 +814,18 @@ export function Contributors() {
       );
     }
     return out;
-  }, [cardSplit, daily, cardRepoWeekly.data, dailyCardRepo.data, visibleAxis, metric, signedMetric, maxSeries]);
+  }, [cardSplit, daily, cardRepoWeekly.data, dailyCardRepo.data, visibleAxis, fullAxis, xAxisWindow, metric, signedMetric, maxSeries]);
+
+  const cardAxisWindow = useMemo(() => {
+    if (!xAxisWindow) return null;
+    if (zoomed && visibleAxis.length > 0) {
+      return {
+        fromMs: visibleAxis[0] * 1000,
+        toMs: (visibleAxis[visibleAxis.length - 1] + bucketStep) * 1000 - 1,
+      };
+    }
+    return xAxisWindow;
+  }, [xAxisWindow, zoomed, visibleAxis, bucketStep]);
 
   /**
    * Every visible card's chart, plus the bounds that fit all of them.
@@ -782,6 +847,7 @@ export function Contributors() {
         metric,
         granularity,
         cumulative,
+        cardAxisWindow,
       ),
     );
 
@@ -789,7 +855,7 @@ export function Contributors() {
       byLogin: new Map(visible.map((c, i) => [c.login, charts[i]])),
       ...chartBounds(charts, stackMode !== "overlaid"),
     };
-  }, [cards, limit, cardStacks, metric, granularity, cumulative, stackMode]);
+  }, [cards, limit, cardStacks, metric, granularity, cumulative, stackMode, cardAxisWindow]);
 
   /**
    * Whether anything behind the filter button is off its default. Marks the
@@ -999,11 +1065,13 @@ export function Contributors() {
                 ? `${readingLabel} from ${formatDate(visibleAxis[0] * 1000)} to ${formatDate(
                     bucketEnd(visibleAxis[visibleAxis.length - 1]),
                   )} — drag the handles below to change the window`
-                : `${readingLabel} from ${formatDate(scope.range.fromWeek * 1000)} to ${formatDate(
-                    daily && axis.length > 0
-                      ? bucketEnd(axis[axis.length - 1])
-                      : scope.range.toWeek * 1000 + WEEK_SECONDS * 1000 - 1,
-                  )}`
+                : xAxisWindow
+                  ? `${readingLabel} (all-time calculation, x-axis ${formatDate(xAxisWindow.fromMs)} to ${formatDate(xAxisWindow.toMs)})`
+                  : `${readingLabel} from ${formatDate(scope.range.fromWeek * 1000)} to ${formatDate(
+                      daily && axis.length > 0
+                        ? bucketEnd(axis[axis.length - 1])
+                        : scope.range.toWeek * 1000 + WEEK_SECONDS * 1000 - 1,
+                    )}`
           }
           loading={loading}
           titleAfter={
@@ -1102,7 +1170,7 @@ export function Contributors() {
             <DataTable
               rows={
                 // Empty weeks are dropped, but a negative net week is not empty.
-                masterSeries.filter((d) => d.value !== 0)
+                visibleMasterSeries.filter((d) => d.value !== 0)
               }
               maxHeight={320}
               rowKey={(r) => r.week}
@@ -1153,19 +1221,23 @@ export function Contributors() {
           <>
             <div className="flex flex-wrap items-center justify-between gap-3">
               <p className="text-[12px] text-ink-secondary">
-                {zoomed
-                  ? daily && !prOnly
-                    ? `Cards chart the selected ${full(visibleAxis.length)} day${
-                        visibleAxis.length === 1 ? "" : "s"
-                      }; their totals and ranking cover the ${full(visibleWeeks.length)} week${
-                        visibleWeeks.length === 1 ? "" : "s"
-                      } those days fall in.`
-                    : prOnly
-                      ? `Cards cover the selected ${full(visibleAxis.length)} days; totals and ranking change with it.`
-                    : `Cards cover the selected window (${full(visibleWeeks.length)} week${
-                        visibleWeeks.length === 1 ? "" : "s"
-                      }), so totals and ranking change with it.`
-                  : "Cards cover the whole period."}
+                {xAxisWindow
+                  ? zoomed
+                    ? "Cards show all-time totals; charts zoomed to the brushed x-axis."
+                    : "Cards show all-time totals; x-axis filtered to the selected period."
+                  : zoomed
+                    ? daily && !prOnly
+                      ? `Cards chart the selected ${full(visibleAxis.length)} day${
+                          visibleAxis.length === 1 ? "" : "s"
+                        }; their totals and ranking cover the ${full(visibleWeeks.length)} week${
+                          visibleWeeks.length === 1 ? "" : "s"
+                        } those days fall in.`
+                      : prOnly
+                        ? `Cards cover the selected ${full(visibleAxis.length)} days; totals and ranking change with it.`
+                        : `Cards cover the selected window (${full(visibleWeeks.length)} week${
+                            visibleWeeks.length === 1 ? "" : "s"
+                          }), so totals and ranking change with it.`
+                    : "Cards cover the whole period."}
                 {cardSplit === "repository" && (daily ? dailyCardRepo : cardRepoWeekly).isFetching
                   ? " Loading splits…"
                   : ""}
@@ -1352,8 +1424,14 @@ function ContributorCardView({
     `contrib-repos-${card.login}`,
     scope,
     (db) =>
-      contributorRepoBreakdown(db, card.login, scope.repoIds, scope.range.fromWeek, scope.range.toWeek),
-    { enabled: scope.ready && showNumbers },
+      contributorRepoBreakdown(
+        db,
+        card.login,
+        scope.repoIds,
+        scope.dataRange.fromWeek,
+        scope.dataRange.toWeek,
+      ),
+    { enabled: scope.ready && showNumbers, useDataRange: true },
   );
 
   const menu = (
