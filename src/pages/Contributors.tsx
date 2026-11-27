@@ -26,6 +26,7 @@ import {
 import { buildStacks } from "../lib/agg/stacks";
 import {
   bucketLabel,
+  bucketNextStart,
   chartBounds,
   rollUp,
   sliceAxisRows,
@@ -297,6 +298,7 @@ export function Contributors() {
   const prOnly = onlyPrCommits && metric === "commits";
   const daily = (bucket === "day" || prOnly) && metric === "commits";
   const granularity: Granularity = bucket === "day" && !daily ? "week" : bucket;
+  const stepped = cumulative && granularity === "day";
   const granularityOptions = useMemo(
     () => GRANULARITIES.map((o) => (o.value === "day" ? { ...o, disabled: metric !== "commits" } : o)),
     [metric],
@@ -524,46 +526,121 @@ export function Contributors() {
     }));
   }, [daily, dailyTotals.data, totals.data, fullAxis, metric]);
 
-  const visibleMasterSeries = useMemo(() => {
-    if (!xAxisWindow) return masterSeries;
-    return masterSeries.filter(
-      (d) => d.week * 1000 <= xAxisWindow.toMs && (d.week + bucketStep) * 1000 > xAxisWindow.fromMs,
-    );
-  }, [masterSeries, xAxisWindow, bucketStep]);
+  /**
+   * The org-wide chart, split by contributor or repository.
+   *
+   * Both are derived from data already loaded for the cards where possible — the
+   * contributor split reuses `perLogin` rather than issuing a second query.
+   */
+  const orgStack = useMemo(() => {
+    if (breakdown === "contributor") {
+      return buildStacks({
+        rows: (daily ? dailyByLogin.data : perLogin.data) ?? [],
+        weeks: fullAxis,
+        weekOf: (r) => r.week,
+        keyOf: (r) => r.login.toLowerCase(),
+        labelOf: (r) => r.login,
+        valueOf: (r) => metricValue(r, metric),
+        rankBy: signedMetric ? Math.abs : undefined,
+        maxSeries,
+      });
+    }
+    if (breakdown === "repository") {
+      return buildStacks({
+        rows: (daily ? dailyByRepo.data : byRepoWeekly.data) ?? [],
+        weeks: fullAxis,
+        weekOf: (r) => r.week,
+        keyOf: (r) => String(r.repo_id),
+        labelOf: (r) => r.full_name.split("/").pop() ?? r.full_name,
+        valueOf: (r) => metricValue(r, metric),
+        rankBy: signedMetric ? Math.abs : undefined,
+        maxSeries,
+      });
+    }
+    return null;
+  }, [
+    breakdown,
+    daily,
+    perLogin.data,
+    dailyByLogin.data,
+    byRepoWeekly.data,
+    dailyByRepo.data,
+    fullAxis,
+    metric,
+    signedMetric,
+    maxSeries,
+  ]);
 
   /**
-   * The brushed window, as indices into `axis`.
-   *
-   * Debounced: the brush fires continuously while dragging, and with "All time"
-   * spanning thousands of weeks, recomputing every card on each event makes the
-   * drag stutter.
+   * One dataset for the org chart whichever view is selected: the breakdown when
+   * there is one, otherwise a single total series. Rolled up and accumulated last,
+   * so those two controls compose with every breakdown rather than each view
+   * needing its own path.
    */
-  const [brush, setBrush] = useState<{ start: number; end: number } | null>(null);
-  const [pendingBrush, setPendingBrush] = useState<{ start: number; end: number } | null>(null);
+  const orgChart = useMemo(() => {
+    const series = orgStack
+      ? orgStack.series.map((sr) => ({ key: sr.key, label: sr.label, slot: sr.slot }))
+      : [{ key: "total", label: metricLabel(metric), slot: 0 }];
 
+    const base: Array<Record<string, number>> = orgStack
+      ? orgStack.data
+      : masterSeries.map((d) => ({ week: d.week, total: d.value }));
+
+    const keys = series.map((sr) => sr.key);
+    const rolled = rollUp(base, keys, granularity);
+    const computed = cumulative ? toCumulative(rolled, keys) : rolled;
+    const data = xAxisWindow
+      ? sliceAxisRows(computed, xAxisWindow.fromMs, xAxisWindow.toMs, granularity)
+      : computed;
+    return { series, data };
+  }, [orgStack, masterSeries, metric, granularity, cumulative, xAxisWindow]);
+
+  // Keep the chart's input fixed while brushing. Recharts slices the plotted
+  // rows itself, and changing the input would reset its handles and running totals.
+  const lastChartIndex = orgChart.data.length - 1;
+  const brushKey = JSON.stringify([
+    scope.key, prOnly, granularity, orgChart.data[0]?.week, lastChartIndex,
+    orgChart.data[lastChartIndex]?.week,
+  ]);
+  const [selection, setSelection] = useState<{
+    key: string;
+    startIndex: number;
+    endIndex: number;
+  } | null>(null);
+  const brushRange = selection?.key === brushKey
+    ? selection
+    : { startIndex: 0, endIndex: lastChartIndex };
+  const zoomed = brushRange.startIndex > 0 || brushRange.endIndex < lastChartIndex;
+
+  // The chart follows the handles immediately. Delay rebuilding the cards
+  // while the handles are moving, especially on dense daily histories.
+  const [settledSelection, setSettledSelection] = useState(selection);
+  const resetZoom = useCallback(() => {
+    setSelection(null);
+    setSettledSelection(null);
+  }, []);
+  useEffect(resetZoom, [brushKey, resetZoom]);
   useEffect(() => {
-    if (pendingBrush === null) return;
-    const t = setTimeout(() => setBrush(pendingBrush), 60);
-    return () => clearTimeout(t);
-  }, [pendingBrush]);
-
-  // A new period or repo selection changes the axis, and so does switching
-  // between days and weeks, so old indices are meaningless.
-  useEffect(() => {
-    setBrush(null);
-    setPendingBrush(null);
-  }, [scope.key, daily, prOnly]);
-
-  /** Buckets the charts should cover: the brushed window, or the whole range. */
+    if (selection?.key !== brushKey) return;
+    const timer = setTimeout(() => setSettledSelection(selection), 60);
+    return () => clearTimeout(timer);
+  }, [brushKey, selection]);
+  const settledRange = selection?.key === brushKey && settledSelection?.key === brushKey
+    ? settledSelection
+    : null;
   const visibleAxis = useMemo(() => {
-    if (!brush || axis.length === 0) return axis;
-    const last = axis.length - 1;
-    const start = Math.max(0, Math.min(brush.start, last));
-    const end = Math.max(start, Math.min(brush.end, last));
-    return axis.slice(start, end + 1);
-  }, [axis, brush]);
-
-  const zoomed = visibleAxis.length > 0 && visibleAxis.length !== axis.length;
+    if (!settledRange) return axis;
+    const window = weekWindow(orgChart.data, axis, settledRange.startIndex, settledRange.endIndex);
+    return window ? axis.slice(window.start, window.end + 1) : [];
+  }, [axis, orgChart.data, settledRange]);
+  const cardsZoomed = visibleAxis !== axis;
+  const handleBrush = useCallback(({ startIndex, endIndex }: { startIndex: number; endIndex: number }) => {
+    if (startIndex === 0 && endIndex === lastChartIndex) {
+      resetZoom();
+      return;
+    }
+    setSelection({ key: brushKey, startIndex, endIndex });
+  }, [brushKey, lastChartIndex, resetZoom]);
 
   /**
    * Weeks the card totals cover. Zoomed per day, these are the weeks the visible
@@ -573,9 +650,9 @@ export function Contributors() {
    */
   const visibleWeeks = useMemo(() => {
     if (!daily) return visibleAxis;
-    if (!zoomed) return axisWeeks;
+    if (!cardsZoomed) return axisWeeks;
     return [...new Set(visibleAxis.map((day) => weekStart(day * 1000)))];
-  }, [daily, zoomed, visibleAxis, axisWeeks]);
+  }, [daily, cardsZoomed, visibleAxis, axisWeeks]);
 
   /**
    * login -> week -> row. Built from the query result alone so that brushing does
@@ -656,91 +733,6 @@ export function Contributors() {
   }, [byLogin, meta.data, visibleWeeks, fullAxisWeeks, fullAxis, xAxisWindow, metric, daily, dailyByLoginMap, visibleAxis, prOnly]);
 
   /**
-   * The org-wide chart, split by contributor or repository.
-   *
-   * Both are derived from data already loaded for the cards where possible — the
-   * contributor split reuses `perLogin` rather than issuing a second query.
-   */
-  const orgStack = useMemo(() => {
-    const stackWeeks = xAxisWindow ? fullAxis : visibleAxis;
-    if (breakdown === "contributor") {
-      return buildStacks({
-        rows: (daily ? dailyByLogin.data : perLogin.data) ?? [],
-        weeks: stackWeeks,
-        weekOf: (r) => r.week,
-        keyOf: (r) => r.login.toLowerCase(),
-        labelOf: (r) => r.login,
-        valueOf: (r) => metricValue(r, metric),
-        rankBy: signedMetric ? Math.abs : undefined,
-        maxSeries,
-      });
-    }
-    if (breakdown === "repository") {
-      return buildStacks({
-        rows: (daily ? dailyByRepo.data : byRepoWeekly.data) ?? [],
-        weeks: stackWeeks,
-        weekOf: (r) => r.week,
-        keyOf: (r) => String(r.repo_id),
-        labelOf: (r) => r.full_name.split("/").pop() ?? r.full_name,
-        valueOf: (r) => metricValue(r, metric),
-        rankBy: signedMetric ? Math.abs : undefined,
-        maxSeries,
-      });
-    }
-    return null;
-  }, [
-    breakdown,
-    daily,
-    perLogin.data,
-    dailyByLogin.data,
-    byRepoWeekly.data,
-    dailyByRepo.data,
-    visibleAxis,
-    fullAxis,
-    xAxisWindow,
-    metric,
-    signedMetric,
-    maxSeries,
-  ]);
-
-  /**
-   * One dataset for the org chart whichever view is selected: the breakdown when
-   * there is one, otherwise a single total series. Rolled up and accumulated last,
-   * so those two controls compose with every breakdown rather than each view
-   * needing its own path.
-   */
-  const orgChart = useMemo(() => {
-    const series = orgStack
-      ? orgStack.series.map((sr) => ({ key: sr.key, label: sr.label, slot: sr.slot }))
-      : [{ key: "total", label: metricLabel(metric), slot: 0 }];
-
-    const base: Array<Record<string, number>> = orgStack
-      ? orgStack.data
-      : masterSeries.map((d) => ({ week: d.week, total: d.value }));
-
-    const keys = series.map((sr) => sr.key);
-    const rolled = rollUp(base, keys, granularity);
-    const computed = cumulative ? toCumulative(rolled, keys) : rolled;
-    const data = xAxisWindow
-      ? sliceAxisRows(computed, xAxisWindow.fromMs, xAxisWindow.toMs, granularity)
-      : computed;
-    return { series, data };
-  }, [orgStack, masterSeries, metric, granularity, cumulative, xAxisWindow]);
-
-  /**
-   * The brush reports positions in the buckets the chart drew, which match the
-   * axis only in the per-week and per-day views, so the window is resolved by time
-   * rather than by index — see `weekWindow`.
-   */
-  const handleBrush = useCallback(
-    (startIndex: number, endIndex: number) => {
-      const window = weekWindow(orgChart.data, axis, startIndex, endIndex);
-      if (window) setPendingBrush(window);
-    },
-    [orgChart.data, axis],
-  );
-
-  /**
    * Keep the legend selection to series that still exist.
    *
    * A selection is a set of keys, and every control on the page can change which
@@ -817,15 +809,14 @@ export function Contributors() {
   }, [cardSplit, daily, cardRepoWeekly.data, dailyCardRepo.data, visibleAxis, fullAxis, xAxisWindow, metric, signedMetric, maxSeries]);
 
   const cardAxisWindow = useMemo(() => {
-    if (!xAxisWindow) return null;
-    if (zoomed && visibleAxis.length > 0) {
-      return {
-        fromMs: visibleAxis[0] * 1000,
-        toMs: (visibleAxis[visibleAxis.length - 1] + bucketStep) * 1000 - 1,
-      };
-    }
-    return xAxisWindow;
-  }, [xAxisWindow, zoomed, visibleAxis, bucketStep]);
+    if (!xAxisWindow || !settledRange) return xAxisWindow;
+    const start = orgChart.data[settledRange.startIndex].week;
+    const end = orgChart.data[settledRange.endIndex].week;
+    return {
+      fromMs: Math.max(start * 1000, xAxisWindow.fromMs),
+      toMs: Math.min(bucketNextStart(end, granularity) * 1000 - 1, xAxisWindow.toMs),
+    };
+  }, [xAxisWindow, orgChart.data, settledRange, granularity]);
 
   /**
    * Every visible card's chart, plus the bounds that fit all of them.
@@ -999,6 +990,10 @@ export function Contributors() {
     </FilterPopover>
   );
 
+  const tableRows = useMemo(() => {
+    const buckets = new Set(visibleAxis);
+    return masterSeries.filter((row) => buckets.has(row.week) && row.value !== 0);
+  }, [masterSeries, visibleAxis]);
   const grandTotal = cards.reduce((a, c) => a + c[metric], 0);
   const valueLabel = metricLabel(metric).toLowerCase();
   const loading =
@@ -1062,9 +1057,9 @@ export function Contributors() {
             dailyMissing
               ? "No daily commits cached yet — sync Daily commits to fill this in"
               : zoomed
-                ? `${readingLabel} from ${formatDate(visibleAxis[0] * 1000)} to ${formatDate(
-                    bucketEnd(visibleAxis[visibleAxis.length - 1]),
-                  )} — drag the handles below to change the window`
+                ? `${readingLabel} · ${bucketLabel(orgChart.data[brushRange.startIndex].week, granularity)} to ${bucketLabel(
+                    orgChart.data[brushRange.endIndex].week, granularity,
+                  )}`
                 : xAxisWindow
                   ? `${readingLabel} (all-time calculation, x-axis ${formatDate(xAxisWindow.fromMs)} to ${formatDate(xAxisWindow.toMs)})`
                   : `${readingLabel} from ${formatDate(scope.range.fromWeek * 1000)} to ${formatDate(
@@ -1152,10 +1147,7 @@ export function Contributors() {
               {zoomed ? (
                 <Button
                   variant="ghost"
-                  onClick={() => {
-                    setBrush(null);
-                    setPendingBrush(null);
-                  }}
+                  onClick={resetZoom}
                   title="Show the whole period again"
                 >
                   Reset zoom
@@ -1168,10 +1160,7 @@ export function Contributors() {
           }
           table={
             <DataTable
-              rows={
-                // Empty weeks are dropped, but a negative net week is not empty.
-                visibleMasterSeries.filter((d) => d.value !== 0)
-              }
+              rows={tableRows}
               maxHeight={320}
               rowKey={(r) => r.week}
               initialSort={{ key: "week", dir: "desc" }}
@@ -1197,6 +1186,7 @@ export function Contributors() {
             data={orgChart.data}
             series={orgChart.series}
             shape={shape}
+            stepped={stepped}
             stackMode={stackMode}
             values={valueMode}
             height={260}
@@ -1204,8 +1194,9 @@ export function Contributors() {
             labelOf={(week) => bucketLabel(week, granularity)}
             activeKeys={activeKeys}
             onToggleKey={toggleKey}
-            withBrush
-            onBrushChange={(r) => handleBrush(r.startIndex, r.endIndex)}
+            withBrush={lastChartIndex > 0}
+            brushRange={brushRange}
+            onBrushChange={handleBrush}
             yFit={yAxis === "fit"}
             hideOther={hideOther}
           />
@@ -1222,10 +1213,10 @@ export function Contributors() {
             <div className="flex flex-wrap items-center justify-between gap-3">
               <p className="text-[12px] text-ink-secondary">
                 {xAxisWindow
-                  ? zoomed
+                  ? cardsZoomed
                     ? "Cards show all-time totals; charts zoomed to the brushed x-axis."
                     : "Cards show all-time totals; x-axis filtered to the selected period."
-                  : zoomed
+                  : cardsZoomed
                     ? daily && !prOnly
                       ? `Cards chart the selected ${full(visibleAxis.length)} day${
                           visibleAxis.length === 1 ? "" : "s"
@@ -1281,7 +1272,7 @@ export function Contributors() {
                   yMax={sharedScale ? cardCharts.ceiling : undefined}
                   yMin={sharedScale ? cardCharts.floor : undefined}
                   repoCount={repos.length}
-                  view={{ shape, stackMode, valueMode, granularity, yFit: yAxis === "fit" && !sharedScale, hideOther }}
+                  view={{ shape, stepped, stackMode, valueMode, granularity, yFit: yAxis === "fit" && !sharedScale, hideOther }}
                   controls={cardControls}
                   showNumbers={showNumbers && !prOnly}
                   showLines={!prOnly}
@@ -1398,6 +1389,7 @@ function ContributorCardView({
   /** The shared timeline view, so cards and the org chart never disagree. */
   view: {
     shape: TimelineShape;
+    stepped: boolean;
     stackMode: StackMode;
     valueMode: ValueMode;
     granularity: Granularity;
@@ -1492,6 +1484,7 @@ function ContributorCardView({
         data={chart.data}
         series={chart.series}
         shape={view.shape}
+        stepped={view.stepped}
         stackMode={view.stackMode}
         values={view.valueMode}
         height={96}

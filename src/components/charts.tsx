@@ -267,6 +267,7 @@ export function TimelineArea({
   series,
   height = 260,
   shape = "area",
+  stepped = false,
   stackMode = "stacked",
   values = "total",
   valueLabel,
@@ -274,6 +275,7 @@ export function TimelineArea({
   activeKeys,
   onToggleKey,
   withBrush = false,
+  brushRange,
   onBrushChange,
   yMax,
   yMin = 0,
@@ -285,6 +287,8 @@ export function TimelineArea({
   series: StackSeriesSpec[];
   height?: number;
   shape?: TimelineShape;
+  /** Hold each value until the next bucket starts. Applies to lines and areas. */
+  stepped?: boolean;
   /** Off for dense histories: animating thousands of marks delays every control change. */
   animate?: boolean;
   /**
@@ -316,6 +320,7 @@ export function TimelineArea({
   activeKeys?: Set<string>;
   onToggleKey?: (key: string) => void;
   withBrush?: boolean;
+  brushRange?: { startIndex: number; endIndex: number };
   onBrushChange?: (range: { startIndex: number; endIndex: number }) => void;
   /**
    * Shared upper bound across a set of small multiples. Without it each chart
@@ -328,7 +333,8 @@ export function TimelineArea({
   const palette = useVizPalette();
   const h = useHeight(height);
   const tick = weekTickFormatter(data.map((d) => d.week));
-  const geom = barGeometry(data.length, BAR_RADIUS);
+  const visibleCount = brushRange ? brushRange.endIndex - brushRange.startIndex + 1 : data.length;
+  const geom = barGeometry(visibleCount, BAR_RADIUS);
   const stacked = stackMode === "stacked";
   const normalised = values === "share";
   /* Shares are computed rather than left to `stackOffset="expand"` (see toShares),
@@ -373,17 +379,20 @@ export function TimelineArea({
   );
 
   if (data.length === 0 || series.length === 0) return <NoData height={h} />;
+  const visible = brushRange && visibleCount < plotted.length
+    ? plotted.slice(brushRange.startIndex, brushRange.endIndex + 1)
+    : plotted;
   /* Room under the baseline only when something goes there, so a share chart of
      commits still fills the plot rather than giving half of it to an empty half. */
   const shareFloor =
-    normalised && plotted.some((row) => colored.some((s) => (row[s.key] ?? 0) < 0)) ? -1 : 0;
+    normalised && visible.some((row) => colored.some((s) => (row[s.key] ?? 0) < 0)) ? -1 : 0;
   /* The tooltip always reports the real numbers, so it reads off the untouched
      rows rather than whatever was plotted. */
   const rawByWeek =
     plotted === data ? null : new Map(data.map((row) => [row.week, row] as const));
   // Fitted to every series, not just the highlighted ones: highlighting only dims
   // the rest, so the axis must stay put for them to keep their place.
-  const fit = yFit ? fitAxis(plotted, drawn.map((s) => s.key), stacked && shape !== "line", normalised) : null;
+  const fit = yFit ? fitAxis(visible, drawn.map((s) => s.key), stacked && shape !== "line", normalised) : null;
 
   const axes = (
     <>
@@ -456,6 +465,8 @@ export function TimelineArea({
   const brush = withBrush ? (
     <Brush
       dataKey="week"
+      startIndex={brushRange?.startIndex}
+      endIndex={brushRange?.endIndex}
       height={28}
       travellerWidth={8}
       stroke={palette.baseline}
@@ -505,7 +516,7 @@ export function TimelineArea({
             {drawn.map((s) => (
               <Line
                 key={s.key}
-                type="monotone"
+                type={stepped ? "stepAfter" : "monotone"}
                 dataKey={s.key}
                 stroke={s.color}
                 strokeOpacity={dim(s.key)}
@@ -529,7 +540,7 @@ export function TimelineArea({
             {drawn.map((s) => (
               <Area
                 key={s.key}
-                type="monotone"
+                type={stepped ? "stepAfter" : "monotone"}
                 dataKey={s.key}
                 stackId={stacked ? "stack" : undefined}
                 stroke={s.color}
